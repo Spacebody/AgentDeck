@@ -27,7 +27,7 @@ AgentDeck tucks Claude Code's and Codex's **quota, sessions, and usage** into on
 
 - **Both agents, one place** — Claude Code and Codex quota / sessions / usage in a single panel; no flipping between tools
 - **Zero deps, natively compiled** — no Node, no Electron, no bundler; `swiftc` builds a real native app you can run immediately
-- **Local-only privacy** — everything is processed on your machine; the single outbound request uses your own credentials to read your own quota. No telemetry, no upload
+- **Local-only privacy** — everything is processed on your machine; just two outbound requests: your own credentials reading your own quota, and an optional update check. No telemetry, no upload
 - **System-grade polish** — continuous-curvature corners, glass material, a desktop widget — built to the look of native macOS widgets
 - **Multilingual out of the box** — Simplified Chinese / English / 日本語, follows the system, switch instantly in Settings
 
@@ -120,7 +120,8 @@ Everything is **processed locally only** — no telemetry, no reporting:
 
 | Data | Source | Notes |
 |------|--------|-------|
-| Claude quota | Claude Code OAuth credential in Keychain → `api.anthropic.com/api/oauth/usage` | The app's only outbound request — your own credentials reading your own quota |
+| Claude quota | Claude Code OAuth credential in Keychain → `api.anthropic.com/api/oauth/usage` | Your own credentials reading your own quota |
+| Update check | `agentdeck.pages.dev/version.json` (static manifest, 6h cache) | Version string comparison only — no credentials, no machine info; can be disabled in Settings |
 | Claude usage / sessions | parses local `~/.claude/projects/**/*.jsonl` | token stats, cost estimates, session list |
 | Codex quota / usage / sessions | parses local `~/.codex/sessions` rollout files | same as above |
 | Done events | Claude Stop hook / Codex notify callback (see optional config) | done alerts and the event stream |

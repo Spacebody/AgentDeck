@@ -43,6 +43,10 @@ except OSError:
 SAMPLE_INTERVAL = 180          # 额度采样周期（秒）
 HISTORY_KEEP = 7 * 86400       # 历史保留 7 天
 
+# 更新检测：向自托管的 Cloudflare Pages 清单查最新版本号（不带任何凭据；可在设置中关闭）。
+# 部署后把域名改成你的 Pages 项目地址即可。
+UPDATE_MANIFEST_URL = "https://agentdeck.pages.dev/version.json"
+
 # 模型单价 (USD / MTok): (input, output, cache_read, cache_write)
 MODEL_PRICES = {   # $/Mtok: input, output, cache_read, cache_write_5m, cache_write_1h
     # Opus 4.5 起官方降价 3 倍；按版本前缀优先匹配（dict 有序）
@@ -90,6 +94,7 @@ DEFAULT_SETTINGS = {
     "terminal": "auto",        # auto | iterm | terminal | copy
     "language": "auto",        # 界面语言：auto（跟随系统）| zh-CN | en | ja
     "keep_awake": True,        # 有活跃会话时阻止系统休眠（避免会话因休眠/断网中断）
+    "update_check": True,      # 检查新版本（向自托管 Pages 清单查版本号，不带凭据）
 }
 # 数值项合法范围（自定义输入钳制）
 SETTING_RANGES = {
@@ -231,6 +236,34 @@ def _effective_locale():
 def _settings_response():
     """对外的设置响应：持久化设置 + 计算出的有效 locale（不持久化）。"""
     return {**get_settings(), "locale": _effective_locale()}
+
+
+# ----------------------------------------------------------------- 更新检测
+def _ver_key(v):
+    """版本串 → 可比较元组（取前三段数字；解析不出按 0）。"""
+    nums = re.findall(r"\d+", str(v))[:3]
+    return tuple(int(n) for n in (nums or ["0"]))
+
+
+def api_update():
+    """查自托管清单的最新版本（6 小时缓存；设置关闭时不发任何请求）。"""
+    if not get_settings().get("update_check", True):
+        return {"current": VERSION, "available": False, "disabled": True}
+
+    def fetch():
+        req = urllib.request.Request(UPDATE_MANIFEST_URL, headers={
+            "User-Agent": f"agentdeck/{VERSION}"})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            return json.loads(resp.read().decode())
+    try:
+        m = cached("update_manifest", 6 * 3600, fetch)
+    except Exception:
+        return {"current": VERSION, "available": False}
+    latest = str(m.get("version") or "")
+    return {"current": VERSION, "latest": latest,
+            "available": bool(latest) and _ver_key(latest) > _ver_key(VERSION),
+            "url": str(m.get("url") or ""),
+            "notes_url": str(m.get("notes_url") or "")}
 
 
 # ---------------------------------------------------------------- Claude 额度
@@ -1755,6 +1788,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, api_history(query))
             elif path == "/api/settings":
                 self._send(200, _settings_response())
+            elif path == "/api/update":
+                self._send(200, api_update())
             elif path == "/api/terminals":
                 self._send(200, api_terminals())
             elif path == "/api/events":

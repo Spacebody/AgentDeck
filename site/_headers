@@ -1,0 +1,7 @@
+# Cloudflare Pages 响应头：更新清单要新鲜，静态资源可长缓存
+/version.json
+  Cache-Control: public, max-age=300
+  Access-Control-Allow-Origin: *
+
+/assets/*
+  Cache-Control: public, max-age=86400

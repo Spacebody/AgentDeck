@@ -154,7 +154,15 @@ final class ControlBridge: NSObject, WKScriptMessageHandler {
     func userContentController(_ controller: WKUserContentController,
                                didReceive message: WKScriptMessage) {
         let delegate = NSApp.delegate as? AppDelegate
-        switch message.body as? String {
+        guard let body = message.body as? String else { return }
+        if body.hasPrefix("open:") {   // 打开外部链接（更新下载页等）→ 默认浏览器
+            if let url = URL(string: String(body.dropFirst(5))),
+               url.scheme == "https" || url.scheme == "http" {
+                DispatchQueue.main.async { NSWorkspace.shared.open(url) }
+            }
+            return
+        }
+        switch body {
         case "quit":
             DispatchQueue.main.async { NSApp.terminate(nil) }
         case "panel":   // 桌面小组件点击 → 打开主面板

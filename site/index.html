@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AgentDeck — Claude Code & Codex 菜单栏监控</title>
+<meta name="description" id="metadesc" content="在 macOS 菜单栏盯住 Claude Code 与 Codex 的额度、会话与用量。零第三方依赖，数据纯本地。">
+<link rel="canonical" href="https://agentdeck.pages.dev/">
+<meta property="og:title" content="AgentDeck">
+<meta property="og:description" content="Claude Code & Codex quota, sessions and usage — in your macOS menu bar. Zero dependencies, fully local.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://agentdeck.pages.dev/">
+<meta property="og:image" content="https://agentdeck.pages.dev/assets/og-card.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" type="image/png" href="assets/favicon.png">
+<style>
+:root{
+  --claude:#e8744f; --codex:#3aa79c;
+  --bg:#0b0d12; --bg2:#10131a;
+  --tx:rgba(235,238,245,.96); --tx2:rgba(235,238,245,.64); --tx3:rgba(235,238,245,.38);
+  --glass:rgba(255,255,255,.055); --glass2:rgba(255,255,255,.085);
+  --line:rgba(255,255,255,.09); --line2:rgba(255,255,255,.16);
+  --r-lg:28px; --r-md:20px; --r-sm:13px;
+  --font:-apple-system,BlinkMacSystemFont,"SF Pro Display","PingFang SC","Hiragino Sans","Noto Sans CJK SC",sans-serif;
+  --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,monospace;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+a:focus-visible,button:focus-visible{outline:2px solid var(--codex);outline-offset:3px;border-radius:6px}
+html{scroll-behavior:smooth}
+body{
+  font-family:var(--font); background:var(--bg); color:var(--tx);
+  -webkit-font-smoothing:antialiased; overflow-x:hidden; line-height:1.6;
+}
+::selection{background:rgba(232,116,79,.35)}
+
+/* ───── 极光背景 ───── */
+.aurora{position:fixed;inset:0;z-index:-2;overflow:hidden;background:
+  radial-gradient(ellipse 110% 70% at 70% -10%,#141a26 0%,var(--bg) 55%)}
+.aurora i{position:absolute;border-radius:50%;filter:blur(110px);opacity:.5;will-change:transform}
+.aurora i:nth-child(1){width:62vw;height:62vw;left:-18vw;top:-24vw;
+  background:radial-gradient(circle,rgba(232,116,79,.55),transparent 65%);
+  animation:drift1 26s ease-in-out infinite alternate}
+.aurora i:nth-child(2){width:55vw;height:55vw;right:-20vw;top:4vw;
+  background:radial-gradient(circle,rgba(58,167,156,.5),transparent 65%);
+  animation:drift2 31s ease-in-out infinite alternate}
+.aurora i:nth-child(3){width:48vw;height:48vw;left:28vw;top:34vw;
+  background:radial-gradient(circle,rgba(120,98,255,.28),transparent 65%);
+  animation:drift3 38s ease-in-out infinite alternate}
+@keyframes drift1{to{transform:translate(9vw,7vw) scale(1.12)}}
+@keyframes drift2{to{transform:translate(-7vw,10vw) scale(.92)}}
+@keyframes drift3{to{transform:translate(-10vw,-7vw) scale(1.08)}}
+/* 噪点，压制 banding */
+body::after{content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;opacity:.05;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)' opacity='.7'/%3E%3C/svg%3E")}
+@media (prefers-reduced-motion:reduce){.aurora i{animation:none}}
+
+/* ───── 布局 ───── */
+.wrap{max-width:1080px;margin:0 auto;padding:0 28px}
+
+/* ───── 导航 ───── */
+nav{position:fixed;top:18px;left:50%;transform:translateX(-50%);z-index:50;
+  display:flex;align-items:center;gap:18px;padding:10px 14px 10px 18px;
+  background:rgba(16,19,26,.62);backdrop-filter:blur(24px) saturate(1.5);
+  -webkit-backdrop-filter:blur(24px) saturate(1.5);
+  border:1px solid var(--line);border-radius:999px;
+  box-shadow:0 12px 40px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.08)}
+.logo{display:flex;align-items:center;gap:10px;font-weight:700;font-size:15px;
+  letter-spacing:.02em;text-decoration:none;color:var(--tx)}
+.logo img{display:block}
+.lang{display:flex;gap:2px;background:rgba(255,255,255,.06);border-radius:999px;padding:3px}
+.lang button{border:0;background:transparent;color:var(--tx2);font:inherit;font-size:12.5px;
+  padding:4px 12px;border-radius:999px;cursor:pointer;transition:.2s}
+.lang button.on{background:rgba(255,255,255,.14);color:var(--tx)}
+.nav-gh{display:flex;align-items:center;color:var(--tx2);transition:.2s}
+.nav-gh:hover{color:var(--tx)}
+
+/* ───── Hero ───── */
+.hero{display:grid;grid-template-columns:1.15fr .85fr;gap:56px;align-items:center;
+  padding:140px 0 56px;min-height:78vh}
+.hero h1{font-size:clamp(38px,5.2vw,58px);line-height:1.12;font-weight:800;
+  letter-spacing:-.02em;margin-bottom:22px}
+.hero h1 .grad{background:linear-gradient(96deg,var(--claude) 10%,#f0a163 45%,var(--codex) 90%);
+  -webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+.hero p.sub{font-size:17.5px;color:var(--tx2);max-width:46ch;margin-bottom:34px}
+.cta{display:flex;gap:14px;flex-wrap:wrap;align-items:center}
+.btn{display:inline-flex;align-items:center;gap:9px;padding:13px 26px;border-radius:999px;
+  font-size:15px;font-weight:600;text-decoration:none;transition:.25s;cursor:pointer;border:0;font-family:inherit}
+.btn-dl{color:#fff;background:linear-gradient(135deg,#ee8559,#d95f3b 60%,#c4502f);
+  box-shadow:0 8px 28px rgba(232,116,79,.36), inset 0 1px 0 rgba(255,255,255,.28)}
+.btn-dl:hover{transform:translateY(-2px);box-shadow:0 14px 36px rgba(232,116,79,.48), inset 0 1px 0 rgba(255,255,255,.28)}
+.btn-gh{color:var(--tx);background:var(--glass);border:1px solid var(--line2);
+  backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px)}
+.btn-gh:hover{background:var(--glass2);transform:translateY(-2px)}
+.ver-pill{font-size:12.5px;color:var(--tx3);font-family:var(--mono)}
+.meta-badges{display:flex;gap:18px;margin-top:30px;flex-wrap:wrap}
+.meta-badges span{font-size:12.5px;color:var(--tx3);display:flex;align-items:center;gap:6px}
+.meta-badges b{color:var(--tx2);font-weight:600}
+
+/* hero 右侧：玻璃机框 + 动图 */
+.shot{position:relative;justify-self:center}
+.shot::before{content:"";position:absolute;inset:-12%;z-index:-1;border-radius:50%;
+  background:radial-gradient(circle,rgba(232,116,79,.22),rgba(58,167,156,.14) 50%,transparent 72%);
+  filter:blur(30px)}
+.shot .frame{padding:12px;border-radius:var(--r-lg);
+  background:linear-gradient(180deg,rgba(255,255,255,.10),rgba(255,255,255,.04));
+  border:1px solid var(--line2);
+  box-shadow:0 30px 80px rgba(0,0,0,.5), inset 0 1px 0 rgba(255,255,255,.14);
+  backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);
+  animation:float 7s ease-in-out infinite}
+.shot img{display:block;width:min(330px,72vw);border-radius:calc(var(--r-lg) - 10px)}
+@keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-12px)}}
+@media (prefers-reduced-motion:reduce){.shot .frame{animation:none}}
+
+/* ───── 区块通用 ───── */
+section{padding:84px 0}
+.sec-tag{display:inline-block;font-size:12px;font-weight:700;letter-spacing:.14em;
+  text-transform:uppercase;color:var(--codex);margin-bottom:14px}
+h2{font-size:clamp(26px,3.4vw,36px);font-weight:800;letter-spacing:-.01em;margin-bottom:14px}
+.sec-sub{color:var(--tx2);max-width:56ch;margin-bottom:44px}
+
+/* ───── 特性网格 ───── */
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:18px}
+.card{padding:26px 24px;border-radius:var(--r-md);background:var(--glass);
+  border:1px solid var(--line);position:relative;overflow:hidden;
+  transition:transform .3s,background .3s,border-color .3s}
+.card::before{content:"";position:absolute;inset:0 0 auto;height:1px;
+  background:linear-gradient(90deg,transparent,rgba(255,255,255,.22),transparent)}
+.card:hover{transform:translateY(-4px);background:var(--glass2);border-color:var(--line2)}
+.card .ico{width:42px;height:42px;border-radius:12px;display:flex;align-items:center;
+  justify-content:center;margin-bottom:16px;color:#f0a163;
+  background:linear-gradient(135deg,rgba(232,116,79,.18),rgba(58,167,156,.14));
+  border:1px solid var(--line)}
+.card:nth-child(even) .ico{color:#5fc4b8}
+.card h3{font-size:16.5px;font-weight:700;margin-bottom:8px}
+.card p{font-size:13.5px;color:var(--tx2);line-height:1.65}
+
+/* ───── 隐私三栏 ───── */
+.priv{display:grid;grid-template-columns:repeat(3,1fr);gap:18px;text-align:center}
+.priv .cell{padding:34px 20px;border-radius:var(--r-md);background:var(--glass);border:1px solid var(--line)}
+.priv .num{font-size:44px;font-weight:800;letter-spacing:-.02em;
+  background:linear-gradient(120deg,var(--claude),var(--codex));
+  -webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}
+.priv .cap{font-size:14px;font-weight:600;margin-top:6px}
+.priv .det{font-size:12.5px;color:var(--tx3);margin-top:4px}
+
+/* ───── 安装终端 ───── */
+.term{border-radius:var(--r-md);overflow:hidden;border:1px solid var(--line2);
+  background:rgba(8,10,14,.82);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);
+  box-shadow:0 24px 60px rgba(0,0,0,.4)}
+.term-bar{display:flex;align-items:center;gap:8px;padding:13px 16px;
+  background:rgba(255,255,255,.045);border-bottom:1px solid var(--line)}
+.term-bar i{width:12px;height:12px;border-radius:50%;display:block}
+.term-bar i:nth-child(1){background:#ff5f57}.term-bar i:nth-child(2){background:#febc2e}
+.term-bar i:nth-child(3){background:#28c840}
+.term-bar em{font-style:normal;font-size:12px;color:var(--tx3);margin-left:8px;font-family:var(--mono)}
+.term-body{position:relative;padding:24px 22px;font-family:var(--mono);font-size:13.5px;line-height:2.1}
+.term-body .ln::before{content:"$ ";color:var(--codex)}
+.term-body .cmt{color:var(--tx3)}
+.copy{position:absolute;top:16px;right:16px;border:1px solid var(--line2);border-radius:9px;
+  background:var(--glass);color:var(--tx2);font:600 12px var(--font);padding:7px 14px;
+  cursor:pointer;transition:.2s}
+.copy:hover{background:var(--glass2);color:var(--tx)}
+.req-note{margin-top:16px;font-size:13px;color:var(--tx3)}
+.req-note a{color:var(--tx2)}
+
+/* ───── 页脚 ───── */
+footer{padding:48px 0 56px;border-top:1px solid var(--line);margin-top:40px}
+.foot{display:flex;justify-content:space-between;align-items:center;gap:18px;flex-wrap:wrap}
+.foot .l{display:flex;align-items:center;gap:10px;color:var(--tx3);font-size:13px}
+.foot .r{display:flex;gap:22px}
+.foot a{color:var(--tx2);font-size:13px;text-decoration:none;transition:.2s}
+.foot a:hover{color:var(--tx)}
+
+/* ───── 进场动画 ───── */
+.rv{opacity:0;transform:translateY(22px);transition:opacity .7s ease,transform .7s ease}
+.rv.in{opacity:1;transform:none}
+.hero .rv:nth-child(1){transition-delay:.05s}.hero .rv:nth-child(2){transition-delay:.15s}
+.hero .rv:nth-child(3){transition-delay:.25s}.hero .rv:nth-child(4){transition-delay:.35s}
+
+/* ───── 响应式 ───── */
+@media (max-width:900px){
+  .hero{grid-template-columns:1fr;gap:46px;padding-top:120px;text-align:center}
+  .hero p.sub{margin-inline:auto}.cta{justify-content:center}.meta-badges{justify-content:center}
+  .grid{grid-template-columns:1fr 1fr}
+}
+@media (max-width:600px){
+  .grid,.priv{grid-template-columns:1fr}
+  nav{gap:10px;padding:8px 10px 8px 14px}
+  .logo span{display:none}
+}
+</style>
+<noscript><style>.rv{opacity:1;transform:none}</style></noscript>
+</head>
+<body>
+<div class="aurora"><i></i><i></i><i></i></div>
+
+<nav>
+  <a class="logo" href="./">
+    <img src="assets/icon.png" alt="" width="24" height="24">
+    <span>AgentDeck</span>
+  </a>
+  <div class="lang" id="lang" role="group" aria-label="Language">
+    <button data-l="zh-CN" aria-label="切换到简体中文">中</button><button data-l="en" aria-label="Switch to English">EN</button><button data-l="ja" aria-label="日本語に切り替え">日</button>
+  </div>
+  <a class="nav-gh" href="https://github.com/Spacebody/AgentDeck" aria-label="GitHub">
+    <svg width="20" height="20" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+  </a>
+</nav>
+
+<header class="hero wrap">
+  <div>
+    <h1 class="rv" data-i18n-html="hero.h1">在菜单栏盯住<br><span class="grad">Claude Code 与 Codex</span></h1>
+    <p class="sub rv" data-i18n="hero.sub">额度、会话、用量收进一个原生玻璃小窗：窗口快满了先告警，会话一键跳回所在终端，今天烧了多少 token 一眼看清。</p>
+    <div class="cta rv">
+      <a class="btn btn-dl" id="dl" href="https://github.com/Spacebody/AgentDeck/releases/latest">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
+        <span data-i18n="hero.download">下载 App</span>
+      </a>
+      <a class="btn btn-gh" href="https://github.com/Spacebody/AgentDeck">GitHub</a>
+      <span class="ver-pill" id="ver"></span>
+    </div>
+    <div class="meta-badges rv">
+      <span data-i18n-html="badge.os"><b>macOS 13+</b></span>
+      <span data-i18n-html="badge.dep"><b>零依赖</b> · 无 Electron</span>
+      <span data-i18n-html="badge.tele"><b>零遥测</b> · 数据纯本地</span>
+      <span data-i18n-html="badge.lang"><b>中 · EN · 日</b>三语</span>
+    </div>
+  </div>
+  <div class="shot rv">
+    <div class="frame"><img src="assets/i18n-demo.gif" width="330" height="541" fetchpriority="high"
+      alt="AgentDeck 菜单栏面板：额度环、今日用量、活跃会话与 24 小时趋势（中 / EN / 日轮播）"></div>
+  </div>
+</header>
+
+<section class="wrap" id="features">
+  <span class="sec-tag" data-i18n="feat.tag">特性</span>
+  <h2 class="rv" data-i18n="feat.h2">一个面板，看住两个 Agent</h2>
+  <p class="sec-sub rv" data-i18n="feat.sub">纯标准库 Python daemon + 单文件 Swift 壳 + 单文件 HTML 界面，没有 Node、没有 Electron、没有打包器。</p>
+  <div class="grid">
+    <div class="card rv"><div class="ico"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 3a9 9 0 1 0 9 9"/><path d="M12 7a5 5 0 1 0 5 5"/><circle cx="12" cy="12" r="1"/></svg></div><h3 data-i18n="f1.t">额度监控</h3><p data-i18n="f1.d">Claude 5h/7d 窗口与 Codex rate limits 实时聚合，菜单栏常显百分比，临界自动告警。</p></div>
+    <div class="card rv"><div class="ico"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="14" rx="2.5"/><path d="m8 9 2.5 2.5L8 14M13 14h3.5"/></svg></div><h3 data-i18n="f2.t">会话一键跳回</h3><p data-i18n="f2.d">自动识别会话所在终端（iTerm、Warp、Ghostty、VS Code 等任意终端），点一下直达现场。</p></div>
+    <div class="card rv"><div class="ico"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l5-6 4 3 6-8"/><path d="M3 21h18"/></svg></div><h3 data-i18n="f3.t">用量分析</h3><p data-i18n="f3.d">按模型 / 项目统计 token 与等值美元，24 小时曲线、今日摘要、7 天项目榜。</p></div>
+    <div class="card rv"><div class="ico"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M3.6 9h16.8M3.6 15h16.8M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18"/></svg></div><h3 data-i18n="f4.t">开箱多语言</h3><p data-i18n="f4.d">简体中文 / English / 日本語，默认跟随系统，设置内即时切换，三层界面文案统一。</p></div>
+    <div class="card rv"><div class="ico"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 4.5 13.5H11L9.5 22 18 10.5h-6.5z"/></svg></div><h3 data-i18n="f5.t">活跃保持唤醒</h3><p data-i18n="f5.d">检测到运行中的会话自动防休眠防断网，长任务不再因合盖断流，空闲即释放。</p></div>
+    <div class="card rv"><div class="ico"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="8" height="8" rx="2"/><rect x="13" y="3" width="8" height="8" rx="2"/><rect x="3" y="13" width="8" height="8" rx="2"/><rect x="13" y="13" width="8" height="8" rx="2"/></svg></div><h3 data-i18n="f6.t">桌面小组件</h3><p data-i18n="f6.d">桌面层玻璃小窗常驻额度概览，连续曲率圆角与渐变描边，对标系统小组件质感。</p></div>
+  </div>
+</section>
+
+<section class="wrap" id="privacy">
+  <span class="sec-tag" data-i18n="priv.tag">隐私</span>
+  <h2 class="rv" data-i18n="priv.h2">数据纯本地</h2>
+  <p class="sec-sub rv" data-i18n="priv.sub">全程本机处理，零遥测、零上报。出站请求只有两条，都可关。</p>
+  <div class="priv">
+    <div class="cell rv"><div class="num">0</div><div class="cap" data-i18n="p1.t">第三方依赖</div><div class="det" data-i18n="p1.d">无包管理器、无构建链、无运行时下载</div></div>
+    <div class="cell rv"><div class="num">2</div><div class="cap" data-i18n="p2.t">出站请求</div><div class="det" data-i18n="p2.d">查你自己的额度 + 检查新版本（可关闭）</div></div>
+    <div class="cell rv"><div class="num">100%</div><div class="cap" data-i18n="p3.t">本地数据</div><div class="det" data-i18n="p3.d">历史与设置仅存于 ~/Library/Application Support</div></div>
+  </div>
+</section>
+
+<section class="wrap" id="install">
+  <span class="sec-tag" data-i18n="inst.tag">安装</span>
+  <h2 class="rv" data-i18n="inst.h2">一条命令装好</h2>
+  <p class="sec-sub rv" data-i18n="inst.sub">克隆即编译，swiftc 直出原生 App；也可以去 Releases 直接下 DMG。</p>
+  <div class="term rv">
+    <div class="term-bar"><i></i><i></i><i></i><em>zsh</em></div>
+    <div class="term-body">
+      <button class="copy" id="copy" data-i18n="inst.copy">复制</button>
+      <div class="ln" id="cmd">git clone https://github.com/Spacebody/AgentDeck.git &amp;&amp; cd AgentDeck &amp;&amp; ./build.sh install</div>
+      <div class="cmt" data-i18n="inst.note"># 装到 /Applications 并启动，仅需 Xcode Command Line Tools</div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap foot">
+    <div class="l">
+      <img src="assets/icon.png" alt="" width="18" height="18">
+      <span>AgentDeck · MIT License</span>
+    </div>
+    <div class="r">
+      <a href="https://github.com/Spacebody/AgentDeck" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://github.com/Spacebody/AgentDeck/blob/main/CHANGELOG.md" target="_blank" rel="noopener" data-i18n="foot.log">更新日志</a>
+      <a href="https://github.com/Spacebody/AgentDeck/issues" target="_blank" rel="noopener" data-i18n="foot.issue">反馈问题</a>
+    </div>
+  </div>
+</footer>
+
+<script>
+'use strict';
+const STR = {
+'zh-CN': {
+  'doc.title':'AgentDeck — Claude Code & Codex 菜单栏监控',
+  'doc.desc':'在 macOS 菜单栏盯住 Claude Code 与 Codex 的额度、会话与用量。零第三方依赖，数据纯本地。',
+  'hero.h1':'在菜单栏盯住<br><span class="grad">Claude Code 与 Codex</span>',
+  'hero.sub':'额度、会话、用量收进一个原生玻璃小窗：窗口快满了先告警，会话一键跳回所在终端，今天烧了多少 token 一眼看清。',
+  'hero.download':'下载 macOS 版',
+  'badge.os':'<b>macOS 13+</b>','badge.dep':'<b>零依赖</b> · 无 Electron',
+  'badge.tele':'<b>零遥测</b> · 数据纯本地','badge.lang':'<b>中 · EN · 日</b>三语',
+  'feat.tag':'特性','feat.h2':'一个面板，看住两个 Agent',
+  'feat.sub':'纯标准库 Python daemon + 单文件 Swift 壳 + 单文件 HTML 界面，没有 Node、没有 Electron、没有打包器。',
+  'f1.t':'额度监控','f1.d':'Claude 5h/7d 窗口与 Codex rate limits 实时聚合，菜单栏常显百分比，临界自动告警。',
+  'f2.t':'会话一键跳回','f2.d':'自动识别会话所在终端（iTerm、Warp、Ghostty、VS Code 等任意终端），点一下直达现场。',
+  'f3.t':'用量分析','f3.d':'按模型 / 项目统计 token 与等值美元，24 小时曲线、今日摘要、7 天项目榜。',
+  'f4.t':'开箱多语言','f4.d':'简体中文 / English / 日本語，默认跟随系统，设置内即时切换，三层界面文案统一。',
+  'f5.t':'活跃保持唤醒','f5.d':'检测到运行中的会话自动防休眠防断网，长任务不再因合盖断流，空闲即释放。',
+  'f6.t':'桌面小组件','f6.d':'桌面层玻璃小窗常驻额度概览，连续曲率圆角与渐变描边，对标系统小组件质感。',
+  'priv.tag':'隐私','priv.h2':'数据纯本地','priv.sub':'全程本机处理，零遥测、零上报。出站请求只有两条，都可关。',
+  'p1.t':'第三方依赖','p1.d':'无包管理器、无构建链、无运行时下载',
+  'p2.t':'出站请求','p2.d':'查你自己的额度 + 检查新版本（可关闭）',
+  'p3.t':'本地数据','p3.d':'历史与设置仅存于 ~/Library/Application Support',
+  'inst.tag':'安装','inst.h2':'一条命令装好','inst.sub':'克隆即编译，swiftc 直出原生 App；也可以去 Releases 直接下 DMG。',
+  'inst.copy':'复制','inst.copied':'已复制 ✓','inst.copyFail':'复制失败','inst.note':'# 装到 /Applications 并启动，仅需 Xcode Command Line Tools',
+  'foot.log':'更新日志','foot.issue':'反馈问题',
+},
+'en': {
+  'doc.title':'AgentDeck — Claude Code & Codex in your menu bar',
+  'doc.desc':'Quota, sessions and usage for Claude Code & Codex — in your macOS menu bar. Zero third-party dependencies, fully local data.',
+  'hero.h1':'Watch <span class="grad">Claude Code & Codex</span><br>from your menu bar',
+  'hero.sub':'Quota, sessions and usage in one native glass panel: get warned before a window fills up, jump back to any session’s terminal in one click, see today’s burn at a glance.',
+  'hero.download':'Download for macOS',
+  'badge.os':'<b>macOS 13+</b>','badge.dep':'<b>Zero deps</b> · no Electron',
+  'badge.tele':'<b>Zero telemetry</b> · local-only','badge.lang':'<b>中 · EN · 日</b> trilingual',
+  'feat.tag':'Features','feat.h2':'One panel, both agents covered',
+  'feat.sub':'Pure-stdlib Python daemon + single-file Swift shell + single-file HTML UI. No Node, no Electron, no bundler.',
+  'f1.t':'Quota monitoring','f1.d':'Claude 5h/7d windows and Codex rate limits aggregated live, percentage in the menu bar, alerts before you hit the ceiling.',
+  'f2.t':'Jump to session','f2.d':'Auto-detects the terminal hosting each session — iTerm, Warp, Ghostty, VS Code, anything — one click brings you back.',
+  'f3.t':'Usage analytics','f3.d':'Tokens and dollar equivalents by model and project, 24-hour curve, daily digest, 7-day project leaderboard.',
+  'f4.t':'Trilingual UI','f4.d':'简体中文 / English / 日本語 — follows the system by default, switches instantly in Settings across all three layers.',
+  'f5.t':'Keep-awake','f5.d':'Active sessions keep the Mac awake and online, so long runs survive a closed lid. Released as soon as work goes idle.',
+  'f6.t':'Desktop widget','f6.d':'A glass mini-window on the desktop with your quota overview — continuous-curvature corners, gradient rims, system-widget polish.',
+  'priv.tag':'Privacy','priv.h2':'Local by design','priv.sub':'Everything is processed on your machine. Zero telemetry. Exactly two outbound requests — both optional.',
+  'p1.t':'third-party deps','p1.d':'No package manager, no build chain, no runtime downloads',
+  'p2.t':'outbound requests','p2.d':'Your own quota check + update check (can be disabled)',
+  'p3.t':'local data','p3.d':'History and settings live only in ~/Library/Application Support',
+  'inst.tag':'Install','inst.h2':'One command and done','inst.sub':'Clone and compile — swiftc produces a real native app. Or grab the DMG from Releases.',
+  'inst.copy':'Copy','inst.copied':'Copied ✓','inst.copyFail':'Copy failed','inst.note':'# Installs to /Applications and launches. Just needs Xcode Command Line Tools.',
+  'foot.log':'Changelog','foot.issue':'Issues',
+},
+'ja': {
+  'doc.title':'AgentDeck — メニューバーで Claude Code & Codex を見守る',
+  'doc.desc':'Claude Code と Codex のクォータ・セッション・使用量を macOS メニューバーで。サードパーティ依存ゼロ、データは完全ローカル。',
+  'hero.h1':'メニューバーで<br><span class="grad">Claude Code と Codex</span> を見守る',
+  'hero.sub':'クォータ・セッション・使用量をネイティブなガラスパネルに集約。上限前に警告し、セッションの端末へワンクリックで復帰、今日のトークン消費も一目で。',
+  'hero.download':'macOS 版をダウンロード',
+  'badge.os':'<b>macOS 13+</b>','badge.dep':'<b>依存ゼロ</b> · Electron 不使用',
+  'badge.tele':'<b>テレメトリなし</b> · 完全ローカル','badge.lang':'<b>中 · EN · 日</b> 三言語',
+  'feat.tag':'機能','feat.h2':'ひとつのパネルで両エージェントを',
+  'feat.sub':'標準ライブラリのみの Python daemon + 単一ファイル Swift シェル + 単一ファイル HTML UI。Node も Electron もバンドラーも不要。',
+  'f1.t':'クォータ監視','f1.d':'Claude の 5h/7d ウィンドウと Codex のレート制限をリアルタイム集約。メニューバーに常時表示、上限前に通知。',
+  'f2.t':'セッションへ復帰','f2.d':'セッションのホスト端末を自動判別（iTerm・Warp・Ghostty・VS Code など何でも）。ワンクリックで現場へ。',
+  'f3.t':'使用量分析','f3.d':'モデル / プロジェクト別のトークンと金額換算、24 時間カーブ、本日のサマリー、7 日間ランキング。',
+  'f4.t':'三言語対応','f4.d':'簡体中文 / English / 日本語。既定でシステムに追従、設定から即時切替、三層の文言を統一。',
+  'f5.t':'スリープ防止','f5.d':'実行中のセッションを検知して自動でスリープ・切断を防止。長時間タスクも安心、アイドルで即解除。',
+  'f6.t':'デスクトップウィジェット','f6.d':'デスクトップ常駐のガラス小窓にクォータ概要。連続曲率の角丸とグラデーション縁取りで純正品質。',
+  'priv.tag':'プライバシー','priv.h2':'データは完全ローカル','priv.sub':'すべて手元の Mac で処理。テレメトリなし。外部リクエストは 2 本のみ、どちらも無効化可能。',
+  'p1.t':'サードパーティ依存','p1.d':'パッケージマネージャーもビルドチェーンも実行時ダウンロードもなし',
+  'p2.t':'外部リクエスト','p2.d':'自分のクォータ照会 + 更新チェック（オフ可）',
+  'p3.t':'ローカルデータ','p3.d':'履歴と設定は ~/Library/Application Support のみに保存',
+  'inst.tag':'インストール','inst.h2':'コマンド 1 行で完了','inst.sub':'クローンしてコンパイル、swiftc がネイティブアプリを直接生成。Releases から DMG も入手可。',
+  'inst.copy':'コピー','inst.copied':'コピー済み ✓','inst.copyFail':'コピー失敗','inst.note':'# /Applications にインストールして起動。Xcode Command Line Tools のみ必要。',
+  'foot.log':'更新履歴','foot.issue':'フィードバック',
+},
+};
+// ── 语言：localStorage 记忆 → 浏览器语言自动检测 ──
+function detectLang(){
+  const saved = localStorage.getItem('agentdeck-lang');
+  if (saved && STR[saved]) return saved;
+  const nav = (navigator.language || 'en').toLowerCase();
+  if (nav.startsWith('zh')) return 'zh-CN';
+  if (nav.startsWith('ja')) return 'ja';
+  return 'en';
+}
+let LANG = detectLang();
+function applyLang(l){
+  LANG = l; localStorage.setItem('agentdeck-lang', l);
+  document.documentElement.lang = l;
+  document.title = STR[l]['doc.title'];
+  document.getElementById('metadesc').content = STR[l]['doc.desc'];
+  document.querySelectorAll('[data-i18n]').forEach(el => {
+    const s = STR[l][el.dataset.i18n];
+    if (s != null) el.textContent = s;
+    else console.warn('i18n missing:', l, el.dataset.i18n);
+  });
+  document.querySelectorAll('[data-i18n-html]').forEach(el => {
+    const s = STR[l][el.dataset.i18nHtml];
+    if (s != null) el.innerHTML = s;
+    else console.warn('i18n missing:', l, el.dataset.i18nHtml);
+  });
+  document.querySelectorAll('#lang button').forEach(b => {
+    b.classList.toggle('on', b.dataset.l === l);
+    b.setAttribute('aria-pressed', b.dataset.l === l ? 'true' : 'false');
+  });
+}
+document.querySelectorAll('#lang button').forEach(b =>
+  b.addEventListener('click', () => applyLang(b.dataset.l)));
+applyLang(LANG);
+
+// ── 复制安装命令 ──
+const copyBtn = document.getElementById('copy');
+copyBtn.setAttribute('aria-live', 'polite');
+copyBtn.addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText(document.getElementById('cmd').textContent);
+    copyBtn.textContent = STR[LANG]['inst.copied'];
+  } catch {
+    copyBtn.textContent = STR[LANG]['inst.copyFail'];
+  }
+  setTimeout(() => { copyBtn.textContent = STR[LANG]['inst.copy']; }, 1600);
+});
+
+// ── 版本号：与 App 共用同一份清单 ──
+fetch('version.json').then(r => r.json()).then(m => {
+  if (m.version) document.getElementById('ver').textContent = 'v' + m.version;
+  if (m.url) document.getElementById('dl').href = m.url;
+}).catch(() => {});
+
+// ── 进场 / 滚动渐显 ──
+const io = new IntersectionObserver(es => es.forEach(e => {
+  if (e.isIntersecting) { e.target.classList.add('in'); io.unobserve(e.target); }
+}), {threshold: .12});
+document.querySelectorAll('.rv').forEach(el => io.observe(el));
+</script>
+</body>
+</html>

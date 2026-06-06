@@ -27,7 +27,7 @@ AgentDeck 把 Claude Code 与 Codex 的**额度、会话、用量**收进一个�
 
 - **双端统一** — Claude Code 与 Codex 的额度 / 会话 / 用量，一个面板尽览，无需在多个工具间来回切换
 - **零依赖 · 原生编译** — 没有 Node、没有 Electron、没有打包器；`swiftc` 直接编一个真正的原生 App，安装即用
-- **隐私纯本地** — 全程在本机处理，唯一一条出站请求是用你自己的凭据查你自己的额度，零遥测、零上报
+- **隐私纯本地** — 全程在本机处理，出站请求仅两条：用你自己的凭据查你自己的额度、可关闭的新版检查，零遥测、零上报
 - **对标系统的质感** — 连续曲率圆角、玻璃材质、桌面小组件，做到系统原生小组件的观感标准
 - **开箱多语言** — 简体中文 / English / 日本語，默认跟随系统，设置内即时切换
 
@@ -120,7 +120,8 @@ scripts/             图标与 DMG 背景生成、Codex notify 包装、CSRF 回
 
 | 数据 | 来源 | 说明 |
 |------|------|------|
-| Claude 额度 | 钥匙串中 Claude Code 的 OAuth 凭据 → `api.anthropic.com/api/oauth/usage` | 全应用唯一一条出站请求，使用用户本人凭据查询本人额度 |
+| Claude 额度 | 钥匙串中 Claude Code 的 OAuth 凭据 → `api.anthropic.com/api/oauth/usage` | 使用用户本人凭据查询本人额度 |
+| 新版检查 | `agentdeck.pages.dev/version.json`（静态清单，6 小时缓存） | 仅比对版本号，不带任何凭据与本机信息；设置内可关闭 |
 | Claude 用量 / 会话 | 解析本地 `~/.claude/projects/**/*.jsonl` | token 统计、成本估算、会话列表 |
 | Codex 额度 / 用量 / 会话 | 解析本地 `~/.codex/sessions` rollout 文件 | 同上 |
 | 完成事件 | Claude Stop hook / Codex notify 回调（见可选配置） | 完成提醒与事件流 |

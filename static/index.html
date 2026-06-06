@@ -127,6 +127,27 @@ header .sp { flex: 1; }
   box-shadow: inset 0 1px 0 rgba(255,255,255,.10), 0 2px 8px rgba(0,0,0,.25);
 }
 
+/* ----- 更新横幅（发现新版时出现在顶栏下方） ----- */
+#updatebar {
+  flex: none; display: flex; align-items: center; gap: 10px;
+  padding: 9px 12px; border-radius: 14px; font-size: 12px; color: var(--ink);
+  background: linear-gradient(120deg, rgba(232,116,79,.16), rgba(58,167,156,.12));
+  border: 1px solid rgba(255,255,255,.16);
+  -webkit-backdrop-filter: blur(30px) saturate(160%); backdrop-filter: blur(30px) saturate(160%);
+}
+#updatebar .ubgo {
+  margin-left: auto; padding: 4px 12px; border-radius: 10px; border: 1px solid var(--edge);
+  background: rgba(255,255,255,.10); color: var(--ink); font-family: inherit;
+  font-size: 11px; font-weight: 700; cursor: pointer; transition: .18s;
+}
+#updatebar .ubgo:hover { background: rgba(255,255,255,.18); transform: translateY(-1px); }
+#updatebar .ubclose {
+  background: none; border: none; color: var(--ink-3); cursor: pointer;
+  font-size: 12px; padding: 2px 4px; font-family: inherit;
+}
+#updatebar .ubclose:hover { color: var(--ink); }
+body.wgt #updatebar { display: none !important; }   /* 小组件不放横幅 */
+
 /* ----- 玻璃卡基类（Liquid Glass：顶部镜面高光圈 + 底部内沉） ----- */
 .card {
   background: linear-gradient(180deg, rgba(255,255,255,.085), rgba(255,255,255,.04));
@@ -632,6 +653,8 @@ body.wgt #today, body.wgt #done { display: none !important; }
     </button>
   </header>
 
+  <div id="updatebar" style="display:none"></div>
+
   <nav id="tabbar" class="reveal">
     <button type="button" class="tab on" data-t="overview">
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -798,6 +821,8 @@ const I18N = {
     'set.sessionsLimit': '会话列表数量', 'set.sessionsLimitHint': '每端各取 N 条',
     'set.refreshInterval': '自动刷新间隔', 'set.sampleInterval': '额度采样间隔', 'set.minUnit': '{n} 分钟',
     'set.keepAwake': '保持唤醒', 'set.keepAwakeHint': '有活跃会话时阻止系统休眠，避免会话断网中断',
+    'set.updateCheck': '自动检查更新', 'set.updateCheckHint': '仅向项目主页查询版本号，不发送任何数据',
+    'update.available': '新版本 {v} 可用', 'update.go': '前往下载',
     'set.language': '语言', 'set.langAuto': '跟随系统',
     'set.resumeMethod': '恢复方式', 'set.resumeMethodHint': '仅列已安装终端', 'set.termAuto': '自动（按优先级）', 'set.termCopy': '仅复制命令',
     'set.dataManage': '数据管理', 'set.dataManageHint': '数据仅存本机',
@@ -862,6 +887,8 @@ const I18N = {
     'set.sessionsLimit': 'Sessions list size', 'set.sessionsLimitHint': 'N per tool',
     'set.refreshInterval': 'Auto-refresh interval', 'set.sampleInterval': 'Quota sampling interval', 'set.minUnit': '{n} min',
     'set.keepAwake': 'Keep awake', 'set.keepAwakeHint': 'Prevent system sleep while sessions are active, so they survive sleep/network drops',
+    'set.updateCheck': 'Check for updates', 'set.updateCheckHint': 'Only asks the project site for a version number; sends nothing',
+    'update.available': 'Version {v} available', 'update.go': 'Download',
     'set.language': 'Language', 'set.langAuto': 'Follow system',
     'set.resumeMethod': 'Resume method', 'set.resumeMethodHint': 'Only installed terminals', 'set.termAuto': 'Auto (by priority)', 'set.termCopy': 'Copy command only',
     'set.dataManage': 'Data management', 'set.dataManageHint': 'Data stays on this Mac',
@@ -926,6 +953,8 @@ const I18N = {
     'set.sessionsLimit': 'セッション一覧の件数', 'set.sessionsLimitHint': 'ツールごとに N 件',
     'set.refreshInterval': '自動更新の間隔', 'set.sampleInterval': '残量サンプリング間隔', 'set.minUnit': '{n} 分',
     'set.keepAwake': 'スリープ防止', 'set.keepAwakeHint': 'アクティブなセッション中はスリープを防ぎ、切断による中断を回避',
+    'set.updateCheck': '更新を自動確認', 'set.updateCheckHint': 'プロジェクトサイトにバージョン番号のみ照会、データ送信なし',
+    'update.available': '新バージョン {v} が利用可能', 'update.go': 'ダウンロード',
     'set.language': '言語', 'set.langAuto': 'システムに従う',
     'set.resumeMethod': '再開方法', 'set.resumeMethodHint': 'インストール済みのみ表示', 'set.termAuto': '自動（優先度順）', 'set.termCopy': 'コマンドをコピーのみ',
     'set.dataManage': 'データ管理', 'set.dataManageHint': 'データはこの Mac のみ',
@@ -1642,6 +1671,7 @@ const SET_SCHEMA = [
    opts: [60, 180, 300, 600], fmt: v => t('set.minUnit', {n: v / 60}), custom: [60, 3600]},
   {sec: 'set.secSystem'},
   {key: 'keep_awake', label: 'set.keepAwake', hint: 'set.keepAwakeHint', type: 'toggle'},
+  {key: 'update_check', label: 'set.updateCheck', hint: 'set.updateCheckHint', type: 'toggle'},
   {key: 'language', label: 'set.language', type: 'select',
    opts: ['auto', 'zh-CN', 'en', 'ja'], optKeys: {auto: 'set.langAuto'},
    names: {'zh-CN': '中文', 'en': 'English', 'ja': '日本語'}},
@@ -1805,7 +1835,41 @@ document.querySelectorAll('#tabbar .tab').forEach(t => t.onclick = () => {
   document.querySelectorAll('.tabview').forEach(v =>
     v.classList.toggle('on', v.id === 'view-' + t.dataset.t));
 });
+{ // ?tab=sessions 直开指定 Tab（调试 / 截图用）
+  const t0 = new URLSearchParams(location.search).get('tab');
+  const btn = t0 && document.querySelector(`#tabbar .tab[data-t="${CSS.escape(t0)}"]`);
+  if (btn) btn.onclick();
+}
 $('#closesettings').onclick = () => $('#settings').classList.remove('show');
+
+/* ---------- 更新检测（清单 6h 缓存在 daemon 侧；横幅随语言切换重渲染） ---------- */
+let _update = null;
+function openExternal(url) {
+  if (!url) return;
+  if (bridge) bridge.postMessage('open:' + url);   // 原生面板经 Swift 打开默认浏览器
+  else window.open(url, '_blank');                 // 浏览器直开本地页时
+}
+function renderUpdateBar() {
+  const el = $('#updatebar');
+  if (!el) return;
+  if (!_update || !_update.available || el.dataset.dismissed) {
+    el.style.display = 'none'; return;
+  }
+  el.style.display = '';
+  el.innerHTML = `<span>✨ ${t('update.available', {v: 'v' + esc(_update.latest)})}</span>
+    <button type="button" class="ubgo">${t('update.go')}</button>
+    <button type="button" class="ubclose" title="${t('common.close')}">✕</button>`;
+  el.querySelector('.ubgo').onclick = () => openExternal(_update.url || _update.notes_url);
+  el.querySelector('.ubclose').onclick = () => {
+    el.dataset.dismissed = '1'; el.style.display = 'none';
+  };
+}
+async function loadUpdate() {
+  try {
+    _update = await (await fetch('/api/update')).json();
+    renderUpdateBar();
+  } catch {}
+}
 
 /* ---------- 刷新调度 ---------- */
 async function refreshAll(manual) {
@@ -1823,7 +1887,7 @@ async function refreshAll(manual) {
     }
   } catch {}
   const jobs = [loadQuota(), loadSessions(), loadUsage(), loadActive(),
-                loadToday(), loadDone()];
+                loadToday(), loadDone(), loadUpdate()];
   if ($('#usage').classList.contains('curve')) jobs.push(loadCurve());
   await Promise.all(jobs);
   if (manual) setTimeout(() => $('#refresh').classList.remove('spin'), 500);
