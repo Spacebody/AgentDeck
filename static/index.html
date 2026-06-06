@@ -557,17 +557,27 @@ body.wgt #today, body.wgt #done { display: none !important; }
 .tgl {
   width: 36px; height: 21px; border-radius: 99px; cursor: pointer; flex: none;
   background: rgba(255,255,255,.13); border: 1px solid var(--edge); position: relative;
-  transition: .22s;
+  transition: border-color .25s, box-shadow .25s;
+}
+/* 开启态轨道做成独立渐变层，opacity 交叉淡入替代背景硬切（渐变不可 transition） */
+.tgl::before {
+  content: ""; position: absolute; inset: -1px; border-radius: 99px; opacity: 0;
+  background: linear-gradient(90deg, var(--claude-deep), var(--claude)) padding-box;
+  border: 1px solid transparent; transition: opacity .25s ease;
+  /* padding-box：WebKit 在透明边框环下会重复绘制背景，AA 叠加出端帽亮缝（Chromium 无此问题） */
 }
 .tgl::after {
-  content: ""; position: absolute; width: 17px; height: 17px; border-radius: 50%;
-  background: #fff; top: 1px; left: 1px; transition: .22s cubic-bezier(.3,.8,.3,1.2);
+  content: ""; position: absolute; width: 17px; height: 17px; border-radius: 99px;
+  background: #fff; top: 1px; left: 1px;
+  transition: left .3s cubic-bezier(.32,1.25,.4,1), width .18s ease;  /* 弹簧位移 + 拉伸回弹 */
   box-shadow: 0 1px 4px rgba(0,0,0,.4);
 }
-.tgl.on { background: linear-gradient(90deg, var(--claude-deep), var(--claude)) padding-box;
-  border-color: transparent; box-shadow: 0 1px 3px rgba(0,0,0,.22); }
-  /* padding-box：WebKit 在透明边框环下会重复绘制背景，AA 叠加出端帽亮缝（Chromium 无此问题） */
+.tgl.on { border-color: transparent; box-shadow: 0 1px 3px rgba(0,0,0,.22); }
+.tgl.on::before { opacity: 1; }
 .tgl.on::after { left: 16px; }
+/* 按住时滑块横向拉伸（iOS 手感）：off 锚左缘、on 锚右缘 */
+.tgl:active::after { width: 21px; }
+.tgl.on:active::after { left: 12px; }
 .setchips { display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; }
 .setchips .chip { font-size: 9.5px; padding: 4px 10px; }
 /* 多选 chip 点亮态走品牌色，与未选态拉开对比 */
