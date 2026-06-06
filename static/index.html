@@ -65,7 +65,8 @@ body::after {
 
 /* ----- 布局 ----- */
 #app {
-  position: relative; z-index: 2; height: 100vh;
+  /* 视口单位不随 zoom 缩放：所有 vh/vw 尺寸都除以 --fzoom 补偿（字体大小设置） */
+  position: relative; z-index: 2; height: calc(100vh / var(--fzoom, 1));
   display: flex; flex-direction: column;
   padding: 14px 14px 10px;
   gap: 10px;
@@ -321,7 +322,7 @@ body.wgt #today, body.wgt #done { display: none !important; }
   background: rgba(4,4,9,.46);
   -webkit-backdrop-filter: blur(10px) saturate(140%); backdrop-filter: blur(10px) saturate(140%); }
 #infopop.show { display: flex; }
-.ipcard { width: min(322px, 86vw); border-radius: 20px; padding: 15px 17px 13px;
+.ipcard { width: min(322px, calc(86vw / var(--fzoom, 1))); border-radius: 20px; padding: 15px 17px 13px;
   background: linear-gradient(180deg, rgba(44,44,58,.94), rgba(26,26,36,.96));
   border: 1px solid rgba(255,255,255,.15);
   box-shadow: 0 28px 64px rgba(0,0,0,.55), inset 0 1px 1px rgba(255,255,255,.18);
@@ -515,7 +516,7 @@ body.wgt #today, body.wgt #done { display: none !important; }
 /* ----- 设置页 ----- */
 #settings {
   position: fixed; inset: 0; z-index: 30; display: flex; flex-direction: column;
-  padding: 14px max(14px, calc((100vw - 760px) / 2 + 14px)) 10px;  /* 与主页同宽钳制 */
+  padding: 14px max(14px, calc((100vw / var(--fzoom, 1) - 760px) / 2 + 14px)) 10px;  /* 与主页同宽钳制（vw 除以 zoom 补偿） */
   gap: 10px;
   background: rgba(7,7,12,.66);
   -webkit-backdrop-filter: blur(30px) saturate(160%); backdrop-filter: blur(30px) saturate(160%);
@@ -557,27 +558,28 @@ body.wgt #today, body.wgt #done { display: none !important; }
 .tgl {
   width: 36px; height: 21px; border-radius: 99px; cursor: pointer; flex: none;
   background: rgba(255,255,255,.13); border: 1px solid var(--edge); position: relative;
-  transition: border-color .25s, box-shadow .25s;
+  /* 切换态只动画 opacity/transform（合成器属性）；border/box-shadow 瞬时切，避免逐帧 paint */
 }
 /* 开启态轨道做成独立渐变层，opacity 交叉淡入替代背景硬切（渐变不可 transition） */
 .tgl::before {
   content: ""; position: absolute; inset: -1px; border-radius: 99px; opacity: 0;
   background: linear-gradient(90deg, var(--claude-deep), var(--claude)) padding-box;
-  border: 1px solid transparent; transition: opacity .25s ease;
+  border: 1px solid transparent; will-change: opacity;   /* 显式层提升，淡入不逐帧栅格化 */
+  transition: opacity .24s ease;
   /* padding-box：WebKit 在透明边框环下会重复绘制背景，AA 叠加出端帽亮缝（Chromium 无此问题） */
 }
 .tgl::after {
   content: ""; position: absolute; width: 17px; height: 17px; border-radius: 99px;
-  background: #fff; top: 1px; left: 1px;
-  transition: left .3s cubic-bezier(.32,1.25,.4,1), width .18s ease;  /* 弹簧位移 + 拉伸回弹 */
+  background: #fff; top: 1px; left: 1px; will-change: transform;
+  /* 严格合成器路径：只 transition transform。width/left 是布局属性，逐帧 relayout；
+     按压拉伸（改 width + 中途改位移目标）会产生二段运动感，一并移除。
+     强 ease-out 不过冲：小行程回弹会读成「顿挫」，苹果开关实际是干净收尾 */
+  transition: transform .24s cubic-bezier(.22,1,.36,1);
   box-shadow: 0 1px 4px rgba(0,0,0,.4);
 }
 .tgl.on { border-color: transparent; box-shadow: 0 1px 3px rgba(0,0,0,.22); }
 .tgl.on::before { opacity: 1; }
-.tgl.on::after { left: 16px; }
-/* 按住时滑块横向拉伸（iOS 手感）：off 锚左缘、on 锚右缘 */
-.tgl:active::after { width: 21px; }
-.tgl.on:active::after { left: 12px; }
+.tgl.on::after { transform: translateX(15px); }
 .setchips { display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; }
 .setchips .chip { font-size: 9.5px; padding: 4px 10px; }
 /* 多选 chip 点亮态走品牌色，与未选态拉开对比 */
@@ -1752,10 +1754,16 @@ async function saveSetting(key, value, opts = {}) {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({[key]: value}),
     })).json();
-    settings = r.settings;
-    applyLanguage(settings.locale);   // 语言变更即时全局生效；其它设置时为幂等空操作
-    if (opts.rerender !== false) renderSettings();   // 开关走乐观更新，跳过整页重建以免打断动效
-    applySettings();
+    const apply = () => {
+      settings = r.settings;
+      if (key === 'language') applyLanguage(settings.locale);   // 语言变更即时全局生效
+      if (opts.rerender !== false) renderSettings();   // 开关走乐观更新，跳过整页重建以免打断动效
+      applySettings(key);
+    };
+    // 开关路径：响应处理推迟到动效播完之后——本地 daemon 几十毫秒就返回，
+    // applyLanguage/applySettings/bridge sync 全在主线程，会砸在滑动中段造成抖动
+    if (opts.rerender === false) setTimeout(apply, 300);
+    else apply();
   } catch {
     if (opts.revert) opts.revert();
     toast(t('common.saveFailed'));
@@ -1782,15 +1790,30 @@ function applyLanguage(loc) {       // 运行时切换语言：设语言并重�
 }
 
 let pollTimer = null;
-function applySettings() {
+function applySettings(key) {
+  /* 不传 key = 全量应用（启动/重载）；传 key = 只应用该项的副作用。
+     精准化是为了开关动效：避免改个提示音也触发全页 zoom 重排、定时器重置与 bridge 往返 */
   if (!settings) return;
-  $('#active').style.display = settings.show_active ? '' : 'none';
-  document.documentElement.style.setProperty('--dim', (settings.glass_dim || 68) / 100);
-  document.body.style.zoom = (settings.font_scale || 100) / 100;   // 字体大小（整体缩放）
-  document.body.classList.toggle('minimal', !!settings.minimal_mode);
-  if (bridge) bridge.postMessage('sync');   // 通知 Swift 立即刷新菜单栏
-  clearInterval(pollTimer);
-  pollTimer = setInterval(() => refreshAll(false), settings.refresh_interval * 1000);
+  const all = !key;
+  if (all || key === 'show_active')
+    $('#active').style.display = settings.show_active ? '' : 'none';
+  if (all || key === 'glass_dim')
+    document.documentElement.style.setProperty('--dim', (settings.glass_dim || 68) / 100);
+  if (all || key === 'font_scale') {
+    const z = (settings.font_scale || 100) / 100;
+    document.body.style.zoom = z;   // 字体大小（整体缩放）
+    document.documentElement.style.setProperty('--fzoom', z);   // 视口单位补偿系数
+  }
+  if (all || key === 'minimal_mode')
+    document.body.classList.toggle('minimal', !!settings.minimal_mode);
+  // 仅壳层关心的设置才喊 Swift（菜单栏 / 小组件外观 / 语言 / 灵动岛）
+  if (bridge && (all || ['menubar_claude', 'menubar_codex', 'language', 'font_scale',
+                         'glass_dim', 'minimal_mode', 'island_dwell_secs'].includes(key)))
+    bridge.postMessage('sync');
+  if (all || key === 'refresh_interval') {
+    clearInterval(pollTimer);
+    pollTimer = setInterval(() => refreshAll(false), settings.refresh_interval * 1000);
+  }
 }
 
 async function loadSettings() {
@@ -1810,14 +1833,17 @@ async function loadSettings() {
   } catch {}
 }
 
-$('#setbody').addEventListener('click', e => {
+/* 开关在 pointerdown 即翻转：对齐苹果开关「按下就动」的灵敏手感（click 要等抬起才发） */
+$('#setbody').addEventListener('pointerdown', e => {
   const tgl = e.target.closest('.tgl');
-  if (tgl) {   // 乐观更新：立即翻转让动画完整播放，保存失败时回滚
-    const on = !tgl.classList.contains('on');
-    tgl.classList.toggle('on', on);
-    return saveSetting(tgl.dataset.k, on,
-      {rerender: false, revert: () => tgl.classList.toggle('on', !on)});
-  }
+  if (!tgl || e.button > 0) return;
+  const on = !tgl.classList.contains('on');
+  tgl.classList.toggle('on', on);
+  saveSetting(tgl.dataset.k, on,
+    {rerender: false, revert: () => tgl.classList.toggle('on', !on)});
+});
+$('#setbody').addEventListener('click', e => {
+  if (e.target.closest('.tgl')) return;   // 开关走 pointerdown（按下即响应），click 不重复处理
   const edit = e.target.closest('.chip.edit');
   if (edit) {   // 切换为内联数字输入
     const key = edit.dataset.edit;

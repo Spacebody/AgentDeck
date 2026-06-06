@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/icon.png" width="96" alt="AgentDeck 图标">
+</p>
+
 <h1 align="center">AgentDeck</h1>
 
 <p align="center">

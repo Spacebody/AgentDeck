@@ -1,0 +1,181 @@
+- generic [active] [ref=e1]:
+  - img
+  - generic [ref=e2]:
+    - banner [ref=e3]:
+      - generic [ref=e4]:
+        - text: Agent
+        - emphasis [ref=e5]: Deck
+      - button "设置" [ref=e7] [cursor=pointer]:
+        - img [ref=e8]
+      - button "刷新" [ref=e11] [cursor=pointer]:
+        - img [ref=e12]
+    - navigation [ref=e15]:
+      - button "概览" [ref=e16] [cursor=pointer]:
+        - img [ref=e17]
+        - generic [ref=e18]: 概览
+      - button "会话" [ref=e19] [cursor=pointer]:
+        - img [ref=e20]
+        - generic [ref=e22]: 会话
+    - generic [ref=e23]:
+      - generic [ref=e24]:
+        - generic [ref=e26]: 载入中…
+        - generic [ref=e28]: 载入中…
+      - generic [ref=e29]:
+        - generic [ref=e30]:
+          - generic [ref=e31]:
+            - button "24 小时" [ref=e32] [cursor=pointer]
+            - button "近 7 天" [ref=e33] [cursor=pointer]
+            - button "项目 Top" [ref=e34] [cursor=pointer]
+          - generic [ref=e35]: —
+          - button "统计口径" [ref=e36] [cursor=pointer]:
+            - img [ref=e37]
+        - img [ref=e41]
+  - generic [ref=e42]:
+    - generic [ref=e43]:
+      - button "返回" [ref=e44] [cursor=pointer]:
+        - img [ref=e45]
+      - generic [ref=e47]: 设置
+    - generic [ref=e48]:
+      - generic [ref=e49]: 面板
+      - generic [ref=e50]:
+        - generic [ref=e51]:
+          - generic [ref=e52]: 语言
+          - combobox [ref=e53] [cursor=pointer]:
+            - option "跟随系统"
+            - option "中文" [selected]
+            - option "English"
+            - option "日本語"
+        - generic [ref=e54]:
+          - generic [ref=e55]:
+            - text: 字体大小
+            - generic [ref=e56]: 面板与小组件整体缩放
+          - generic [ref=e57]:
+            - button "100%" [ref=e58] [cursor=pointer]
+            - button "110%" [ref=e59] [cursor=pointer]
+            - button "120%" [ref=e60] [cursor=pointer]
+            - button "135%" [ref=e61] [cursor=pointer]
+            - button "✎" [ref=e62] [cursor=pointer]
+        - generic [ref=e63]:
+          - generic [ref=e64]:
+            - text: 面板暗化强度
+            - generic [ref=e65]: 越低越透明
+          - generic [ref=e66]:
+            - button "40%" [ref=e67] [cursor=pointer]
+            - button "55%" [ref=e68] [cursor=pointer]
+            - button "68%" [ref=e69] [cursor=pointer]
+            - button "80%" [ref=e70] [cursor=pointer]
+            - button "✎" [ref=e71] [cursor=pointer]
+        - generic [ref=e73]:
+          - text: 精简模式
+          - generic [ref=e74]: 降低视觉噪声，更耐看
+        - generic [ref=e77]: 活跃会话卡片
+        - generic [ref=e79]:
+          - generic [ref=e80]:
+            - text: 会话列表数量
+            - generic [ref=e81]: 每端各取 N 条
+          - generic [ref=e82]:
+            - button "10" [ref=e83] [cursor=pointer]
+            - button "15" [ref=e84] [cursor=pointer]
+            - button "20" [ref=e85] [cursor=pointer]
+            - button "30" [ref=e86] [cursor=pointer]
+            - button "✎" [ref=e87] [cursor=pointer]
+        - generic [ref=e88]:
+          - generic [ref=e89]: 自动刷新间隔
+          - generic [ref=e90]:
+            - button "15s" [ref=e91] [cursor=pointer]
+            - button "30s" [ref=e92] [cursor=pointer]
+            - button "60s" [ref=e93] [cursor=pointer]
+            - button "✎" [ref=e94] [cursor=pointer]
+        - generic [ref=e95]:
+          - generic [ref=e96]: 额度采样间隔
+          - generic [ref=e97]:
+            - button "1 分钟" [ref=e98] [cursor=pointer]
+            - button "3 分钟" [ref=e99] [cursor=pointer]
+            - button "5 分钟" [ref=e100] [cursor=pointer]
+            - button "10 分钟" [ref=e101] [cursor=pointer]
+            - button "✎" [ref=e102] [cursor=pointer]
+      - generic [ref=e103]: 菜单栏
+      - generic [ref=e105]:
+        - generic [ref=e106]:
+          - text: 常显用量
+          - generic [ref=e107]: 可多选，全不选只留图标
+        - generic [ref=e108]:
+          - button "Claude" [ref=e109] [cursor=pointer]
+          - button "Codex" [ref=e110] [cursor=pointer]
+      - generic [ref=e111]: 通知
+      - generic [ref=e112]:
+        - generic [ref=e114]: 额度告警通知
+        - generic [ref=e116]:
+          - generic [ref=e117]: 提醒阈值
+          - generic [ref=e118]:
+            - button "70%" [ref=e119] [cursor=pointer]
+            - button "80%" [ref=e120] [cursor=pointer]
+            - button "90%" [ref=e121] [cursor=pointer]
+            - button "✎" [ref=e122] [cursor=pointer]
+        - generic [ref=e123]:
+          - generic [ref=e124]:
+            - text: 严重阈值
+            - generic [ref=e125]: 带提示音
+          - generic [ref=e126]:
+            - button "90%" [ref=e127] [cursor=pointer]
+            - button "95%" [ref=e128] [cursor=pointer]
+            - button "98%" [ref=e129] [cursor=pointer]
+            - button "✎" [ref=e130] [cursor=pointer]
+        - generic [ref=e132]: 重置回满提醒
+        - generic [ref=e135]:
+          - text: 会话完成提醒
+          - generic [ref=e136]: 灵动岛弹出，点击跳会话
+        - generic [ref=e138]:
+          - generic [ref=e139]:
+            - text: 短任务过滤
+            - generic [ref=e140]: 低于该时长不提醒
+          - generic [ref=e141]:
+            - button "15s" [ref=e142] [cursor=pointer]
+            - button "30s" [ref=e143] [cursor=pointer]
+            - button "60s" [ref=e144] [cursor=pointer]
+            - button "120s" [ref=e145] [cursor=pointer]
+            - button "✎" [ref=e146] [cursor=pointer]
+        - generic [ref=e147]:
+          - generic [ref=e148]: 提醒停留时长
+          - generic [ref=e149]:
+            - button "3s" [ref=e150] [cursor=pointer]
+            - button "5s" [ref=e151] [cursor=pointer]
+            - button "8s" [ref=e152] [cursor=pointer]
+            - button "10s" [ref=e153] [cursor=pointer]
+            - button "✎" [ref=e154] [cursor=pointer]
+        - generic [ref=e156]: 提示音
+      - generic [ref=e158]: 会话恢复
+      - generic [ref=e160]:
+        - generic [ref=e161]:
+          - text: 恢复方式
+          - generic [ref=e162]: 仅列已安装终端
+        - combobox [ref=e163] [cursor=pointer]:
+          - option "自动（按优先级）" [selected]
+          - option "Ghostty"
+          - option "Terminal"
+          - option "Warp"
+          - option "VS Code"
+          - option "仅复制命令"
+      - generic [ref=e164]: 系统
+      - generic [ref=e165]:
+        - generic [ref=e167]:
+          - text: 保持唤醒
+          - generic [ref=e168]: 有活跃会话时阻止系统休眠，避免会话断网中断
+        - generic [ref=e171]:
+          - text: 自动检查更新
+          - generic [ref=e172]: 仅向项目主页查询版本号，不发送任何数据
+        - generic [ref=e174]:
+          - generic [ref=e175]:
+            - text: 手动检查
+            - generic [ref=e176]: 立即查询一次最新版本
+          - button "立即检查" [ref=e178] [cursor=pointer]
+      - generic [ref=e179]: 数据
+      - generic [ref=e181]:
+        - generic [ref=e182]:
+          - text: 数据管理
+          - generic [ref=e183]: 数据仅存本机
+        - generic [ref=e184]:
+          - button "打开数据目录" [ref=e185] [cursor=pointer]
+          - button "导出用量 CSV" [ref=e186] [cursor=pointer]
+          - button "清空完成记录" [ref=e187] [cursor=pointer]
+    - generic [ref=e188]: AgentDeck v1.24.2 · 数据仅存本机
