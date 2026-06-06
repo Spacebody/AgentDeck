@@ -261,7 +261,9 @@ body.wgt #aurora { opacity: .14; }
 .ring svg { transform: rotate(-90deg); }
 .ring .track { stroke: rgba(255,255,255,.08); }
 .ring .arc {
-  stroke: url(#grad-claude); stroke-linecap: round;
+  /* stroke 由各卡片的 SVG 属性指定（grad-claude/grad-codex/warn/danger）——
+     这里不能写死：CSS 优先级高于 SVG 表现属性，会把 Codex 环也盖成橙色 */
+  stroke-linecap: round;
   transition: stroke-dashoffset 1s cubic-bezier(.3,.8,.3,1);
 }
 .ring .pct {
