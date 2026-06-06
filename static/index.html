@@ -1746,7 +1746,7 @@ function renderSettings() {
   updateFade($('#setbody'));
 }
 
-async function saveSetting(key, value) {
+async function saveSetting(key, value, opts = {}) {
   try {
     const r = await (await fetch('/api/settings', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -1754,9 +1754,12 @@ async function saveSetting(key, value) {
     })).json();
     settings = r.settings;
     applyLanguage(settings.locale);   // 语言变更即时全局生效；其它设置时为幂等空操作
-    renderSettings();
+    if (opts.rerender !== false) renderSettings();   // 开关走乐观更新，跳过整页重建以免打断动效
     applySettings();
-  } catch { toast(t('common.saveFailed')); }
+  } catch {
+    if (opts.revert) opts.revert();
+    toast(t('common.saveFailed'));
+  }
 }
 
 /* ---------- 语言应用 ---------- */
@@ -1809,7 +1812,12 @@ async function loadSettings() {
 
 $('#setbody').addEventListener('click', e => {
   const tgl = e.target.closest('.tgl');
-  if (tgl) return saveSetting(tgl.dataset.k, !tgl.classList.contains('on'));
+  if (tgl) {   // 乐观更新：立即翻转让动画完整播放，保存失败时回滚
+    const on = !tgl.classList.contains('on');
+    tgl.classList.toggle('on', on);
+    return saveSetting(tgl.dataset.k, on,
+      {rerender: false, revert: () => tgl.classList.toggle('on', !on)});
+  }
   const edit = e.target.closest('.chip.edit');
   if (edit) {   // 切换为内联数字输入
     const key = edit.dataset.edit;
