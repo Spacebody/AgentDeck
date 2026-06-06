@@ -1384,8 +1384,8 @@ async function focusActive(a) {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({tool: a.tool, session: a.id, cwd: a.cwd, pid: a.pid}),
     })).json();
-    if (r.ok) {   // 主面板跳转成功后收起；小组件常驻桌面，不动面板
-      if (bridge && !document.body.classList.contains('wgt')) bridge.postMessage('panel');
+    if (r.ok) {   // 跳转成功 → 收起主面板，让目标终端独占前台；小组件常驻桌面不动
+      if (bridge && !document.body.classList.contains('wgt')) bridge.postMessage('hide');
     } else toast(t('active.termNotFound', {err: r.error || ''}));
   } catch { toast(t('active.jumpFailed')); }
 }

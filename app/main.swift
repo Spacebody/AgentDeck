@@ -159,6 +159,8 @@ final class ControlBridge: NSObject, WKScriptMessageHandler {
             DispatchQueue.main.async { NSApp.terminate(nil) }
         case "panel":   // 桌面小组件点击 → 打开主面板
             DispatchQueue.main.async { delegate?.showPanel() }
+        case "hide":    // 跳转会话成功 → 收起主面板，让目标终端独占前台
+            DispatchQueue.main.async { delegate?.hidePanel() }
         case "sync":    // 设置变更 → 刷新菜单栏 + 桌面小组件（语言 / 外观跟随主面板）
             DispatchQueue.main.async {
                 delegate?.updateIconState()
