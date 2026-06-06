@@ -1,12 +1,32 @@
-# AgentDeck
+<h1 align="center">AgentDeck</h1>
 
-![Platform](https://img.shields.io/badge/platform-macOS%2013%2B-blue)
-![License](https://img.shields.io/badge/license-MIT-green)
-![Dependencies](https://img.shields.io/badge/dependencies-none-brightgreen)
+<p align="center">
+  在菜单栏盯住 <b>Claude Code</b> 与 <b>Codex</b> 的额度、会话与用量。<br>
+  原生液态玻璃质感 · 零第三方依赖 · 数据纯本地。
+</p>
 
-macOS 菜单栏应用，为 **Claude Code** 与 **Codex** 提供统一的额度监控、会话管理与用量分析。液态玻璃视觉风格，对标系统原生小组件的观感标准。
+<p align="center">
+  <img src="https://img.shields.io/badge/platform-macOS%2013%2B-blue" alt="Platform">
+  <img src="https://img.shields.io/badge/dependencies-none-brightgreen" alt="Dependencies">
+  <img src="https://img.shields.io/badge/i18n-中%20%C2%B7%20EN%20%C2%B7%20日-8a7cff" alt="i18n">
+  <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
+</p>
 
-整个项目零第三方依赖：后端为纯标准库 Python daemon，应用壳为单文件 Swift（`swiftc` 直接编译），界面为单文件 HTML——无包管理器、无构建链、无运行时下载。
+| 简体中文 | English | 日本語 |
+|:---:|:---:|:---:|
+| ![中文](docs/screenshots/overview-zh.png) | ![English](docs/screenshots/overview-en.png) | ![日本語](docs/screenshots/overview-ja.png) |
+
+<p align="center"><img src="docs/screenshots/settings-zh.png" width="300" alt="设置面板"></p>
+
+AgentDeck 把 Claude Code 与 Codex 的**额度、会话、用量**收进一个菜单栏小窗：窗口快满了它先告警，会话跑在哪个终端一键跳回，今天烧了多少 token 一眼看清。整个项目零第三方依赖——纯标准库 Python daemon + 单文件 Swift 应用壳 + 单文件 HTML 界面，无包管理器、无构建链、无运行时下载。
+
+## 亮点
+
+- **双端统一** — Claude Code 与 Codex 的额度 / 会话 / 用量，一个面板尽览，无需在多个工具间来回切换
+- **零依赖 · 原生编译** — 没有 Node、没有 Electron、没有打包器；`swiftc` 直接编一个真正的原生 App，安装即用
+- **隐私纯本地** — 全程在本机处理，唯一一条出站请求是用你自己的凭据查你自己的额度，零遥测、零上报
+- **对标系统的质感** — 连续曲率圆角、玻璃材质、桌面小组件，做到系统原生小组件的观感标准
+- **开箱多语言** — 简体中文 / English / 日本語，默认跟随系统，设置内即时切换
 
 ## 功能特性
 
@@ -17,7 +37,7 @@ macOS 菜单栏应用，为 **Claude Code** 与 **Codex** 提供统一的额度�
 
 **会话管理**
 - 识别双端活跃会话，包括终端内运行的 CLI 会话与 Codex 桌面端会话
-- 点击活跃会话直接聚焦其所在终端标签页（tty 级精确匹配），Codex 桌面端会话经 `codex://` 深链直达对应线程
+- 点击活跃会话直接聚焦其所在终端——**自动识别宿主终端，兼容任意终端**（沿进程链定位 `.app`，无需维护清单；iTerm2 / Terminal 精确到标签页），Codex 桌面端会话经 `codex://` 深链直达对应线程
 - 会话完成弹窗提醒（灵动岛风格），点击跳转回会话；事件去重，仅提醒一次
 - 历史会话一键在终端中恢复，支持 iTerm2、Terminal、Ghostty、kitty、WezTerm、Alacritty
 
@@ -29,20 +49,20 @@ macOS 菜单栏应用，为 **Claude Code** 与 **Codex** 提供统一的额度�
 **桌面小组件**
 - 常驻桌面层的玻璃信息卡，支持拖动、缩放与位置记忆
 
-## 系统要求
+**界面与系统**
+- 多语言界面：简体中文 / English / 日本語，默认跟随系统语言，设置内即时切换
+- 活跃会话期间保持系统唤醒，避免长任务因休眠 / 断网中断（可开关，默认开）
 
-- macOS 13 及以上
-- 本机已安装 [Claude Code](https://claude.com/claude-code) 或 [Codex](https://openai.com/codex)（任一即可）
-- Xcode Command Line Tools（编译需要 `swiftc`）
-
-## 安装
+## 快速开始
 
 ```bash
 git clone https://github.com/Spacebody/AgentDeck.git && cd AgentDeck
 ./build.sh install
 ```
 
-该命令完成编译、安装至 `/Applications` 并启动，首次启动自动注册系统登录项实现开机自启。
+一条命令完成编译、安装到 `/Applications` 并启动；首次启动自动注册登录项实现开机自启。装好后点菜单栏图标即可打开面板。
+
+**前置条件**：macOS 13+ · 已安装 [Claude Code](https://claude.com/claude-code) 或 [Codex](https://openai.com/codex)（任一即可）· Xcode Command Line Tools（提供 `swiftc`，`xcode-select --install` 即可）。
 
 其余构建目标：
 
