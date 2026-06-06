@@ -12,11 +12,14 @@
   <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
 </p>
 
-| 简体中文 | English | 日本語 |
-|:---:|:---:|:---:|
-| ![中文](docs/screenshots/overview-zh.png) | ![English](docs/screenshots/overview-en.png) | ![日本語](docs/screenshots/overview-ja.png) |
+<p align="center"><b>简体中文</b> · <a href="README.en.md">English</a></p>
 
-<p align="center"><img src="docs/screenshots/settings-zh.png" width="300" alt="设置面板"></p>
+<p align="center">
+  <img src="docs/screenshots/i18n-demo.gif" width="300" alt="AgentDeck 面板（中 / 英 / 日）">
+  &nbsp;
+  <img src="docs/screenshots/settings-zh.png" width="300" alt="设置面板">
+</p>
+<p align="center"><sub>概览面板（简体中文 / English / 日本語，默认跟随系统）· 设置</sub></p>
 
 AgentDeck 把 Claude Code 与 Codex 的**额度、会话、用量**收进一个菜单栏小窗：窗口快满了它先告警，会话跑在哪个终端一键跳回，今天烧了多少 token 一眼看清。整个项目零第三方依赖——纯标准库 Python daemon + 单文件 Swift 应用壳 + 单文件 HTML 界面，无包管理器、无构建链、无运行时下载。
 
@@ -39,7 +42,7 @@ AgentDeck 把 Claude Code 与 Codex 的**额度、会话、用量**收进一个�
 - 识别双端活跃会话，包括终端内运行的 CLI 会话与 Codex 桌面端会话
 - 点击活跃会话直接聚焦其所在终端——**自动识别宿主终端，兼容任意终端**（沿进程链定位 `.app`，无需维护清单；iTerm2 / Terminal 精确到标签页），Codex 桌面端会话经 `codex://` 深链直达对应线程
 - 会话完成弹窗提醒（灵动岛风格），点击跳转回会话；事件去重，仅提醒一次
-- 历史会话一键在终端中恢复，支持 iTerm2、Terminal、Ghostty、kitty、WezTerm、Alacritty
+- 历史会话一键在终端中恢复——iTerm2 / Terminal / Ghostty / kitty / WezTerm / Alacritty 自动直启，Warp / VS Code / Cursor / Windsurf / Hyper / Tabby / Rio / Wave 走「打开 App + 复制命令，粘贴回车」
 
 **用量分析**
 - 近 7 / 30 天 token 用量与成本估算，统计口径经独立工具交叉校准（详见下文）
