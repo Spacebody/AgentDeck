@@ -162,6 +162,12 @@ final class ControlBridge: NSObject, WKScriptMessageHandler {
             }
             return
         }
+        if body.hasPrefix("scale:") {   // 字体缩放 → 面板/小组件窗口同步放大，保持布局有效宽度
+            if let z = Double(body.dropFirst(6)) {
+                DispatchQueue.main.async { delegate?.applyUIScale(CGFloat(z)) }
+            }
+            return
+        }
         switch body {
         case "quit":
             DispatchQueue.main.async { NSApp.terminate(nil) }
@@ -338,15 +344,70 @@ final class IslandController {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+    /// 界面缩放系数（随「字体大小」设置）。UserDefaults 持久化保证启动即生效；
+    /// 窗口尺寸的存取均以「未缩放基准值」为准（存÷取×），避免缩放系数复利叠加。
+    var uiScale: CGFloat = {
+        let v = UserDefaults.standard.double(forKey: "fontScale")
+        return v > 0 ? min(max(CGFloat(v), 0.8), 1.6) : 1
+    }()
+
+    func applyUIScale(_ z: CGFloat) {
+        let s = min(max(z, 0.8), 1.6)
+        guard abs(s - uiScale) > 0.001 else { return }
+        uiScale = s
+        UserDefaults.standard.set(Double(s), forKey: "fontScale")
+        // 平滑过渡到新尺寸（极致版）：frame 逐帧动画会让 WKWebView 每帧重排，必卡。
+        // 改为窗口一步到位（仅一次重排），内容层从旧尺寸比例经 CASpringAnimation 缩回 1
+        // —— 全程 GPU 合成、零重排，锚定顶边中心与窗口定位一致。
+        let animate: (NSWindow, NSRect) -> Void = { w, target in
+            let old = w.frame
+            w.setFrame(target, display: true)
+            guard old.size != target.size, let v = w.contentView else { return }
+            v.wantsLayer = true
+            guard let layer = v.layer else { return }
+            layer.anchorPoint = CGPoint(x: 0.5, y: 1)   // 顶边中心
+            layer.position = CGPoint(x: v.bounds.midX, y: v.bounds.maxY)
+            let spring = CASpringAnimation(keyPath: "transform")
+            spring.fromValue = CATransform3DMakeScale(old.width / target.width,
+                                                      old.height / target.height, 1)
+            spring.toValue = CATransform3DIdentity
+            spring.damping = 26; spring.stiffness = 280; spring.mass = 1
+            spring.duration = spring.settlingDuration
+            layer.add(spring, forKey: "uiScale")
+            layer.transform = CATransform3DIdentity
+            w.invalidateShadow()
+            DispatchQueue.main.asyncAfter(deadline: .now() + spring.settlingDuration) {
+                [weak w] in w?.invalidateShadow()
+            }
+        }
+        if let p = panel, p.isVisible {          // 面板：锚定顶边中心重排
+            let d = UserDefaults.standard
+            let w = max(kPanelW, CGFloat(d.double(forKey: "panelW"))) * s
+            let h = max(kPanelH, CGFloat(d.double(forKey: "panelH"))) * s
+            let f = p.frame
+            animate(p, NSRect(x: f.midX - w / 2, y: f.maxY - h, width: w, height: h))
+        }
+        if let wp = widgetPanel, wp.isVisible {  // 小组件：锚定左上角
+            let d = UserDefaults.standard
+            let bw = CGFloat(d.double(forKey: "widgetW")) > 0 ? CGFloat(d.double(forKey: "widgetW")) : 360
+            let bh = CGFloat(d.double(forKey: "widgetH")) > 0 ? CGFloat(d.double(forKey: "widgetH")) : 300
+            wp.minSize = NSSize(width: 280 * s, height: 180 * s)
+            wp.maxSize = NSSize(width: 720 * s, height: 560 * s)
+            let f = wp.frame
+            animate(wp, NSRect(x: f.minX, y: f.maxY - max(180, bh) * s,
+                               width: max(280, bw) * s, height: max(180, bh) * s))
+        }
+    }
+
     func windowDidEndLiveResize(_ notification: Notification) {
         guard let w = notification.object as? NSWindow else { return }
         let d = UserDefaults.standard
         if w === panel {
-            d.set(Double(w.frame.width), forKey: "panelW")
-            d.set(Double(w.frame.height), forKey: "panelH")
+            d.set(Double(w.frame.width / uiScale), forKey: "panelW")
+            d.set(Double(w.frame.height / uiScale), forKey: "panelH")
         } else if w === widgetPanel {
-            d.set(Double(w.frame.width), forKey: "widgetW")
-            d.set(Double(w.frame.height), forKey: "widgetH")
+            d.set(Double(w.frame.width / uiScale), forKey: "widgetW")
+            d.set(Double(w.frame.height / uiScale), forKey: "widgetH")
         }
         w.invalidateShadow()
     }
@@ -613,9 +674,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let d = UserDefaults.standard
         let bFrame = bw.convertToScreen(button.convert(button.bounds, to: nil))
         let vis = (bw.screen ?? NSScreen.main!).visibleFrame
-        let w = max(kPanelW, CGFloat(d.double(forKey: "panelW")))
+        let w = max(kPanelW, CGFloat(d.double(forKey: "panelW"))) * uiScale
         let maxH = bFrame.minY - 6 - (vis.minY + 8)   // 图标下沿到屏幕底的可用高度
-        let h = min(max(kPanelH, CGFloat(d.double(forKey: "panelH"))), maxH)
+        let h = min(max(kPanelH, CGFloat(d.double(forKey: "panelH"))) * uiScale, maxH)
         // 定位：状态栏图标正下方，水平钳制在屏幕内
         let x = min(max(bFrame.midX - w / 2, vis.minX + 8), vis.maxX - w - 8)
         let y = bFrame.minY - 6 - h
@@ -667,15 +728,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let d0 = UserDefaults.standard
             // 默认高按内容实高取值：额度卡+今日条+活跃卡头部 ≈ 285
             let W = max(280, CGFloat(d0.double(forKey: "widgetW")) > 0
-                        ? CGFloat(d0.double(forKey: "widgetW")) : 360)
+                        ? CGFloat(d0.double(forKey: "widgetW")) : 360) * uiScale
             let H = max(180, CGFloat(d0.double(forKey: "widgetH")) > 0
-                        ? CGFloat(d0.double(forKey: "widgetH")) : 300)
+                        ? CGFloat(d0.double(forKey: "widgetH")) : 300) * uiScale
             let p = NSPanel(contentRect: NSRect(x: 0, y: 0, width: W, height: H),
                             styleMask: [.borderless, .nonactivatingPanel,
                                         .fullSizeContentView, .resizable],
                             backing: .buffered, defer: false)
-            p.minSize = NSSize(width: 280, height: 180)
-            p.maxSize = NSSize(width: 720, height: 560)
+            p.minSize = NSSize(width: 280 * uiScale, height: 180 * uiScale)
+            p.maxSize = NSSize(width: 720 * uiScale, height: 560 * uiScale)
             // 桌面图标之上、所有应用窗口之下 —— 小组件层
             p.level = NSWindow.Level(Int(CGWindowLevelForKey(.desktopIconWindow)) + 1)
             p.backgroundColor = .clear
