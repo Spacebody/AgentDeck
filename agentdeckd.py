@@ -1041,36 +1041,44 @@ return "miss"''')
     return out == "ok"
 
 
-def _ancestor_app(pid):
-    """沿父进程链向上自动识别宿主终端 App，兼容任意终端、无需维护清单。
+# 不是宿主终端的 .app：框架内置解释器壳、AgentDeck 自身等，识别到则继续向上找
+_APP_SKIP = {"Python", "python3", "AgentDeck"}
 
-    macOS 上 `ps -o comm=` 给出可执行文件的完整路径；GUI 终端的可执行文件必落在
-    某个 .app bundle 内，取路径中最外层的 .app（如 VS Code 集成终端的
-    Code Helper 仍归到 Visual Studio Code）即宿主应用名。少数非 .app 启动的
-    终端再按 _TERM_APPS 进程名前缀兜底。"""
+
+def _ancestor_app(pid):
+    """沿父进程链向上自动识别宿主终端，返回 (App 名, bundle 路径)；找不到 → (None, None)。
+
+    macOS 上 `ps -o comm=` 给出可执行文件完整路径；GUI 终端的可执行文件必落在某个
+    .app bundle 内，取最外层的 .app 即宿主（VS Code 集成终端的 Code Helper 仍归到
+    Visual Studio Code）。关键防线：**跳过 .framework 内置的 .app**——macOS 的
+    Python.framework 内含 Python.app，不跳过会把解释器误判成宿主、再 activate 挂起；
+    同理跳过 AgentDeck 自身。少数非 .app 启动的终端按 _TERM_APPS 进程名前缀兜底。"""
     for _ in range(20):
         out = subprocess.run(["ps", "-o", "ppid=,comm=", "-p", str(pid)],
                              capture_output=True, text=True, timeout=8)
         parts = out.stdout.strip().split(None, 1)
         if len(parts) < 2:
-            return None
+            return None, None
         ppid, comm = parts
-        # 自动识别：可执行文件路径中最外层的 .app bundle 即宿主 GUI 应用
-        m = re.search(r"/([^/]+)\.app/", comm)
-        if m:
-            return m.group(1)
+        # 框架内置二进制（Python.framework 等）不是 GUI 宿主，整跳过该进程往上找
+        if ".framework/" not in comm:
+            m = re.search(r"/([^/]+)\.app/", comm)
+            if m and m.group(1) not in _APP_SKIP:
+                bundle = comm[:comm.index("/" + m.group(1) + ".app/")
+                               + len(m.group(1)) + 5]   # …/<Name>.app
+                return m.group(1), bundle
         # 兜底：极少数非 .app 启动的终端，按进程名前缀匹配已知清单
         base = os.path.basename(comm).lower()
         for key, app in _TERM_APPS.items():
             if base.startswith(key.lower()):
-                return app
+                return app, None
         try:
             pid = int(ppid)
         except ValueError:
-            return None
+            return None, None
         if pid <= 1:
-            return None
-    return None
+            return None, None
+    return None, None
 
 
 def _codex_thread_for_cwd(cwd):
@@ -1119,7 +1127,7 @@ def api_focus(body):
         except Exception:
             pass
     # Codex 桌面端会话：不走终端启发式，deep link 直达线程，App 激活兜底
-    if tool == "codex" and _ancestor_app(pid) == "Codex":
+    if tool == "codex" and _ancestor_app(pid)[0] == "Codex":
         tid = sid if _ID_RE.match(sid) else _codex_thread_for_cwd(cwd)
         if tid:
             subprocess.run(["open", f"codex://threads/{tid}"], timeout=10)
@@ -1127,7 +1135,7 @@ def api_focus(body):
         return {"ok": True, "via": "codex-thread" if tid else "app",
                 "thread": tid, "app": "Codex"}
     tty = _pid_tty(pid)
-    host = _ancestor_app(pid)   # 自动识别宿主终端
+    host, host_bundle = _ancestor_app(pid)   # 自动识别宿主终端
     # 宿主已知：只对真正的宿主做精确聚焦 / 激活，绝不 tell 其它终端（否则会把
     # 未运行的 Terminal / iTerm 误启动——正是「跳 Warp 却打开 Terminal」的根因）
     if host:
@@ -1140,7 +1148,12 @@ def api_focus(body):
                 return {"ok": True, "via": "ghostty-cwd", "app": "Ghostty"}
         except Exception:
             pass
-        _osa(f'tell application "{host}" to activate')
+        # 通用激活：优先 open <bundle 路径>（命中已运行实例、绝不挂起）；
+        # 无 bundle 路径（进程名兜底）时退回按名 activate
+        if host_bundle:
+            subprocess.run(["open", host_bundle], capture_output=True, timeout=10)
+        else:
+            _osa(f'tell application "{host}" to activate')
         return {"ok": True, "via": "app", "app": host}
     # 宿主识别失败（tmux / ssh / 无 .app 祖先）：仅对“已在运行”的 iTerm / Terminal
     # 按 tty 兜底，避免凭空启动它们

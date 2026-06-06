@@ -10,6 +10,7 @@
 
 ## 历史
 
+- **1.22.1** 修跳转会话卡死：宿主识别会把 macOS `Python.framework` 内置的 `Python.app` 误当宿主，随后 `tell application "Python" to activate` 挂起 12s。改为**跳过 `.framework` 内置 bundle 与解释器/自身**，且通用激活改用 `open <bundle 路径>`（命中已运行实例、绝不挂起）；识别不到宿主时优雅回退而非超时
 - **1.22.0** 多语言界面（简体中文 / English / 日本語，默认跟随系统、设置内即时切换，面板 / 后端通知 / 应用壳菜单三层文案统一，有效 locale 由 daemon 单一解析下发）；活跃会话期间保持系统唤醒，防长任务因休眠 / 断网中断（默认开，`caffeinate` 绑定 daemon pid 自动随退出释放）；跳转会话自动识别宿主终端——沿进程链定位最外层 `.app`，兼容任意终端、不再依赖固定清单，且宿主已知时只激活宿主、不再盲探 iTerm / Terminal（修「跳 Warp 等终端却误启动 Terminal」）；会话恢复终端矩阵扩充——新增「打开 App + 复制命令（粘贴回车恢复）」一档，覆盖 Warp / VS Code / Cursor / Windsurf / Hyper / Tabby / Rio / Wave 等无法注入命令的常见终端；桌面小组件跟随主面板设置（语言 / 外观）即时收敛，补齐多语言适配
 - **1.21.5** 开源发布准备：bundle id 中性化（com.agentdeck.app）、补 LICENSE/CHANGELOG、README 公开化重构
 - **1.21.4** 滚动渐隐改为按位置动态驱动（贴顶/贴底自动收起，不再遮挡首行）
