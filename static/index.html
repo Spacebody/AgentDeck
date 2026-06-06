@@ -611,20 +611,20 @@ body.wgt #today, body.wgt #done { display: none !important; }
     <span class="logo">Agent<em>Deck</em></span>
     <span class="live" id="live"></span>
     <span class="sp"></span>
-    <button type="button" class="iconbtn" id="opensettings" title="设置">
+    <button type="button" class="iconbtn" id="opensettings" title="设置" data-i18n-title="header.settings">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
         stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <circle cx="12" cy="12" r="3"/>
         <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
       </svg>
     </button>
-    <button type="button" class="iconbtn" id="refresh" title="刷新">
+    <button type="button" class="iconbtn" id="refresh" title="刷新" data-i18n-title="header.refresh">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
         stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
         <path d="M23 4v6h-6"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
       </svg>
     </button>
-    <button type="button" class="iconbtn" id="quit" title="退出 AgentDeck" style="display:none">
+    <button type="button" class="iconbtn" id="quit" title="退出 AgentDeck" data-i18n-title="header.quit" style="display:none">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
         stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
         <path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/>
@@ -637,20 +637,20 @@ body.wgt #today, body.wgt #done { display: none !important; }
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
         stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
         <path d="M12 20V10"/><path d="M18 20V4"/><path d="M6 20v-4"/>
-      </svg><span>概览</span>
+      </svg><span data-i18n="tab.overview">概览</span>
     </button>
     <button type="button" class="tab" data-t="sessions">
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
         stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
         <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
-      </svg><span>会话</span>
+      </svg><span data-i18n="tab.sessions">会话</span>
     </button>
   </nav>
 
   <div class="tabview on" id="view-overview">
   <section id="quota" class="reveal">
-    <div class="card qcard claude" id="qc-claude"><div class="qerr">载入中…</div></div>
-    <div class="card qcard codex" id="qc-codex"><div class="qerr">载入中…</div></div>
+    <div class="card qcard claude" id="qc-claude"><div class="qerr" data-i18n="common.loading">载入中…</div></div>
+    <div class="card qcard codex" id="qc-codex"><div class="qerr" data-i18n="common.loading">载入中…</div></div>
   </section>
 
   <section class="card reveal" id="today"></section>
@@ -662,12 +662,12 @@ body.wgt #today, body.wgt #done { display: none !important; }
   <section class="card reveal curve" id="usage">
     <div class="uhead">
       <div class="chips">
-        <button type="button" class="chip on" data-v="curve">24小时</button>
-        <button type="button" class="chip" data-v="usage">近 7 天</button>
-        <button type="button" class="chip" data-v="proj">项目 Top</button>
+        <button type="button" class="chip on" data-v="curve" data-i18n="usage.tabCurve">24小时</button>
+        <button type="button" class="chip" data-v="usage" data-i18n="usage.tabUsage">近 7 天</button>
+        <button type="button" class="chip" data-v="proj" data-i18n="usage.tabProj">项目 Top</button>
       </div>
       <span class="ucost" id="cost">—</span>
-      <button type="button" class="infobtn" id="usageinfo" title="统计口径">
+      <button type="button" class="infobtn" id="usageinfo" title="统计口径" data-i18n-title="usage.info">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"
           stroke-width="2.4" stroke-linecap="round">
           <circle cx="12" cy="12" r="9.4" stroke-width="2"/>
@@ -695,13 +695,13 @@ body.wgt #today, body.wgt #done { display: none !important; }
   <div class="tabview" id="view-sessions">
   <section class="card reveal" id="sesswrap">
     <div class="shead">
-      <span class="stitle">最近会话</span>
+      <span class="stitle" data-i18n="session.recent">最近会话</span>
       <div class="chips">
-        <button type="button" class="chip on" data-f="all">全部</button>
+        <button type="button" class="chip on" data-f="all" data-i18n="session.all">全部</button>
         <button type="button" class="chip" data-f="claude">Claude</button>
         <button type="button" class="chip" data-f="codex">Codex</button>
       </div>
-      <input id="search" placeholder="搜索…">
+      <input id="search" placeholder="搜索…" data-i18n-ph="session.search">
     </div>
     <div id="slist"><div class="empty">载入中…</div></div>
   </section>
@@ -709,13 +709,13 @@ body.wgt #today, body.wgt #done { display: none !important; }
 </div>
 <div id="settings">
   <div class="sethead">
-    <button type="button" class="iconbtn" id="closesettings" title="返回">
+    <button type="button" class="iconbtn" id="closesettings" title="返回" data-i18n-title="common.back">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
         stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
         <path d="M15 18l-6-6 6-6"/>
       </svg>
     </button>
-    <span class="title">设置</span>
+    <span class="title" data-i18n="header.settings">设置</span>
   </div>
   <div id="setbody"></div>
   <div id="setver">AgentDeck</div>
@@ -726,8 +726,8 @@ body.wgt #today, body.wgt #done { display: none !important; }
 <!-- 口径说明弹层（玻璃卡 + 居中遮罩） -->
 <div id="infopop">
   <div class="ipcard">
-    <h3>统计口径
-      <button type="button" class="iconbtn ipclose" title="关闭">
+    <h3><span data-i18n="info.title">统计口径</span>
+      <button type="button" class="iconbtn ipclose" title="关闭" data-i18n-title="common.close">
         <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor"
           stroke-width="2.6" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
       </button></h3>
@@ -738,6 +738,239 @@ body.wgt #today, body.wgt #done { display: none !important; }
 <script>
 const $ = s => document.querySelector(s);
 let sessions = [], filter = 'all', query = '';
+
+/* ---------- 多语言 i18n（中 / 英 / 日；有效 locale 由 daemon 下发） ---------- */
+let LOCALE = 'zh-CN';
+const I18N = {
+  'zh-CN': {
+    'common.loading': '载入中…', 'common.close': '关闭', 'common.opFailed': '操作失败',
+    'common.saveFailed': '保存失败', 'common.back': '返回',
+    'header.settings': '设置', 'header.refresh': '刷新', 'header.quit': '退出 AgentDeck',
+    'tab.overview': '概览', 'tab.sessions': '会话',
+    'time.justNow': '刚刚', 'time.minAgo': '{n} 分钟前', 'time.hourAgo': '{n} 小时前', 'time.dayAgo': '{n} 天前',
+    'cd.reset': '已重置', 'cd.inDays': '{n} 天后重置', 'cd.inHM': '{h} 小时 {m} 分后重置', 'cd.inM': '{m} 分钟后重置',
+    'dur.dh': '{d} 天 {h} 小时', 'dur.hm': '{h} 小时 {m} 分', 'dur.m': '{m} 分钟',
+    'quota.fetchFailed': '额度获取失败', 'quota.stale': '⚠︎ 接口限流中，显示最近一次成功数据',
+    'quota.extra': '额外用量 <b>${used}</b> / ${limit}', 'quota.dataStale': '⚠ 数据已 {h} 小时未更新，额度可能不准',
+    'quota.credits': 'Credits 余额 <b>{bal}</b>', 'quota.sampledAt': '采样于 {time}',
+    'quota.used': '已用', 'quota.noOther': '暂无其他窗口数据',
+    'quota.burnSafe': '✓ 当前速率安全，可撑到重置', 'quota.burnWarn': '⚠ 按当前速率约 {dur}后用尽，建议放缓',
+    'quota.winMins': '{n} 分钟窗口',
+    'win.five_hour': '5 小时窗口', 'win.seven_day': '周限额', 'win.seven_day_sonnet': '周限额 · Sonnet',
+    'win.seven_day_opus': '周限额 · Opus', 'win.seven_day_oauth_apps': '周限额 · OAuth Apps',
+    'win.primary': '主窗口', 'win.secondary': '次窗口',
+    'usage.tabCurve': '24 小时', 'usage.tabUsage': '近 7 天', 'usage.tabProj': '项目 Top', 'usage.info': '统计口径',
+    'usage.costEq': 'API 等值 7天 <b>${c7}</b> · 30天 <b>${c30}</b>',
+    'usage.costSplit': 'Claude 7天 ${c7} / 30天 ${c30} · Codex 7天 ${x7} / 30天 ${x30}',
+    'usage.today': '今天', 'usage.noUsage': '无用量', 'usage.legend24h': '{name} 24h',
+    'session.recent': '最近会话', 'session.all': '全部', 'session.search': '搜索…',
+    'session.resume': '恢复', 'session.copyCmd': '复制恢复命令', 'session.pin': '置顶', 'session.unpin': '取消置顶',
+    'session.noMatch': '没有匹配的会话', 'session.loadingPreview': '读取对话…',
+    'session.roleUser': '我', 'session.roleAI': 'AI', 'session.noPreview': '没有可预览的内容',
+    'session.previewFailed': '预览加载失败', 'session.loadFailed': '会话加载失败',
+    'session.pinned': '已置顶', 'session.unpinned': '已取消置顶',
+    'session.cmdCopied': '恢复命令已复制', 'session.copyFailed': '复制失败',
+    'session.openedPaste': '已在 {app} 打开，命令已复制，粘贴回车即恢复',
+    'session.resumed': '已在终端中恢复会话', 'session.resumeFailedReason': '恢复失败: {err}', 'session.resumeFailed': '恢复失败',
+    'active.running': '正在运行 · {n}', 'active.jumpTerminal': '点击跳转到所在终端', 'active.homeDir': '~（主目录）',
+    'active.runningFor': '已运行 {dur}', 'active.busy': '工作中', 'active.idle': '空闲',
+    'active.termNotFound': '未找到会话所在终端: {err}', 'active.jumpFailed': '跳转失败',
+    'done.recent': '最近完成', 'done.jumpSession': '点击跳转到会话', 'done.taskDone': '任务完成',
+    'today.summary': '今日 <b>{tok}</b> tokens', 'today.eq': '等值 <b>${cost}</b>',
+    'today.deltaTitle': '近 24 小时较前一个 24 小时',
+    'info.title': '统计口径', 'info.note': '订阅按窗口限额计费，等值金额仅供参考，不是实际账单。',
+    'info.priceTerm': '单价', 'info.priceText': 'Claude 按模型与缓存档位（Opus 4.5+ $5/$25，缓存读 $0.5/M，写入分 5m/1h 两档）；Codex 按 gpt-5.5（$5/$30，缓存读 -90%）',
+    'info.todayTerm': '今日', 'info.todayText': '本地自然日 0 点起的 token 总量（Claude + Codex）',
+    'info.eqTerm': '等值', 'info.eqText': '按官方 API 单价折算的金额',
+    'info.momTerm': '环比', 'info.momText': '近 24 小时 vs 再前 24 小时（滚动窗口，非自然日）',
+    'info.detailTerm': '明细', 'info.curveTerm': '曲线', 'info.curveText': '近 24 小时 token 用量，按整点聚合；Claude 已按消息去重，Codex 取会话累计值',
+    'info.projTerm': '项目', 'info.projText': '近 7 天按会话所在目录聚合的 token 与等值金额',
+    'info.barTerm': '柱状', 'info.barText': '近 7 天 token 用量，本地自然日聚合，按模型分段着色', 'info.splitTerm': '分项',
+    'proj.none7d': '近 7 天暂无项目用量',
+    'set.secNotify': '通知', 'set.secMenubar': '菜单栏', 'set.secPanel': '面板', 'set.secResume': '会话恢复',
+    'set.secSystem': '系统', 'set.secData': '数据',
+    'set.notifyEnabled': '额度告警通知', 'set.notifyWarn': '提醒阈值', 'set.notifyCrit': '严重阈值', 'set.withSound': '带提示音',
+    'set.notifyReset': '重置回满提醒', 'set.sessionDone': '会话完成提醒', 'set.sessionDoneHint': '灵动岛弹出，点击跳会话',
+    'set.shortFilter': '短任务过滤', 'set.shortFilterHint': '低于该时长不提醒', 'set.dwell': '提醒停留时长', 'set.sound': '提示音',
+    'set.menubarUsage': '常显用量', 'set.menubarUsageHint': '可多选，全不选只留图标',
+    'set.showActive': '活跃会话卡片', 'set.minimal': '精简模式', 'set.minimalHint': '降低视觉噪声，更耐看',
+    'set.glassDim': '面板暗化强度', 'set.glassDimHint': '越低越透明',
+    'set.sessionsLimit': '会话列表数量', 'set.sessionsLimitHint': '每端各取 N 条',
+    'set.refreshInterval': '自动刷新间隔', 'set.sampleInterval': '额度采样间隔', 'set.minUnit': '{n} 分钟',
+    'set.keepAwake': '保持唤醒', 'set.keepAwakeHint': '有活跃会话时阻止系统休眠，避免会话断网中断',
+    'set.language': '语言', 'set.langAuto': '跟随系统',
+    'set.resumeMethod': '恢复方式', 'set.resumeMethodHint': '仅列已安装终端', 'set.termAuto': '自动（按优先级）', 'set.termCopy': '仅复制命令',
+    'set.dataManage': '数据管理', 'set.dataManageHint': '数据仅存本机',
+    'set.openData': '打开数据目录', 'set.exportCsv': '导出用量 CSV', 'set.clearEvents': '清空完成记录',
+    'set.custom': '自定义', 'set.dataLocal': '数据仅存本机',
+    'set.openedData': '已打开数据目录', 'set.csvExported': 'CSV 已导出到「下载」', 'set.eventsCleared': '完成记录已清空',
+    'weekPrefix': '周',
+  },
+  'en': {
+    'common.loading': 'Loading…', 'common.close': 'Close', 'common.opFailed': 'Operation failed',
+    'common.saveFailed': 'Save failed', 'common.back': 'Back',
+    'header.settings': 'Settings', 'header.refresh': 'Refresh', 'header.quit': 'Quit AgentDeck',
+    'tab.overview': 'Overview', 'tab.sessions': 'Sessions',
+    'time.justNow': 'just now', 'time.minAgo': '{n}m ago', 'time.hourAgo': '{n}h ago', 'time.dayAgo': '{n}d ago',
+    'cd.reset': 'reset', 'cd.inDays': 'resets in {n}d', 'cd.inHM': 'resets in {h}h {m}m', 'cd.inM': 'resets in {m}m',
+    'dur.dh': '{d}d {h}h', 'dur.hm': '{h}h {m}m', 'dur.m': '{m}m',
+    'quota.fetchFailed': 'Failed to fetch quota', 'quota.stale': '⚠︎ Rate-limited; showing last successful data',
+    'quota.extra': 'Extra usage <b>${used}</b> / ${limit}', 'quota.dataStale': '⚠ Data {h}h stale; quota may be off',
+    'quota.credits': 'Credits <b>{bal}</b>', 'quota.sampledAt': 'sampled {time}',
+    'quota.used': 'used', 'quota.noOther': 'No other windows',
+    'quota.burnSafe': '✓ Current rate is safe through reset', 'quota.burnWarn': '⚠ At this rate, ~{dur} until depleted — ease up',
+    'quota.winMins': '{n}-min window',
+    'win.five_hour': '5-hour', 'win.seven_day': 'Weekly', 'win.seven_day_sonnet': 'Weekly · Sonnet',
+    'win.seven_day_opus': 'Weekly · Opus', 'win.seven_day_oauth_apps': 'Weekly · OAuth Apps',
+    'win.primary': 'Primary', 'win.secondary': 'Secondary',
+    'usage.tabCurve': '24 h', 'usage.tabUsage': '7 days', 'usage.tabProj': 'Top projects', 'usage.info': 'Methodology',
+    'usage.costEq': 'API equiv. 7d <b>${c7}</b> · 30d <b>${c30}</b>',
+    'usage.costSplit': 'Claude 7d ${c7} / 30d ${c30} · Codex 7d ${x7} / 30d ${x30}',
+    'usage.today': 'Today', 'usage.noUsage': 'no usage', 'usage.legend24h': '{name} 24h',
+    'session.recent': 'Recent sessions', 'session.all': 'All', 'session.search': 'Search…',
+    'session.resume': 'Resume', 'session.copyCmd': 'Copy resume command', 'session.pin': 'Pin', 'session.unpin': 'Unpin',
+    'session.noMatch': 'No matching sessions', 'session.loadingPreview': 'Loading conversation…',
+    'session.roleUser': 'Me', 'session.roleAI': 'AI', 'session.noPreview': 'Nothing to preview',
+    'session.previewFailed': 'Preview failed to load', 'session.loadFailed': 'Failed to load sessions',
+    'session.pinned': 'Pinned', 'session.unpinned': 'Unpinned',
+    'session.cmdCopied': 'Resume command copied', 'session.copyFailed': 'Copy failed',
+    'session.openedPaste': 'Opened {app} — command copied, paste & Enter to resume',
+    'session.resumed': 'Resumed in terminal', 'session.resumeFailedReason': 'Resume failed: {err}', 'session.resumeFailed': 'Resume failed',
+    'active.running': 'Running · {n}', 'active.jumpTerminal': 'Click to jump to its terminal', 'active.homeDir': '~ (home)',
+    'active.runningFor': 'up {dur}', 'active.busy': 'busy', 'active.idle': 'idle',
+    'active.termNotFound': "Couldn't find the session's terminal: {err}", 'active.jumpFailed': 'Jump failed',
+    'done.recent': 'Recently done', 'done.jumpSession': 'Click to jump to session', 'done.taskDone': 'Task complete',
+    'today.summary': 'Today <b>{tok}</b> tokens', 'today.eq': 'equiv. <b>${cost}</b>',
+    'today.deltaTitle': 'Last 24h vs previous 24h',
+    'info.title': 'Methodology', 'info.note': 'Subscriptions bill by window limits; equivalent amounts are indicative, not your actual bill.',
+    'info.priceTerm': 'Pricing', 'info.priceText': 'Claude by model & cache tier (Opus 4.5+ $5/$25, cache read $0.5/M, writes split 5m/1h); Codex by gpt-5.5 ($5/$30, cache read −90%)',
+    'info.todayTerm': 'Today', 'info.todayText': 'Total tokens since local midnight (Claude + Codex)',
+    'info.eqTerm': 'Equiv.', 'info.eqText': 'Amount converted at official API prices',
+    'info.momTerm': 'Trend', 'info.momText': 'Last 24h vs the 24h before (rolling window, not calendar day)',
+    'info.detailTerm': 'Detail', 'info.curveTerm': 'Curve', 'info.curveText': 'Last 24h token usage, bucketed hourly; Claude deduped per message, Codex uses cumulative session value',
+    'info.projTerm': 'Projects', 'info.projText': 'Last 7 days, tokens & equivalent grouped by session directory',
+    'info.barTerm': 'Bars', 'info.barText': 'Last 7 days token usage, grouped by local day, colored by model', 'info.splitTerm': 'Split',
+    'proj.none7d': 'No project usage in the last 7 days',
+    'set.secNotify': 'Notifications', 'set.secMenubar': 'Menu bar', 'set.secPanel': 'Panel', 'set.secResume': 'Session resume',
+    'set.secSystem': 'System', 'set.secData': 'Data',
+    'set.notifyEnabled': 'Quota alerts', 'set.notifyWarn': 'Warn threshold', 'set.notifyCrit': 'Critical threshold', 'set.withSound': 'with sound',
+    'set.notifyReset': 'Reset-to-full alert', 'set.sessionDone': 'Session-done alert', 'set.sessionDoneHint': 'Island popup; click to jump',
+    'set.shortFilter': 'Short-task filter', 'set.shortFilterHint': "Don't alert below this duration", 'set.dwell': 'Alert dwell time', 'set.sound': 'Sound',
+    'set.menubarUsage': 'Always-on usage', 'set.menubarUsageHint': 'Multi-select; none = icon only',
+    'set.showActive': 'Active sessions card', 'set.minimal': 'Minimal mode', 'set.minimalHint': 'Less visual noise, easier on the eyes',
+    'set.glassDim': 'Panel dimming', 'set.glassDimHint': 'Lower = more transparent',
+    'set.sessionsLimit': 'Sessions list size', 'set.sessionsLimitHint': 'N per tool',
+    'set.refreshInterval': 'Auto-refresh interval', 'set.sampleInterval': 'Quota sampling interval', 'set.minUnit': '{n} min',
+    'set.keepAwake': 'Keep awake', 'set.keepAwakeHint': 'Prevent system sleep while sessions are active, so they survive sleep/network drops',
+    'set.language': 'Language', 'set.langAuto': 'Follow system',
+    'set.resumeMethod': 'Resume method', 'set.resumeMethodHint': 'Only installed terminals', 'set.termAuto': 'Auto (by priority)', 'set.termCopy': 'Copy command only',
+    'set.dataManage': 'Data management', 'set.dataManageHint': 'Data stays on this Mac',
+    'set.openData': 'Open data folder', 'set.exportCsv': 'Export usage CSV', 'set.clearEvents': 'Clear done events',
+    'set.custom': 'Custom', 'set.dataLocal': 'Data stays on this Mac',
+    'set.openedData': 'Opened data folder', 'set.csvExported': 'CSV exported to Downloads', 'set.eventsCleared': 'Done events cleared',
+    'weekPrefix': '',
+  },
+  'ja': {
+    'common.loading': '読み込み中…', 'common.close': '閉じる', 'common.opFailed': '操作に失敗しました',
+    'common.saveFailed': '保存に失敗しました', 'common.back': '戻る',
+    'header.settings': '設定', 'header.refresh': '更新', 'header.quit': 'AgentDeck を終了',
+    'tab.overview': '概要', 'tab.sessions': 'セッション',
+    'time.justNow': 'たった今', 'time.minAgo': '{n}分前', 'time.hourAgo': '{n}時間前', 'time.dayAgo': '{n}日前',
+    'cd.reset': 'リセット済み', 'cd.inDays': '{n}日後にリセット', 'cd.inHM': '{h}時間{m}分後にリセット', 'cd.inM': '{m}分後にリセット',
+    'dur.dh': '{d}日 {h}時間', 'dur.hm': '{h}時間 {m}分', 'dur.m': '{m}分',
+    'quota.fetchFailed': '残量の取得に失敗', 'quota.stale': '⚠︎ レート制限中。直近の成功データを表示',
+    'quota.extra': '追加使用 <b>${used}</b> / ${limit}', 'quota.dataStale': '⚠ データが{h}時間未更新。残量がずれている可能性',
+    'quota.credits': 'Credits 残高 <b>{bal}</b>', 'quota.sampledAt': '{time} に取得',
+    'quota.used': '使用', 'quota.noOther': '他の枠データなし',
+    'quota.burnSafe': '✓ 現在のペースならリセットまで安全', 'quota.burnWarn': '⚠ 現ペースで約{dur}で枯渇。ペースダウン推奨',
+    'quota.winMins': '{n}分枠',
+    'win.five_hour': '5時間枠', 'win.seven_day': '週間上限', 'win.seven_day_sonnet': '週間 · Sonnet',
+    'win.seven_day_opus': '週間 · Opus', 'win.seven_day_oauth_apps': '週間 · OAuth Apps',
+    'win.primary': '主枠', 'win.secondary': '副枠',
+    'usage.tabCurve': '24 時間', 'usage.tabUsage': '7 日間', 'usage.tabProj': 'プロジェクト Top', 'usage.info': '集計基準',
+    'usage.costEq': 'API 換算 7日 <b>${c7}</b> · 30日 <b>${c30}</b>',
+    'usage.costSplit': 'Claude 7日 ${c7} / 30日 ${c30} · Codex 7日 ${x7} / 30日 ${x30}',
+    'usage.today': '今日', 'usage.noUsage': '使用なし', 'usage.legend24h': '{name} 24h',
+    'session.recent': '最近のセッション', 'session.all': 'すべて', 'session.search': '検索…',
+    'session.resume': '再開', 'session.copyCmd': '再開コマンドをコピー', 'session.pin': 'ピン留め', 'session.unpin': 'ピン解除',
+    'session.noMatch': '一致するセッションなし', 'session.loadingPreview': '会話を読み込み中…',
+    'session.roleUser': '自分', 'session.roleAI': 'AI', 'session.noPreview': 'プレビューする内容なし',
+    'session.previewFailed': 'プレビューの読み込みに失敗', 'session.loadFailed': 'セッションの読み込みに失敗',
+    'session.pinned': 'ピン留めしました', 'session.unpinned': 'ピンを解除しました',
+    'session.cmdCopied': '再開コマンドをコピーしました', 'session.copyFailed': 'コピーに失敗',
+    'session.openedPaste': '{app} を開きました。コマンドをコピー済み、貼り付けて Enter で再開',
+    'session.resumed': 'ターミナルで再開しました', 'session.resumeFailedReason': '再開に失敗: {err}', 'session.resumeFailed': '再開に失敗',
+    'active.running': '実行中 · {n}', 'active.jumpTerminal': 'クリックでターミナルへ移動', 'active.homeDir': '~（ホーム）',
+    'active.runningFor': '稼働 {dur}', 'active.busy': '作業中', 'active.idle': 'アイドル',
+    'active.termNotFound': 'セッションのターミナルが見つかりません: {err}', 'active.jumpFailed': '移動に失敗',
+    'done.recent': '最近の完了', 'done.jumpSession': 'クリックでセッションへ移動', 'done.taskDone': 'タスク完了',
+    'today.summary': '今日 <b>{tok}</b> tokens', 'today.eq': '換算 <b>${cost}</b>',
+    'today.deltaTitle': '直近24時間 vs その前の24時間',
+    'info.title': '集計基準', 'info.note': 'サブスクは枠の上限で課金されます。換算額は目安で実際の請求ではありません。',
+    'info.priceTerm': '単価', 'info.priceText': 'Claude はモデルとキャッシュ段階（Opus 4.5+ $5/$25、キャッシュ読み $0.5/M、書き込みは 5m/1h の2段）；Codex は gpt-5.5（$5/$30、キャッシュ読み −90%）',
+    'info.todayTerm': '今日', 'info.todayText': 'ローカル暦日0時からの token 合計（Claude + Codex）',
+    'info.eqTerm': '換算', 'info.eqText': '公式 API 単価で換算した金額',
+    'info.momTerm': '前比', 'info.momText': '直近24時間 vs その前の24時間（ローリング、暦日ではない）',
+    'info.detailTerm': '内訳', 'info.curveTerm': '曲線', 'info.curveText': '直近24時間の token 使用量、毎正時で集計；Claude はメッセージ単位で重複排除、Codex はセッション累計値',
+    'info.projTerm': 'プロジェクト', 'info.projText': '直近7日間、セッションのディレクトリ別に token と換算額を集計',
+    'info.barTerm': '棒', 'info.barText': '直近7日間の token 使用量、ローカル暦日で集計、モデル別に色分け', 'info.splitTerm': '内訳',
+    'proj.none7d': '直近7日間のプロジェクト使用なし',
+    'set.secNotify': '通知', 'set.secMenubar': 'メニューバー', 'set.secPanel': 'パネル', 'set.secResume': 'セッション再開',
+    'set.secSystem': 'システム', 'set.secData': 'データ',
+    'set.notifyEnabled': '残量アラート', 'set.notifyWarn': '警告しきい値', 'set.notifyCrit': '重大しきい値', 'set.withSound': '通知音あり',
+    'set.notifyReset': '回復時に通知', 'set.sessionDone': 'セッション完了通知', 'set.sessionDoneHint': 'アイランド表示、クリックで移動',
+    'set.shortFilter': '短時間タスク除外', 'set.shortFilterHint': 'この時間未満は通知しない', 'set.dwell': '通知の表示時間', 'set.sound': '通知音',
+    'set.menubarUsage': '使用率を常時表示', 'set.menubarUsageHint': '複数選択可、未選択ならアイコンのみ',
+    'set.showActive': 'アクティブセッション', 'set.minimal': 'ミニマルモード', 'set.minimalHint': '視覚ノイズを抑えて見やすく',
+    'set.glassDim': 'パネルの暗さ', 'set.glassDimHint': '低いほど透明',
+    'set.sessionsLimit': 'セッション一覧の件数', 'set.sessionsLimitHint': 'ツールごとに N 件',
+    'set.refreshInterval': '自動更新の間隔', 'set.sampleInterval': '残量サンプリング間隔', 'set.minUnit': '{n} 分',
+    'set.keepAwake': 'スリープ防止', 'set.keepAwakeHint': 'アクティブなセッション中はスリープを防ぎ、切断による中断を回避',
+    'set.language': '言語', 'set.langAuto': 'システムに従う',
+    'set.resumeMethod': '再開方法', 'set.resumeMethodHint': 'インストール済みのみ表示', 'set.termAuto': '自動（優先度順）', 'set.termCopy': 'コマンドをコピーのみ',
+    'set.dataManage': 'データ管理', 'set.dataManageHint': 'データはこの Mac のみ',
+    'set.openData': 'データフォルダを開く', 'set.exportCsv': '使用量 CSV を書き出す', 'set.clearEvents': '完了記録を消去',
+    'set.custom': 'カスタム', 'set.dataLocal': 'データはこの Mac のみ',
+    'set.openedData': 'データフォルダを開きました', 'set.csvExported': 'CSV をダウンロードに書き出しました', 'set.eventsCleared': '完了記録を消去しました',
+    'weekPrefix': '',
+  },
+};
+const WEEKDAYS = {
+  'zh-CN': ['日', '一', '二', '三', '四', '五', '六'],
+  'en': ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'],
+  'ja': ['日', '月', '火', '水', '木', '金', '土'],
+};
+const t = (k, p) => {
+  let s = (I18N[LOCALE] && I18N[LOCALE][k]);
+  if (s == null) s = I18N['en'][k];
+  if (s == null) return k;
+  if (p) for (const n in p) s = s.split('{' + n + '}').join(p[n]);
+  return s;
+};
+const weekdays = () => WEEKDAYS[LOCALE] || WEEKDAYS['en'];
+// 窗口标签：优先按稳定 id 本地化，win_<分钟> 走模板，未知 id 回退后端 label
+const winLabel = w => {
+  const id = (w && w.id) || '';
+  const fixed = t('win.' + id);
+  if (fixed !== 'win.' + id) return fixed;
+  const mm = /^win_(\d+)$/.exec(id);
+  if (mm) return t('quota.winMins', {n: mm[1]});
+  return (w && w.label) || '';
+};
+// 秒 → 本地化时长（活跃会话运行时长 / 倒计时复用）
+const fmtDur = secs => {
+  secs = Math.max(0, Math.round(secs));
+  const d = Math.floor(secs / 86400), h = Math.floor(secs % 86400 / 3600), m = Math.floor(secs % 3600 / 60);
+  if (d) return t('dur.dh', {d, h});
+  if (h) return t('dur.hm', {h, m});
+  return t('dur.m', {m});
+};
+// 静态 HTML 节点 / 属性按当前语言填充
+function applyStaticI18n(root = document) {
+  root.querySelectorAll('[data-i18n]').forEach(el => { el.textContent = t(el.dataset.i18n); });
+  root.querySelectorAll('[data-i18n-title]').forEach(el => { el.title = t(el.dataset.i18nTitle); });
+  root.querySelectorAll('[data-i18n-ph]').forEach(el => { el.placeholder = t(el.dataset.i18nPh); });
+}
 /* 品牌字形徽章：官方菜单栏模板图（Claude TrayIconTemplate / Codex codexTemplate）
    以 CSS mask 取形、currentColor 上色 —— 形状严格官方，配色跟随玻璃语言 */
 const badge = (tool, sz = 13) =>
@@ -750,17 +983,17 @@ const fmtTokens = n => n >= 1e9 ? (n/1e9).toFixed(1)+'B' : n >= 1e6 ? (n/1e6).to
                      : n >= 1e3 ? (n/1e3).toFixed(0)+'K' : String(n);
 const rel = ts => {
   const s = Date.now()/1000 - ts;
-  if (s < 60) return '刚刚';
-  if (s < 3600) return Math.floor(s/60)+' 分钟前';
-  if (s < 86400) return Math.floor(s/3600)+' 小时前';
-  return Math.floor(s/86400)+' 天前';
+  if (s < 60) return t('time.justNow');
+  if (s < 3600) return t('time.minAgo', {n: Math.floor(s/60)});
+  if (s < 86400) return t('time.hourAgo', {n: Math.floor(s/3600)});
+  return t('time.dayAgo', {n: Math.floor(s/86400)});
 };
 const cd = iso => {            // 重置倒计时
   if (!iso) return '';
-  const t = (typeof iso === 'number' ? iso*1000 : Date.parse(iso)) - Date.now();
-  if (t <= 0) return '已重置';
-  const h = Math.floor(t/3.6e6), m = Math.floor(t%3.6e6/6e4);
-  return h > 48 ? Math.floor(h/24)+' 天后重置' : h > 0 ? `${h}h ${m}m 后重置` : `${m}m 后重置`;
+  const ms = (typeof iso === 'number' ? iso*1000 : Date.parse(iso)) - Date.now();
+  if (ms <= 0) return t('cd.reset');
+  const h = Math.floor(ms/3.6e6), m = Math.floor(ms%3.6e6/6e4);
+  return h > 48 ? t('cd.inDays', {n: Math.floor(h/24)}) : h > 0 ? t('cd.inHM', {h, m}) : t('cd.inM', {m});
 };
 const grade = p => p >= 95 ? 'danger' : p >= 80 ? 'warn' : '';
 const toast = msg => {
@@ -790,9 +1023,8 @@ function burnHint(w) {       // 按消耗速率预测耗尽时间
   const winMs = 5*3.6e6, start = reset - winMs, el = Date.now() - start;
   if (el <= 0) return '';
   const burnMs = el / w.used_percent * 100 - el;   // 距 100% 还能跑多久
-  if (burnMs > reset - Date.now()) return '✓ 当前速率安全，可撑到重置';
-  const h = burnMs/3.6e6;
-  return `⚠ 按当前速率约 ${h >= 1 ? h.toFixed(1)+' 小时' : Math.max(1,Math.round(burnMs/6e4))+' 分钟'}后用尽，建议放缓`;
+  if (burnMs > reset - Date.now()) return t('quota.burnSafe');
+  return t('quota.burnWarn', {dur: fmtDur(burnMs / 1000)});
 }
 
 function renderQuotaCard(el, name, data, gradId) {
@@ -801,7 +1033,7 @@ function renderQuotaCard(el, name, data, gradId) {
   if (!data || !data.ok) {
     el.innerHTML = `<div class="qhead"><span class="qbadge ${tool}">${icon}</span>
       <span class="qname">${name}</span></div>
-      <div class="qerr">额度获取失败<br>${esc((data && data.error || '').slice(0,80))}</div>`;
+      <div class="qerr">${t('quota.fetchFailed')}<br>${esc((data && data.error || '').slice(0,80))}</div>`;
     return;
   }
   const ws = data.windows || [];
@@ -814,7 +1046,7 @@ function renderQuotaCard(el, name, data, gradId) {
 
   let foot = '';
   if (data.stale) {
-    foot = '⚠︎ 接口限流中，显示最近一次成功数据';
+    foot = t('quota.stale');
   } else if (name === 'Claude') {
     const extra = (data.raw || {}).extra_usage;
     const burn = burnHint(ws.find(w => w.id === 'five_hour'));
@@ -824,17 +1056,17 @@ function renderQuotaCard(el, name, data, gradId) {
       return Number.isInteger(d) ? d : d.toFixed(2);
     };
     foot = burn || (extra && extra.is_enabled
-      ? `额外用量 <b>$${cents(extra.used_credits)}</b> / $${cents(extra.monthly_limit)}` : '');
+      ? t('quota.extra', {used: cents(extra.used_credits), limit: cents(extra.monthly_limit)}) : '');
   } else {
     // 新鲜度警示优先于一切：数据不可信时其他信息没有意义
     const age = data.sampled_at ? Date.now() - Date.parse(data.sampled_at) : 0;
     const cr = data.credits;
     if (age > 2 * 3.6e6) {
-      foot = `<span class="stale">⚠ 数据已 ${Math.round(age/3.6e6)} 小时未更新，额度可能不准</span>`;
+      foot = `<span class="stale">${t('quota.dataStale', {h: Math.round(age/3.6e6)})}</span>`;
     } else if (cr && cr.has_credits) {
-      foot = `Credits 余额 <b>${cr.unlimited ? '∞' : esc('$' + cr.balance)}</b>`;
+      foot = t('quota.credits', {bal: cr.unlimited ? '∞' : esc('$' + cr.balance)});
     } else if (data.sampled_at) {
-      foot = `采样于 ${rel(Date.parse(data.sampled_at)/1000)}`;
+      foot = t('quota.sampledAt', {time: rel(Date.parse(data.sampled_at)/1000)});
     }
   }
 
@@ -853,16 +1085,16 @@ function renderQuotaCard(el, name, data, gradId) {
   el.innerHTML = `
     <div class="qhead"><span class="qbadge ${tool}">${icon}</span>
       <span class="qname">${name}</span>
-      <span class="qsub">${esc(main.label||'')}${wgt ? '' : ' · 已用'}<br>${cd(main.resets_at)}${resetBar}</span></div>
+      <span class="qsub">${esc(winLabel(main))}${wgt ? '' : ' · ' + t('quota.used')}<br>${cd(main.resets_at)}${resetBar}</span></div>
     <div class="qbody">
       ${ringSvg(main.used_percent, mainGrad)}
       <div class="qmeta">
         ${rest.length ? rest.map(w => `
           <div class="wrow">
-            <div class="wlabel"><span>${esc(w.label)}</span><b>${w.used_percent}%</b></div>
+            <div class="wlabel"><span>${esc(winLabel(w))}</span><b>${w.used_percent}%</b></div>
             <div class="wbar"><i class="${grade(w.used_percent)}" data-w="${Math.min(w.used_percent,100)}"></i></div>
           </div>`).join('')
-        : `<div class="wrow"><div class="wlabel"><span style="color:var(--ink-3)">暂无其他窗口数据</span></div></div>`}
+        : `<div class="wrow"><div class="wlabel"><span style="color:var(--ink-3)">${t('quota.noOther')}</span></div></div>`}
       </div>
     </div>
     ${foot ? `<div class="qfoot"><span>${foot}</span></div>` : ''}`;
@@ -894,9 +1126,10 @@ function showTip(e, html) {
 async function loadUsage() {
   try {
     const d = await (await fetch('/api/usage')).json();
-    $('#cost').innerHTML = `API 等值 7天 <b>$${Math.round(d.cost_7d)}</b> · 30天 <b>$${Math.round(d.cost_30d)}</b>`;
-    _costSplit = `Claude 7天 $${Math.round(d.claude_cost_7d||0)} / 30天 $${Math.round(d.claude_cost_30d||0)}` +
-      ` · Codex 7天 $${Math.round(d.codex_cost_7d||0)} / 30天 $${Math.round(d.codex_cost_30d||0)}`;
+    $('#cost').innerHTML = t('usage.costEq', {c7: Math.round(d.cost_7d), c30: Math.round(d.cost_30d)});
+    _costSplit = t('usage.costSplit', {
+      c7: Math.round(d.claude_cost_7d||0), c30: Math.round(d.claude_cost_30d||0),
+      x7: Math.round(d.codex_cost_7d||0), x30: Math.round(d.codex_cost_30d||0)});
     const days = d.days.slice(-7);
     const totals = days.map(day => {
       const models = d.claude_daily[day] || {};
@@ -923,7 +1156,7 @@ async function loadUsage() {
     const fmtAxis = n => fmtTokens(n).replace('.0', '');
     const slot = (X1 - X0) / 7;
     const today = new Date().toISOString().slice(0, 10);
-    const WD = ['日', '一', '二', '三', '四', '五', '六'];
+    const WD = weekdays();
     const GRAD = {
       opus:   ['#ffb38a', '#e8744f'], sonnet: ['#9db8ff', '#5f7de8'],
       haiku:  ['#aef0c8', '#5fc78f'], other:  ['#9a9aa5', '#6a6a75'],
@@ -941,16 +1174,16 @@ async function loadUsage() {
         <text class="cv-label" x="${X0 - 4}" y="${y + 2.5}" text-anchor="end">${f ? fmtAxis(niceMax * f) : 0}</text>`;
     }
 
-    body += totals.map((t, i) => {
+    body += totals.map((td, i) => {
       const cx = X0 + slot * i + slot / 2, x = cx - BW / 2;
-      const totalH = t.all / niceMax * (Y0 - Y1);
-      const isToday = t.day === today;
+      const totalH = td.all / niceMax * (Y0 - Y1);
+      const isToday = td.day === today;
       let segs = '', cur = Y0;
-      if (t.all > 0) {
+      if (td.all > 0) {
         segs += `<clipPath id="ub${i}"><rect x="${x}" y="${(Y0 - Math.max(totalH, 4)).toFixed(1)}"
           width="${BW}" height="${Math.max(totalH, 4).toFixed(1)}" rx="4.5"/></clipPath>`;
         for (const m of ['opus', 'sonnet', 'haiku', 'other', 'codex']) {
-          const v = m === 'codex' ? t.codex : (t.per[m] || 0);
+          const v = m === 'codex' ? td.codex : (td.per[m] || 0);
           if (!v) continue;
           const h = v / niceMax * (Y0 - Y1);
           segs += `<rect x="${x}" y="${(cur - h).toFixed(1)}" width="${BW}" height="${(h + .5).toFixed(1)}"
@@ -958,17 +1191,17 @@ async function loadUsage() {
           cur -= h;
         }
         segs += `<text class="uval ${isToday ? 'today' : ''}" x="${cx}" y="${(Y0 - totalH - 4).toFixed(1)}"
-          text-anchor="middle">${fmtTokens(t.all)}</text>`;
+          text-anchor="middle">${fmtTokens(td.all)}</text>`;
       } else {
         segs += `<rect x="${x}" y="${Y0 - 2}" width="${BW}" height="2" rx="1" fill="rgba(255,255,255,.08)"/>`;
       }
-      const wd = WD[new Date(t.day + 'T12:00:00').getDay()];
+      const wd = WD[new Date(td.day + 'T12:00:00').getDay()];
       segs += `<text class="cv-label" x="${cx}" y="${Y0 + 12}" text-anchor="middle"
-          ${isToday ? 'fill="rgba(255,255,255,.92)" font-weight="700"' : ''}>${isToday ? '今天' : '周' + wd}</text>
-        <text class="cv-label" x="${cx}" y="${Y0 + 22}" text-anchor="middle">${t.day.slice(5).replace('-', '/')}</text>`;
-      const tipHtml = `<b>${t.day.slice(5)}</b><br>` +
-        Object.entries(t.per).map(([m, v]) => `${m}: <b>${fmtTokens(v)}</b>`).join('<br>') +
-        (t.codex ? `<br>codex: <b>${fmtTokens(t.codex)}</b>` : '') + (t.all === 0 ? '无用量' : '');
+          ${isToday ? 'fill="rgba(255,255,255,.92)" font-weight="700"' : ''}>${isToday ? t('usage.today') : t('weekPrefix') + wd}</text>
+        <text class="cv-label" x="${cx}" y="${Y0 + 22}" text-anchor="middle">${td.day.slice(5).replace('-', '/')}</text>`;
+      const tipHtml = `<b>${td.day.slice(5)}</b><br>` +
+        Object.entries(td.per).map(([m, v]) => `${m}: <b>${fmtTokens(v)}</b>`).join('<br>') +
+        (td.codex ? `<br>codex: <b>${fmtTokens(td.codex)}</b>` : '') + (td.all === 0 ? t('usage.noUsage') : '');
       return `<g class="uday" data-tip="${esc(tipHtml)}">
         <rect x="${X0 + slot * i}" y="${Y1}" width="${slot}" height="${Y0 - Y1 + 22}" fill="transparent"/>
         ${segs}</g>`;
@@ -999,14 +1232,14 @@ function renderSessions() {
           <div class="smeta"><b>${esc(s.project || '—')}</b>${s.branch && s.branch !== 'HEAD' ? ' · ' + esc(s.branch) : ''} · ${rel(s.mtime)}</div>
         </div>
         <div class="sacts">
-          <button type="button" class="sbtn iconb star ${s.pinned ? 'pinned' : ''}" data-act="pin" title="${s.pinned ? '取消置顶' : '置顶'}">
+          <button type="button" class="sbtn iconb star ${s.pinned ? 'pinned' : ''}" data-act="pin" title="${s.pinned ? t('session.unpin') : t('session.pin')}">
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
               stroke-width="2" stroke-linejoin="round">
               <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01z"/>
             </svg>
           </button>
-          <button type="button" class="sbtn" data-act="resume">恢复</button>
-          <button type="button" class="sbtn iconb" data-act="copy" title="复制恢复命令">
+          <button type="button" class="sbtn" data-act="resume">${t('session.resume')}</button>
+          <button type="button" class="sbtn iconb" data-act="copy" title="${t('session.copyCmd')}">
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
               stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <rect x="9" y="9" width="13" height="13" rx="2.5"/>
@@ -1017,7 +1250,7 @@ function renderSessions() {
       </div>
       <div class="spreview"></div>
     </div>`).join('')
-    : `<div class="empty">没有匹配的会话</div>`;
+    : `<div class="empty">${t('session.noMatch')}</div>`;
   updateFade($('#slist'));
 }
 
@@ -1028,15 +1261,15 @@ async function togglePreview(row, s) {
   row.classList.add('open');
   const box = row.querySelector('.spreview');
   if (box.dataset.loaded) return;
-  box.innerHTML = '<div class="ploading">读取对话…</div>';
+  box.innerHTML = `<div class="ploading">${t('session.loadingPreview')}</div>`;
   try {
     const d = await (await fetch(`/api/preview?tool=${s.tool}&id=${s.id}`)).json();
     box.innerHTML = d.ok && d.messages.length
       ? d.messages.map(m => `<div class="pmsg ${m.role}">
-          <span class="prole">${m.role === 'user' ? '我' : 'AI'}</span><span>${esc(m.text)}</span></div>`).join('')
-      : '<div class="ploading">没有可预览的内容</div>';
+          <span class="prole">${m.role === 'user' ? t('session.roleUser') : t('session.roleAI')}</span><span>${esc(m.text)}</span></div>`).join('')
+      : `<div class="ploading">${t('session.noPreview')}</div>`;
     box.dataset.loaded = '1';
-  } catch { box.innerHTML = '<div class="ploading">预览加载失败</div>'; }
+  } catch { box.innerHTML = `<div class="ploading">${t('session.previewFailed')}</div>`; }
 }
 
 async function loadSessions() {
@@ -1044,7 +1277,7 @@ async function loadSessions() {
     const d = await (await fetch('/api/sessions')).json();
     sessions = d.sessions || [];
     renderSessions();
-  } catch (e) { $('#slist').innerHTML = '<div class="empty">会话加载失败</div>'; }
+  } catch (e) { $('#slist').innerHTML = `<div class="empty">${t('session.loadFailed')}</div>`; }
 }
 
 $('#slist').addEventListener('click', async e => {
@@ -1062,15 +1295,15 @@ $('#slist').addEventListener('click', async e => {
       await fetch('/api/pin', { method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({pinned: !s.pinned, session: s}) });
-      toast(s.pinned ? '已取消置顶' : '已置顶');
+      toast(s.pinned ? t('session.unpinned') : t('session.pinned'));
       await loadSessions();
-    } catch { toast('操作失败'); }
+    } catch { toast(t('common.opFailed')); }
     return;
   }
   const cmd = `cd ${JSON.stringify(s.cwd || '~')} && ${s.tool === 'claude' ? 'claude --resume' : 'codex resume'} ${s.id}`;
   if (btn.dataset.act === 'copy') {
-    try { await navigator.clipboard.writeText(cmd); toast('恢复命令已复制'); }
-    catch { toast('复制失败'); }
+    try { await navigator.clipboard.writeText(cmd); toast(t('session.cmdCopied')); }
+    catch { toast(t('session.copyFailed')); }
     return;
   }
   btn.textContent = '…';
@@ -1080,13 +1313,15 @@ $('#slist').addEventListener('click', async e => {
       body: JSON.stringify({tool: s.tool, id: s.id, cwd: s.cwd}),
     })).json();
     if (r.ok && r.copy) {        // 设置为「仅复制」模式
-      try { await navigator.clipboard.writeText(r.command); toast('恢复命令已复制'); }
-      catch { toast('复制失败'); }
+      try {
+        await navigator.clipboard.writeText(r.command);
+        toast(r.paste ? t('session.openedPaste', {app: r.app || ''}) : t('session.cmdCopied'));
+      } catch { toast(t('session.copyFailed')); }
     } else {
-      toast(r.ok ? '已在终端中恢复会话' : '恢复失败: ' + (r.error || ''));
+      toast(r.ok ? t('session.resumed') : t('session.resumeFailedReason', {err: r.error || ''}));
     }
-  } catch { toast('恢复失败'); }
-  btn.textContent = '恢复';
+  } catch { toast(t('session.resumeFailed')); }
+  btn.textContent = t('session.resume');
 });
 
 document.querySelectorAll('.shead .chip').forEach(c => c.onclick = () => {
@@ -1119,17 +1354,17 @@ async function loadActive() {
     const el = $('#active');
     el.classList.toggle('has', list.length > 0);
     if (!list.length) { el.innerHTML = ''; return; }
-    el.innerHTML = `<div class="ahead"><span class="adot"></span>正在运行 · ${list.length}</div>` +
+    el.innerHTML = `<div class="ahead"><span class="adot"></span>${t('active.running', {n: list.length})}</div>` +
       list.map((a, i) => `
-        <div class="arow" data-i="${i}" title="点击跳转到所在终端">
+        <div class="arow" data-i="${i}" title="${t('active.jumpTerminal')}">
           <div class="abadge ${a.tool}">${badge(a.tool, 12)}</div>
           <b class="apath" title="${esc(a.cwd)}">${(() => {
             const p = (a.cwd || a.project).replace(/^\/Users\/[^/]+/, '~');
-            return esc(p === '~' ? '~（主目录）' : p);
+            return esc(p === '~' ? t('active.homeDir') : p);
           })()}</b>
           ${a.host === 'app' ? '<span class="ahost">App</span>' : ''}
-          <span class="aruntime">已运行 ${esc(a.runtime)}</span>
-          ${a.status ? `<span class="astate ${a.status}">${a.status === 'busy' ? '工作中' : '空闲'}</span>` : ''}
+          <span class="aruntime">${t('active.runningFor', {dur: a.runtime_secs != null ? fmtDur(a.runtime_secs) : esc(a.runtime)})}</span>
+          ${a.status ? `<span class="astate ${a.status}">${a.status === 'busy' ? t('active.busy') : t('active.idle')}</span>` : ''}
           <svg class="ajump" width="12" height="12" viewBox="0 0 24 24" fill="none"
             stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
             <polyline points="9 6 15 12 9 18"/></svg>
@@ -1151,8 +1386,8 @@ async function focusActive(a) {
     })).json();
     if (r.ok) {   // 主面板跳转成功后收起；小组件常驻桌面，不动面板
       if (bridge && !document.body.classList.contains('wgt')) bridge.postMessage('panel');
-    } else toast('未找到会话所在终端: ' + (r.error || ''));
-  } catch { toast('跳转失败'); }
+    } else toast(t('active.termNotFound', {err: r.error || ''}));
+  } catch { toast(t('active.jumpFailed')); }
 }
 
 /* ---------- 24h 额度曲线 ---------- */
@@ -1235,7 +1470,7 @@ async function loadCurve() {
         <circle cx="${pts[pts.length-1][0].toFixed(1)}" cy="${pts[pts.length-1][1].toFixed(1)}" r="2.4"
           fill="${s.color}" opacity=".95"/>`;
       const total = buckets.reduce((a, b) => a + b[s.key], 0);
-      legend.push(`<span><i style="display:inline-block;width:7px;height:7px;border-radius:3px;background:${s.color};margin-right:3px;vertical-align:-1px"></i>${s.name} 24h <b style="color:var(--ink)">${fmtTokens(total)}</b></span>`);
+      legend.push(`<span><i style="display:inline-block;width:7px;height:7px;border-radius:3px;background:${s.color};margin-right:3px;vertical-align:-1px"></i>${t('usage.legend24h', {name: s.name})} <b style="color:var(--ink)">${fmtTokens(total)}</b></span>`);
     }
     svg.innerHTML = body;
     $('#curvelegend').innerHTML = legend.join('');
@@ -1245,29 +1480,28 @@ async function loadCurve() {
 let _todayFams = {}, _costSplit = '';
 const _IP_ROW = (term, text) =>
   `<div class="iprow"><span class="ipterm">${term}</span><span>${text}</span></div>`;
-const _IP_NOTE = `<div class="ipnote">订阅按窗口限额计费，等值金额仅供参考，不是实际账单。</div>`;
-const _IP_PRICE = _IP_ROW('单价', 'Claude 按模型与缓存档位（Opus 4.5+ $5/$25，缓存读 $0.5/M，'
-  + '写入分 5m/1h 两档）；Codex 按 gpt-5.5（$5/$30，缓存读 -90%）');
+const _IP_NOTE = () => `<div class="ipnote">${t('info.note')}</div>`;
+const _IP_PRICE = () => _IP_ROW(t('info.priceTerm'), t('info.priceText'));
 function showInfoPop(kind) {
   let html;
   if (kind === 'today') {
     const fams = Object.entries(_todayFams).filter(([, v]) => v > 0)
       .map(([f, v]) => `${f} ${fmtTokens(v)}`).join(' · ');
-    html = _IP_ROW('今日', '本地自然日 0 点起的 token 总量（Claude + Codex）')
-      + _IP_ROW('等值', '按官方 API 单价折算的金额')
-      + _IP_ROW('环比', '近 24 小时 vs 再前 24 小时（滚动窗口，非自然日）')
-      + (fams ? _IP_ROW('明细', fams) : '');
+    html = _IP_ROW(t('info.todayTerm'), t('info.todayText'))
+      + _IP_ROW(t('info.eqTerm'), t('info.eqText'))
+      + _IP_ROW(t('info.momTerm'), t('info.momText'))
+      + (fams ? _IP_ROW(t('info.detailTerm'), fams) : '');
   } else {   // 跟随趋势卡当前视图，只讲对应口径
     const mode = usageMode();
     html = (mode === 'curve'
-      ? _IP_ROW('曲线', '近 24 小时 token 用量，按整点聚合；Claude 已按消息去重，Codex 取会话累计值')
+      ? _IP_ROW(t('info.curveTerm'), t('info.curveText'))
       : mode === 'proj'
-      ? _IP_ROW('项目', '近 7 天按会话所在目录聚合的 token 与等值金额')
-      : _IP_ROW('柱状', '近 7 天 token 用量，本地自然日聚合，按模型分段着色'))
-      + _IP_PRICE
-      + (_costSplit ? _IP_ROW('分项', _costSplit) : '');
+      ? _IP_ROW(t('info.projTerm'), t('info.projText'))
+      : _IP_ROW(t('info.barTerm'), t('info.barText')))
+      + _IP_PRICE()
+      + (_costSplit ? _IP_ROW(t('info.splitTerm'), _costSplit) : '');
   }
-  $('#ipbody').innerHTML = html + _IP_NOTE;
+  $('#ipbody').innerHTML = html + _IP_NOTE();
   $('#infopop').classList.add('show');
 }
 $('#infopop').addEventListener('click', e => {
@@ -1317,10 +1551,10 @@ async function loadToday() {
     const donut = miniDonut(Object.entries(fams).map(([f, v]) => ({v, color: FAM_COLORS[f]})));
     const deltaHtml = delta === null ? ''
       : `<span class="tsep">·</span><span class="delta ${delta >= 0 ? 'up' : 'down'}"
-           title="近 24 小时较前一个 24 小时">${delta >= 0 ? '↑' : '↓'}${Math.abs(delta)}%</span>`;
-    el.innerHTML = `${donut}<span>今日 <b>${fmtTokens(tok)}</b> tokens
-      <span class="tsep">·</span>等值 <b>$${Math.round(d.cost_daily[today] || 0)}</b>${deltaHtml}</span>
-      <button type="button" class="infobtn" title="统计口径">
+           title="${t('today.deltaTitle')}">${delta >= 0 ? '↑' : '↓'}${Math.abs(delta)}%</span>`;
+    el.innerHTML = `${donut}<span>${t('today.summary', {tok: fmtTokens(tok)})}
+      <span class="tsep">·</span>${t('today.eq', {cost: Math.round(d.cost_daily[today] || 0)})}${deltaHtml}</span>
+      <button type="button" class="infobtn" title="${t('usage.info')}">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"
           stroke-width="2.4" stroke-linecap="round">
           <circle cx="12" cy="12" r="9.4" stroke-width="2"/>
@@ -1340,10 +1574,10 @@ async function loadDone() {
     const el = $('#done');
     el.classList.toggle('has', list.length > 0);
     if (!list.length) { el.innerHTML = ''; return; }
-    el.innerHTML = `<div class="dhead">最近完成</div>` + list.map((e, i) => `
-      <div class="arow" data-i="${i}" title="点击跳转到会话">
+    el.innerHTML = `<div class="dhead">${t('done.recent')}</div>` + list.map((e, i) => `
+      <div class="arow" data-i="${i}" title="${t('done.jumpSession')}">
         <div class="abadge ${e.tool}">${badge(e.tool, 12)}</div>
-        <span class="dtitle">${esc(e.title)}</span>
+        <span class="dtitle">${e.title ? esc(e.title) : t('done.taskDone')}</span>
         ${e.project ? `<span class="ahost">${esc(e.project)}</span>` : ''}
         <span class="dwhen">${rel(e.ts)}</span>
         <svg class="ajump" width="12" height="12" viewBox="0 0 24 24" fill="none"
@@ -1363,7 +1597,7 @@ async function loadProjects() {
     const d = await (await fetch('/api/usage')).json();
     const list = d.projects_7d || [];
     const el = $('#projview');
-    if (!list.length) { el.innerHTML = '<div class="qerr">近 7 天暂无项目用量</div>'; return; }
+    if (!list.length) { el.innerHTML = `<div class="qerr">${t('proj.none7d')}</div>`; return; }
     const max = Math.max(...list.map(p => p.tokens), 1);
     el.innerHTML = list.map(p => `
       <div class="prow ${p.cwd.includes('/Codex') ? 'codex' : ''}" title="${esc(p.cwd)}">
@@ -1381,46 +1615,54 @@ $('#search').oninput = e => { query = e.target.value.trim().toLowerCase(); rende
 
 /* ---------- 设置 ---------- */
 let settings = null;
+// label/hint/sec/btns.name 存 i18n key，渲染时经 t() 解析（语言切换即时生效）
 const SET_SCHEMA = [
-  {sec: '通知'},
-  {key: 'notify_enabled', label: '额度告警通知', type: 'toggle'},
-  {key: 'notify_warn', label: '提醒阈值', type: 'chips', opts: [70, 80, 90], fmt: v => v + '%', custom: [50, 99]},
-  {key: 'notify_crit', label: '严重阈值', hint: '带提示音', type: 'chips', opts: [90, 95, 98], fmt: v => v + '%', custom: [60, 100]},
-  {key: 'notify_reset', label: '重置回满提醒', type: 'toggle'},
-  {key: 'notify_session_done', label: '会话完成提醒', hint: '灵动岛弹出，点击跳会话', type: 'toggle'},
-  {key: 'notify_done_min_secs', label: '短任务过滤', hint: '低于该时长不提醒', type: 'chips',
+  {sec: 'set.secNotify'},
+  {key: 'notify_enabled', label: 'set.notifyEnabled', type: 'toggle'},
+  {key: 'notify_warn', label: 'set.notifyWarn', type: 'chips', opts: [70, 80, 90], fmt: v => v + '%', custom: [50, 99]},
+  {key: 'notify_crit', label: 'set.notifyCrit', hint: 'set.withSound', type: 'chips', opts: [90, 95, 98], fmt: v => v + '%', custom: [60, 100]},
+  {key: 'notify_reset', label: 'set.notifyReset', type: 'toggle'},
+  {key: 'notify_session_done', label: 'set.sessionDone', hint: 'set.sessionDoneHint', type: 'toggle'},
+  {key: 'notify_done_min_secs', label: 'set.shortFilter', hint: 'set.shortFilterHint', type: 'chips',
    opts: [15, 30, 60, 120], fmt: v => v + 's', custom: [5, 3600]},
-  {key: 'island_dwell_secs', label: '提醒停留时长', type: 'chips',
+  {key: 'island_dwell_secs', label: 'set.dwell', type: 'chips',
    opts: [3, 5, 8, 10], fmt: v => v + 's', custom: [2, 30]},
-  {key: 'notify_sound', label: '提示音', type: 'toggle'},
-  {sec: '菜单栏'},
-  {label: '常显用量', hint: '可多选，全不选只留图标', type: 'multi',
+  {key: 'notify_sound', label: 'set.sound', type: 'toggle'},
+  {sec: 'set.secMenubar'},
+  {label: 'set.menubarUsage', hint: 'set.menubarUsageHint', type: 'multi',
    opts: [{k: 'menubar_claude', name: 'Claude'}, {k: 'menubar_codex', name: 'Codex'}]},
-  {sec: '面板'},
-  {key: 'show_active', label: '活跃会话卡片', type: 'toggle'},
-  {key: 'minimal_mode', label: '精简模式', hint: '降低视觉噪声，更耐看', type: 'toggle'},
-  {key: 'glass_dim', label: '面板暗化强度', hint: '越低越透明', type: 'chips',
+  {sec: 'set.secPanel'},
+  {key: 'show_active', label: 'set.showActive', type: 'toggle'},
+  {key: 'minimal_mode', label: 'set.minimal', hint: 'set.minimalHint', type: 'toggle'},
+  {key: 'glass_dim', label: 'set.glassDim', hint: 'set.glassDimHint', type: 'chips',
    opts: [40, 55, 68, 80], fmt: v => v + '%', custom: [20, 90]},
-  {key: 'sessions_limit', label: '会话列表数量', hint: '每端各取 N 条', type: 'chips', opts: [10, 15, 20, 30], custom: [5, 100]},
-  {key: 'refresh_interval', label: '自动刷新间隔', type: 'chips', opts: [15, 30, 60], fmt: v => v + 's', custom: [5, 600]},
-  {key: 'sample_interval', label: '额度采样间隔', type: 'chips',
-   opts: [60, 180, 300, 600], fmt: v => v / 60 + ' 分钟', custom: [60, 3600]},
-  {sec: '会话恢复'},
-  {key: 'terminal', label: '恢复方式', hint: '仅列已安装终端', type: 'select',
-   opts: ['auto', 'copy'], names: {auto: '自动（按优先级）', copy: '仅复制命令'}},
-  {sec: '数据'},
-  {label: '数据管理', hint: '数据仅存本机', type: 'btns', btns: [
-    {act: 'open', name: '打开数据目录'},
-    {act: 'export', name: '导出用量 CSV'},
-    {act: 'clear_events', name: '清空完成记录'}]},
+  {key: 'sessions_limit', label: 'set.sessionsLimit', hint: 'set.sessionsLimitHint', type: 'chips', opts: [10, 15, 20, 30], custom: [5, 100]},
+  {key: 'refresh_interval', label: 'set.refreshInterval', type: 'chips', opts: [15, 30, 60], fmt: v => v + 's', custom: [5, 600]},
+  {key: 'sample_interval', label: 'set.sampleInterval', type: 'chips',
+   opts: [60, 180, 300, 600], fmt: v => t('set.minUnit', {n: v / 60}), custom: [60, 3600]},
+  {sec: 'set.secSystem'},
+  {key: 'keep_awake', label: 'set.keepAwake', hint: 'set.keepAwakeHint', type: 'toggle'},
+  {key: 'language', label: 'set.language', type: 'select',
+   opts: ['auto', 'zh-CN', 'en', 'ja'], optKeys: {auto: 'set.langAuto'},
+   names: {'zh-CN': '中文', 'en': 'English', 'ja': '日本語'}},
+  {sec: 'set.secResume'},
+  {key: 'terminal', label: 'set.resumeMethod', hint: 'set.resumeMethodHint', type: 'select',
+   opts: ['auto', 'copy'], optKeys: {auto: 'set.termAuto', copy: 'set.termCopy'}},
+  {sec: 'set.secData'},
+  {label: 'set.dataManage', hint: 'set.dataManageHint', type: 'btns', btns: [
+    {act: 'open', name: 'set.openData'},
+    {act: 'export', name: 'set.exportCsv'},
+    {act: 'clear_events', name: 'set.clearEvents'}]},
 ];
+// 选项显示名：优先 i18n key（auto/copy 等），其次 API 设备名，最后原值
+const optName = (it, o) => (it.optKeys && it.optKeys[o]) ? t(it.optKeys[o]) : (it.names && it.names[o]) || o;
 
 function renderSettings() {
   let html = '', cardOpen = false;
   for (const it of SET_SCHEMA) {
     if (it.sec) {
       if (cardOpen) html += '</div>';
-      html += `<div class="setsec">${it.sec}</div><div class="card setcard">`;
+      html += `<div class="setsec">${t(it.sec)}</div><div class="card setcard">`;
       cardOpen = true;
       continue;
     }
@@ -1433,17 +1675,17 @@ function renderSettings() {
           <button type="button" class="chip ${settings[o.k] ? 'on' : ''}" data-multi="${o.k}">${o.name}</button>`).join('')}</div>`
       : it.type === 'btns'   // 动作按钮组（数据管理等一次性操作）
       ? `<div class="setchips">${it.btns.map(b => `
-          <button type="button" class="chip" data-act="${b.act}">${b.name}</button>`).join('')}</div>`
+          <button type="button" class="chip" data-act="${b.act}">${t(b.name)}</button>`).join('')}</div>`
       : it.type === 'select'
       ? `<select class="setselect" data-k="${it.key}">${it.opts.map(o => `
-          <option value="${o}" ${String(o) === String(v) ? 'selected' : ''}>${it.names && it.names[o] || o}</option>`).join('')}</select>`
+          <option value="${o}" ${String(o) === String(v) ? 'selected' : ''}>${optName(it, o)}</option>`).join('')}</select>`
       : `<div class="setchips" data-key="${it.key}">${it.opts.map(o => `
           <button type="button" class="chip ${String(o) === String(v) ? 'on' : ''}" data-k="${it.key}"
             data-val="${o}">${it.names ? it.names[o] : it.fmt ? it.fmt(o) : o}</button>`).join('')}
           ${isCustomVal ? `<button type="button" class="chip on" data-k="${it.key}" data-val="${v}">${it.fmt ? it.fmt(v) : v}</button>` : ''}
-          ${it.custom ? `<button type="button" class="chip edit" data-edit="${it.key}" data-min="${it.custom[0]}" data-max="${it.custom[1]}" title="自定义">✎</button>` : ''}</div>`;
-    html += `<div class="setrow"><div class="setlabel">${it.label}
-      ${it.hint ? `<small>${it.hint}</small>` : ''}</div>${ctrl}</div>`;
+          ${it.custom ? `<button type="button" class="chip edit" data-edit="${it.key}" data-min="${it.custom[0]}" data-max="${it.custom[1]}" title="${t('set.custom')}">✎</button>` : ''}</div>`;
+    html += `<div class="setrow"><div class="setlabel">${t(it.label)}
+      ${it.hint ? `<small>${t(it.hint)}</small>` : ''}</div>${ctrl}</div>`;
   }
   if (cardOpen) html += '</div>';
   $('#setbody').innerHTML = html;
@@ -1457,9 +1699,29 @@ async function saveSetting(key, value) {
       body: JSON.stringify({[key]: value}),
     })).json();
     settings = r.settings;
+    applyLanguage(settings.locale);   // 语言变更即时全局生效；其它设置时为幂等空操作
     renderSettings();
     applySettings();
-  } catch { toast('保存失败'); }
+  } catch { toast(t('common.saveFailed')); }
+}
+
+/* ---------- 语言应用 ---------- */
+let _appVer = '';
+function updateSetver() {
+  if (_appVer) $('#setver').textContent = `AgentDeck v${_appVer} · ${t('set.dataLocal')}`;
+}
+function setLocale(loc) {           // 仅切换当前语言并刷新静态文案，不重渲染动态视图
+  LOCALE = (loc && I18N[loc]) ? loc : 'en';
+  document.documentElement.lang = LOCALE;
+  applyStaticI18n();
+  updateSetver();
+}
+function applyLanguage(loc) {       // 运行时切换语言：设语言并重渲染所有视图
+  const next = (loc && I18N[loc]) ? loc : 'en';
+  if (next === LOCALE) return;
+  setLocale(next);
+  renderSettings();
+  refreshAll(false);
 }
 
 let pollTimer = null;
@@ -1476,17 +1738,17 @@ function applySettings() {
 async function loadSettings() {
   try {
     settings = await (await fetch('/api/settings')).json();
-    try {   // 恢复方式下拉只列出本机已安装的终端
-      const t = await (await fetch('/api/terminals')).json();
+    setLocale(settings.locale);   // 按 daemon 下发的有效 locale 设定界面语言
+    try {   // 恢复方式下拉只列出本机已安装的终端（设备名不翻译，auto/copy 经 optKeys 本地化）
+      const tm = await (await fetch('/api/terminals')).json();
       const entry = SET_SCHEMA.find(it => it.key === 'terminal');
-      entry.opts = ['auto', ...t.terminals.map(x => x.mode), 'copy'];
-      entry.names = {auto: '自动（按优先级）', copy: '仅复制命令',
-        ...Object.fromEntries(t.terminals.map(x => [x.mode, x.name]))};
+      entry.opts = ['auto', ...tm.terminals.map(x => x.mode), 'copy'];
+      entry.names = Object.fromEntries(tm.terminals.map(x => [x.mode, x.name]));
     } catch {}
     renderSettings();
     applySettings();
     const h = await (await fetch('/api/health')).json();
-    if (h.version) $('#setver').textContent = `AgentDeck v${h.version} · 数据仅存本机`;
+    if (h.version) { _appVer = h.version; updateSetver(); }
   } catch {}
 }
 
@@ -1521,10 +1783,10 @@ $('#setbody').addEventListener('click', e => {
     fetch('/api/data', {method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({action: act.dataset.act})})
       .then(r => r.json())
-      .then(r => toast(r.ok ? ({open: '已打开数据目录', export: 'CSV 已导出到「下载」',
-                                clear_events: '完成记录已清空'}[act.dataset.act])
-                           : '操作失败: ' + (r.error || '')))
-      .catch(() => toast('操作失败'));
+      .then(r => toast(r.ok ? ({open: t('set.openedData'), export: t('set.csvExported'),
+                                clear_events: t('set.eventsCleared')}[act.dataset.act])
+                           : t('common.opFailed') + (r.error ? ': ' + r.error : '')))
+      .catch(() => toast(t('common.opFailed')));
     return;
   }
   const chip = e.target.closest('.chip');
@@ -1548,6 +1810,18 @@ $('#closesettings').onclick = () => $('#settings').classList.remove('show');
 /* ---------- 刷新调度 ---------- */
 async function refreshAll(manual) {
   if (manual) $('#refresh').classList.add('spin');
+  // 设置同步：让桌面小组件等其它 WebView 跟随主面板（语言 / 暗化 / 精简等）保持一致——
+  // 各 WebView 是独立 JS 上下文，主面板改设置后经此在刷新周期内收敛到最新状态
+  try {
+    const s = await (await fetch('/api/settings')).json();
+    if (s && s.locale && JSON.stringify(s) !== JSON.stringify(settings)) {
+      const locChanged = s.locale !== LOCALE;
+      settings = s;
+      if (locChanged) setLocale(s.locale);
+      renderSettings();
+      applySettings();
+    }
+  } catch {}
   const jobs = [loadQuota(), loadSessions(), loadUsage(), loadActive(),
                 loadToday(), loadDone()];
   if ($('#usage').classList.contains('curve')) jobs.push(loadCurve());

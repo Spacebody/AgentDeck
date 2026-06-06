@@ -8,6 +8,37 @@ let kBase = "http://127.0.0.1:\(kPort)"
 // 默认高取概览页全显 + 设置页大半的折中值，展示时钳制到屏幕可视高度
 let kPanelW: CGFloat = 420, kPanelH: CGFloat = 780
 
+// ----------------------------------------------------------------- 多语言 i18n
+// 应用壳的菜单 / 灵动岛 / 通知文案。有效 locale 由 daemon 经 /api/events 下发，
+// 与面板、后端三层一致；首次轮询前回退到系统语言。
+func systemLocale() -> String {
+    let pref = (Locale.preferredLanguages.first ?? "en").lowercased()
+    if pref.hasPrefix("zh") { return "zh-CN" }
+    if pref.hasPrefix("ja") { return "ja" }
+    return "en"
+}
+var appLocale = systemLocale()
+let kStrings: [String: [String: String]] = [
+    "zh-CN": [
+        "menu.openBrowser": "在浏览器中打开", "menu.restartBackend": "重启后端",
+        "menu.loginItem": "开机自启", "menu.widget": "桌面小组件", "menu.quit": "退出 AgentDeck",
+        "island.done": "会话完成", "island.taskDone": "任务完成",
+    ],
+    "en": [
+        "menu.openBrowser": "Open in browser", "menu.restartBackend": "Restart backend",
+        "menu.loginItem": "Launch at login", "menu.widget": "Desktop widget", "menu.quit": "Quit AgentDeck",
+        "island.done": "Session done", "island.taskDone": "Task complete",
+    ],
+    "ja": [
+        "menu.openBrowser": "ブラウザで開く", "menu.restartBackend": "バックエンドを再起動",
+        "menu.loginItem": "ログイン時に起動", "menu.widget": "デスクトップウィジェット", "menu.quit": "AgentDeck を終了",
+        "island.done": "セッション完了", "island.taskDone": "タスク完了",
+    ],
+]
+func L(_ key: String) -> String {
+    return kStrings[appLocale]?[key] ?? kStrings["en"]?[key] ?? key
+}
+
 /// 无边框面板：允许成为 key window（搜索框输入需要）
 final class KeyPanel: NSPanel {
     override var canBecomeKey: Bool { true }
@@ -128,8 +159,11 @@ final class ControlBridge: NSObject, WKScriptMessageHandler {
             DispatchQueue.main.async { NSApp.terminate(nil) }
         case "panel":   // 桌面小组件点击 → 打开主面板
             DispatchQueue.main.async { delegate?.showPanel() }
-        case "sync":    // 设置变更 → 立即刷新菜单栏状态
-            DispatchQueue.main.async { delegate?.updateIconState() }
+        case "sync":    // 设置变更 → 刷新菜单栏 + 桌面小组件（语言 / 外观跟随主面板）
+            DispatchQueue.main.async {
+                delegate?.updateIconState()
+                delegate?.widgetVC.refresh()
+            }
         default:
             break
         }
@@ -198,10 +232,10 @@ final class IslandController {
 
         // 文案
         let head = NSTextField(labelWithString:
-            "\(e.project.isEmpty ? (e.tool == "claude" ? "Claude" : "Codex") : e.project) · 会话完成")
+            "\(e.project.isEmpty ? (e.tool == "claude" ? "Claude" : "Codex") : e.project) · \(L("island.done"))")
         head.font = .systemFont(ofSize: 12.5, weight: .semibold)
         head.textColor = .labelColor
-        let sub = NSTextField(labelWithString: e.title)
+        let sub = NSTextField(labelWithString: e.title.isEmpty ? L("island.taskDone") : e.title)
         sub.font = .systemFont(ofSize: 10.5)
         sub.textColor = .secondaryLabelColor
         sub.lineBreakMode = .byTruncatingTail
@@ -392,13 +426,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 } else if let secs = json["island_secs"] as? Int {
                     IslandController.shared.dwellSecs = Double(secs)
                 }
+                if let loc = json["locale"] as? String { appLocale = loc }   // 三层语言一致
                 if let last = json["last"] as? Int { self.lastEventId = max(self.lastEventId, last) }
                 // 首次轮询只对齐游标不弹窗：壳重启而 daemon 存活时，避免重放历史事件
                 if !self.eventsPrimed { self.eventsPrimed = true; return }
                 for ev in events {
                     IslandController.shared.push((
                         tool: ev["tool"] as? String ?? "claude",
-                        title: ev["title"] as? String ?? "任务完成",
+                        title: ev["title"] as? String ?? "",
                         project: ev["project"] as? String ?? "",
                         session: ev["session"] as? String ?? "",
                         cwd: ev["cwd"] as? String ?? ""))
@@ -702,16 +737,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         title.isEnabled = false
         menu.addItem(title)
         menu.addItem(.separator())
-        menu.addItem(withTitle: "在浏览器中打开", action: #selector(openBrowser), keyEquivalent: "o")
-        menu.addItem(withTitle: "重启后端", action: #selector(restartBackend), keyEquivalent: "r")
-        let login = NSMenuItem(title: "开机自启", action: #selector(toggleLogin), keyEquivalent: "")
+        menu.addItem(withTitle: L("menu.openBrowser"), action: #selector(openBrowser), keyEquivalent: "o")
+        menu.addItem(withTitle: L("menu.restartBackend"), action: #selector(restartBackend), keyEquivalent: "r")
+        let login = NSMenuItem(title: L("menu.loginItem"), action: #selector(toggleLogin), keyEquivalent: "")
         login.state = SMAppService.mainApp.status == .enabled ? .on : .off
         menu.addItem(login)
-        let widget = NSMenuItem(title: "桌面小组件", action: #selector(toggleWidget), keyEquivalent: "w")
+        let widget = NSMenuItem(title: L("menu.widget"), action: #selector(toggleWidget), keyEquivalent: "w")
         widget.state = widgetEnabled ? .on : .off
         menu.addItem(widget)
         menu.addItem(.separator())
-        menu.addItem(withTitle: "退出 AgentDeck", action: #selector(quit), keyEquivalent: "q")
+        menu.addItem(withTitle: L("menu.quit"), action: #selector(quit), keyEquivalent: "q")
         menu.items.forEach { $0.target = self }
         statusItem.menu = menu
         statusItem.button?.performClick(nil)

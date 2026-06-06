@@ -88,6 +88,8 @@ DEFAULT_SETTINGS = {
     "refresh_interval": 30,    # 前端自动刷新（秒）
     "sample_interval": 180,    # 额度采样间隔（秒）
     "terminal": "auto",        # auto | iterm | terminal | copy
+    "language": "auto",        # 界面语言：auto（跟随系统）| zh-CN | en | ja
+    "keep_awake": True,        # 有活跃会话时阻止系统休眠（避免会话因休眠/断网中断）
 }
 # 数值项合法范围（自定义输入钳制）
 SETTING_RANGES = {
@@ -132,6 +134,8 @@ def api_settings_save(body):
                 v = max(lo, min(hi, v))
         elif not isinstance(v, type(default)):
             continue
+        elif k == "language" and v != "auto" and v not in LOCALES:
+            continue
         clean[k] = v
     with _settings_lock:
         try:
@@ -143,7 +147,9 @@ def api_settings_save(body):
         SETTINGS_FILE.write_text(json.dumps(cur, ensure_ascii=False, indent=1))
     with _cache_lock:
         _ttl_cache.pop("sessions", None)   # 数量类设置立即生效
-    return {"ok": True, "settings": get_settings()}
+    if "keep_awake" in clean:   # 立即生效，不阻塞响应
+        threading.Thread(target=_update_keepawake, daemon=True).start()
+    return {"ok": True, "settings": _settings_response()}
 
 
 _cache_lock = threading.Lock()
@@ -161,6 +167,70 @@ def cached(key, ttl, fn):
     with _cache_lock:
         _ttl_cache[key] = (now + ttl, val)
     return val
+
+
+# ----------------------------------------------------------------- 多语言 i18n
+# 有效 locale 由 daemon 统一解析，前端与 Swift 壳都消费 daemon 给的值，三层一致。
+LOCALES = ("zh-CN", "en", "ja")
+
+# daemon 直接产出的用户可见串（系统通知）；面板文案在前端本地化。
+NOTIFY_STRINGS = {
+    "zh-CN": {"crit": "🔴 {tool} {label} 已用 {pct}%，即将触顶",
+              "warn": "⚠️ {tool} {label} 已用 {pct}%",
+              "reset": "✅ {tool} {label} 已重置，额度回满"},
+    "en": {"crit": "🔴 {tool} {label} at {pct}% — almost capped",
+           "warn": "⚠️ {tool} {label} at {pct}%",
+           "reset": "✅ {tool} {label} reset — quota restored"},
+    "ja": {"crit": "🔴 {tool} {label} {pct}% 使用 — 上限間近",
+           "warn": "⚠️ {tool} {label} {pct}% 使用",
+           "reset": "✅ {tool} {label} リセット — 上限回復"},
+}
+# 窗口标签（按稳定 id），仅供通知本地化；面板同样按 id 本地化。
+WINDOW_LABELS = {
+    "zh-CN": {"five_hour": "5 小时窗口", "seven_day": "周限额",
+              "seven_day_sonnet": "周限额 · Sonnet", "seven_day_opus": "周限额 · Opus",
+              "seven_day_oauth_apps": "周限额 · OAuth Apps"},
+    "en": {"five_hour": "5-hour", "seven_day": "Weekly",
+           "seven_day_sonnet": "Weekly · Sonnet", "seven_day_opus": "Weekly · Opus",
+           "seven_day_oauth_apps": "Weekly · OAuth Apps"},
+    "ja": {"five_hour": "5時間枠", "seven_day": "週間上限",
+           "seven_day_sonnet": "週間 · Sonnet", "seven_day_opus": "週間 · Opus",
+           "seven_day_oauth_apps": "週間 · OAuth Apps"},
+}
+
+
+def _system_locale():
+    """系统首选语言 → zh-CN / en / ja，识别不出回退 en。"""
+    try:
+        out = subprocess.run(["defaults", "read", "-g", "AppleLanguages"],
+                             capture_output=True, text=True, timeout=5)
+        for line in out.stdout.splitlines():
+            tok = line.strip().strip('(),"').lower()
+            if not tok:
+                continue
+            if tok.startswith("zh"):
+                return "zh-CN"
+            if tok.startswith("ja"):
+                return "ja"
+            if tok.startswith("en"):
+                return "en"
+            return "en"   # 首个非空语言码无法识别，回退
+    except Exception:
+        pass
+    return "en"
+
+
+def _effective_locale():
+    """设置为 auto 时跟随系统；否则用设置值。系统探测带 5 分钟缓存。"""
+    lang = get_settings().get("language", "auto")
+    if lang in LOCALES:
+        return lang
+    return cached("syslang", 300, _system_locale)
+
+
+def _settings_response():
+    """对外的设置响应：持久化设置 + 计算出的有效 locale（不持久化）。"""
+    return {**get_settings(), "locale": _effective_locale()}
 
 
 # ---------------------------------------------------------------- Claude 额度
@@ -248,18 +318,24 @@ def _codex_quota():
 
     windows = []
     now = time.time()
-    for node, fallback in ((primary, "主窗口"), (secondary, "次窗口")):
+    for node, fb_label, fb_id in ((primary, "主窗口", "primary"),
+                                  (secondary, "次窗口", "secondary")):
         if not node:
             continue
         mins = node.get("window_minutes") or 0
+        # 稳定 id 供前端/通知本地化；label 作为回退
+        wid = ("five_hour" if mins == 300 else
+               "seven_day" if mins >= 10000 else
+               f"win_{mins}" if mins else fb_id)
         label = ("5 小时窗口" if mins == 300 else
                  "周限额" if mins >= 10000 else
-                 f"{mins} 分钟窗口" if mins else fallback)
+                 f"{mins} 分钟窗口" if mins else fb_label)
         resets = node.get("resets_at")
         pct = float(node.get("used_percent") or 0)
         if resets and resets < now:   # 窗口已重置，历史百分比作废
             pct = 0.0
         windows.append({
+            "id": wid,
             "label": label,
             "used_percent": round(pct, 1),
             "resets_at": resets,
@@ -515,7 +591,7 @@ def _fmt_secs(s):
 
 
 def _fmt_etime(etime):
-    """ps etime: [[dd-]hh:]mm:ss → 人话"""
+    """ps etime: [[dd-]hh:]mm:ss → 人话（旧版回退；前端按 runtime_secs 本地化）"""
     m = re.match(r"(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)$", etime.strip())
     if not m:
         return etime
@@ -525,6 +601,16 @@ def _fmt_etime(etime):
     if h:
         return f"{h}h {mi}m"
     return f"{mi} 分钟"
+
+
+def _etime_secs(etime):
+    """ps etime → 总秒数（供前端按 locale 自行格式化运行时长）"""
+    m = re.match(r"(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)$", etime.strip())
+    if not m:
+        return 0
+    d, h, mi, s = (int(m.group(1) or 0), int(m.group(2) or 0),
+                   int(m.group(3)), int(m.group(4)))
+    return ((d * 24 + h) * 60 + mi) * 60 + s
 
 
 def _pid_cwd(pid):
@@ -562,6 +648,7 @@ def api_active():
                 continue
             tool, pid_i = m.group(1), int(pid)
             entry = {"tool": tool, "pid": pid_i, "runtime": _fmt_etime(etime),
+                     "runtime_secs": _etime_secs(etime),
                      "status": "", "id": "", "cwd": "", "project": ""}
             if tool == "claude":
                 info = claude_pids.get(pid_i)
@@ -813,8 +900,9 @@ def api_event(body):
         return {"ok": False, "error": "unknown event"}
 
     global _event_seq
+    # 空标题存为 ""，由前端 / Swift 壳按当前语言本地化「任务完成」回退
     evt = {"tool": tool, "session": sid, "cwd": cwd,
-           "title": title or "任务完成", "project": project,
+           "title": title or "", "project": project,
            "duration": round(duration or 0), "ts": time.time()}
     with _events_lock:
         _event_seq += 1
@@ -831,13 +919,15 @@ def api_events(query):
         since = int(query.get("since", ["0"])[0])
         # 灵动岛通道：排除重启回灌的历史事件，只推真正新发生的
         evs = [e for e in _events if e["id"] > since and not e.get("replayed")]
+        # locale 随该通道下发给 Swift 壳（菜单 / 灵动岛 / 通知本地化）
         return {"events": evs, "last": _event_seq,
-                "island_secs": get_settings()["island_dwell_secs"]}
+                "island_secs": get_settings()["island_dwell_secs"],
+                "locale": _effective_locale()}
 
 
 # ------------------------------------------------- 跳转会话所在终端
 
-_TERM_APPS = {   # 进程名 → 可 activate 的应用名（祖先链 basename 前缀匹配，大小写不敏感）
+_TERM_APPS = {   # 兜底清单：仅用于个别非 .app 启动 / 进程名无法定位 bundle 的终端
     "iTerm2": "iTerm", "Terminal": "Terminal", "WezTerm": "WezTerm",
     "wezterm-gui": "WezTerm", "kitty": "kitty", "alacritty": "Alacritty",
     "Ghostty": "Ghostty", "Warp": "Warp", "cmux": "cmux",
@@ -889,9 +979,14 @@ def _osa(script):
     return r.stdout.strip()
 
 
-def _focus_tty(tty):
-    if Path("/Applications/iTerm.app").exists():
-        ok = _osa(f'''
+def _app_running(app):
+    """App 是否在运行（不会启动它）——用于按 tty 兜底前的存在性检查。"""
+    return _osa('tell application "System Events" to '
+                f'(name of processes) contains "{app}"') == "true"
+
+
+def _focus_iterm(tty):
+    ok = _osa(f'''
 tell application "iTerm"
   repeat with w in windows
     repeat with t in tabs of w
@@ -908,8 +1003,10 @@ tell application "iTerm"
   end repeat
 end tell
 return "miss"''')
-        if ok == "ok":
-            return True
+    return ok == "ok"
+
+
+def _focus_terminal(tty):
     ok = _osa(f'''
 tell application "Terminal"
   repeat with w in windows
@@ -945,14 +1042,24 @@ return "miss"''')
 
 
 def _ancestor_app(pid):
-    """沿父进程链向上找宿主终端 App 名。"""
-    for _ in range(12):
+    """沿父进程链向上自动识别宿主终端 App，兼容任意终端、无需维护清单。
+
+    macOS 上 `ps -o comm=` 给出可执行文件的完整路径；GUI 终端的可执行文件必落在
+    某个 .app bundle 内，取路径中最外层的 .app（如 VS Code 集成终端的
+    Code Helper 仍归到 Visual Studio Code）即宿主应用名。少数非 .app 启动的
+    终端再按 _TERM_APPS 进程名前缀兜底。"""
+    for _ in range(20):
         out = subprocess.run(["ps", "-o", "ppid=,comm=", "-p", str(pid)],
                              capture_output=True, text=True, timeout=8)
         parts = out.stdout.strip().split(None, 1)
         if len(parts) < 2:
             return None
         ppid, comm = parts
+        # 自动识别：可执行文件路径中最外层的 .app bundle 即宿主 GUI 应用
+        m = re.search(r"/([^/]+)\.app/", comm)
+        if m:
+            return m.group(1)
+        # 兜底：极少数非 .app 启动的终端，按进程名前缀匹配已知清单
         base = os.path.basename(comm).lower()
         for key, app in _TERM_APPS.items():
             if base.startswith(key.lower()):
@@ -1020,21 +1127,31 @@ def api_focus(body):
         return {"ok": True, "via": "codex-thread" if tid else "app",
                 "thread": tid, "app": "Codex"}
     tty = _pid_tty(pid)
-    if tty:
+    host = _ancestor_app(pid)   # 自动识别宿主终端
+    # 宿主已知：只对真正的宿主做精确聚焦 / 激活，绝不 tell 其它终端（否则会把
+    # 未运行的 Terminal / iTerm 误启动——正是「跳 Warp 却打开 Terminal」的根因）
+    if host:
         try:
-            if _focus_tty(tty):
-                return {"ok": True, "via": "tty", "tty": tty}
+            if host == "iTerm" and tty and _focus_iterm(tty):
+                return {"ok": True, "via": "tty", "app": "iTerm", "tty": tty}
+            if host == "Terminal" and tty and _focus_terminal(tty):
+                return {"ok": True, "via": "tty", "app": "Terminal", "tty": tty}
+            if host == "Ghostty" and _focus_ghostty(cwd):
+                return {"ok": True, "via": "ghostty-cwd", "app": "Ghostty"}
         except Exception:
             pass
-    try:
-        if _focus_ghostty(cwd):
-            return {"ok": True, "via": "ghostty-cwd"}
-    except Exception:
-        pass
-    app = _ancestor_app(pid)
-    if app:
-        _osa(f'tell application "{app}" to activate')
-        return {"ok": True, "via": "app", "app": app}
+        _osa(f'tell application "{host}" to activate')
+        return {"ok": True, "via": "app", "app": host}
+    # 宿主识别失败（tmux / ssh / 无 .app 祖先）：仅对“已在运行”的 iTerm / Terminal
+    # 按 tty 兜底，避免凭空启动它们
+    if tty:
+        try:
+            if _app_running("iTerm") and _focus_iterm(tty):
+                return {"ok": True, "via": "tty", "app": "iTerm", "tty": tty}
+            if _app_running("Terminal") and _focus_terminal(tty):
+                return {"ok": True, "via": "tty", "app": "Terminal", "tty": tty}
+        except Exception:
+            pass
     return {"ok": False, "error": "terminal not located"}
 
 
@@ -1076,19 +1193,23 @@ def _check_alerts(tool_name, windows):
     if not s["notify_enabled"]:
         return
     warn_th, crit_th, sound = s["notify_warn"], s["notify_crit"], s["notify_sound"]
+    loc = _effective_locale()
+    strs = NOTIFY_STRINGS.get(loc, NOTIFY_STRINGS["en"])
+    labels = WINDOW_LABELS.get(loc, WINDOW_LABELS["en"])
     for w in windows:
         key = (tool_name, w.get("id") or w.get("label"))
         pct = w.get("used_percent") or 0
         prev = _alert_state.get(key, "normal")
         cur = "crit" if pct >= crit_th else "warn" if pct >= warn_th else "normal"
-        label = w.get("label", "")
+        # 按 id 本地化窗口标签（通知用当前语言，不受采样时缓存影响）
+        label = labels.get(w.get("id") or "", w.get("label", ""))
         if cur != prev:
             if cur == "crit":
-                _notify(f"🔴 {tool_name} {label} 已用 {pct}%，即将触顶", sound=sound)
+                _notify(strs["crit"].format(tool=tool_name, label=label, pct=pct), sound=sound)
             elif cur == "warn" and prev == "normal":
-                _notify(f"⚠️ {tool_name} {label} 已用 {pct}%")
+                _notify(strs["warn"].format(tool=tool_name, label=label, pct=pct))
             elif cur == "normal" and prev in ("warn", "crit") and s["notify_reset"]:
-                _notify(f"✅ {tool_name} {label} 已重置，额度回满", sound=sound)
+                _notify(strs["reset"].format(tool=tool_name, label=label, pct=pct), sound=sound)
             _alert_state[key] = cur
             _alert_state_save()
 
@@ -1137,6 +1258,50 @@ def _sampler_loop():
         except Exception:
             pass
         time.sleep(max(get_settings()["sample_interval"], 60))
+
+
+# ------------------------------------------------------------- 保持唤醒（防休眠）
+# 有活跃会话且开关开时，持有一个 caffeinate 阻止系统/磁盘 idle 休眠——网络掉线本质是
+# 休眠副作用，阻止休眠即可保活长会话。-w <本进程 pid> 兜底：daemon 被杀时 caffeinate
+# 自动退出，绝不残留「永不休眠」的孤儿假设。（不阻止合盖休眠，不强制亮屏。）
+_caffeinate = None
+_caffeinate_lock = threading.Lock()
+
+
+def _has_active_sessions():
+    try:
+        return bool(api_active().get("active"))
+    except Exception:
+        return False
+
+
+def _update_keepawake():
+    """按「开关 + 是否有活跃会话」持有或释放 caffeinate。幂等，可反复调用。"""
+    global _caffeinate
+    want = get_settings().get("keep_awake", True) and _has_active_sessions()
+    with _caffeinate_lock:
+        alive = _caffeinate is not None and _caffeinate.poll() is None
+        if want and not alive:
+            try:
+                _caffeinate = subprocess.Popen(
+                    ["caffeinate", "-i", "-m", "-s", "-w", str(os.getpid())])
+            except Exception:
+                _caffeinate = None
+        elif alive and not want:
+            try:
+                _caffeinate.terminate()
+            except Exception:
+                pass
+            _caffeinate = None
+
+
+def _keepawake_loop():
+    while True:
+        try:
+            _update_keepawake()
+        except Exception:
+            pass
+        time.sleep(30)
 
 
 def api_history(query):
@@ -1407,7 +1572,7 @@ def _osa_escape(s):
     return s.replace("\\", "\\\\").replace('"', '\\"')
 
 
-# 恢复会话支持的终端：(mode, App 名, 显示名)，auto 按此优先级取第一个已安装的
+# 可直接注入命令的终端：(mode, App 名, 显示名)，auto 按此优先级取第一个已安装的
 _RESUME_TERMS = [
     ("iterm", "iTerm", "iTerm2"),
     ("ghostty", "Ghostty", "Ghostty"),
@@ -1415,6 +1580,18 @@ _RESUME_TERMS = [
     ("wezterm", "WezTerm", "WezTerm"),
     ("alacritty", "Alacritty", "Alacritty"),
     ("terminal", "Terminal", "Terminal"),
+]
+# 无法用 CLI/AppleScript 注入命令的常见终端：改为「打开 App（尽量定位到 cwd）+ 复制
+# 命令」，由用户粘贴回车恢复——open -a 对任意已安装 App 通用，覆盖面广。
+_PASTE_TERMS = [
+    ("warp", "Warp", "Warp"),
+    ("vscode", "Visual Studio Code", "VS Code"),
+    ("cursor", "Cursor", "Cursor"),
+    ("windsurf", "Windsurf", "Windsurf"),
+    ("hyper", "Hyper", "Hyper"),
+    ("tabby", "Tabby", "Tabby"),
+    ("rio", "Rio", "Rio"),
+    ("wave", "Wave", "Wave"),
 ]
 
 
@@ -1455,8 +1632,11 @@ def api_data(body):
 
 
 def api_terminals():
-    return {"terminals": [{"mode": m, "name": disp}
-                          for m, app, disp in _RESUME_TERMS if _term_installed(app)]}
+    out = [{"mode": m, "name": disp}
+           for m, app, disp in _RESUME_TERMS if _term_installed(app)]
+    out += [{"mode": m, "name": disp, "paste": True}
+            for m, app, disp in _PASTE_TERMS if _term_installed(app)]
+    return {"terminals": out}
 
 
 def api_resume(body):
@@ -1473,9 +1653,25 @@ def api_resume(body):
     mode = get_settings()["terminal"]
     if mode == "copy":   # 仅返回命令，由前端复制到剪贴板
         return {"ok": True, "copy": True, "command": cmd}
-    avail = {m: app for m, app, _ in _RESUME_TERMS if _term_installed(app)}
-    if mode not in avail:    # auto / 所选终端未安装 → 按优先级回退
-        mode = next((m for m, _, _ in _RESUME_TERMS if m in avail), "terminal")
+    run_avail = {m: app for m, app, _ in _RESUME_TERMS if _term_installed(app)}
+    paste_avail = {m: app for m, app, _ in _PASTE_TERMS if _term_installed(app)}
+    if mode not in run_avail and mode not in paste_avail:   # auto / 未安装 → 回退
+        mode = (next((m for m, _, _ in _RESUME_TERMS if m in run_avail), None)
+                or next((m for m, _, _ in _PASTE_TERMS if m in paste_avail), None)
+                or "copy")
+        if mode == "copy":   # 一个支持的终端都没装
+            return {"ok": True, "copy": True, "command": cmd}
+
+    if mode in paste_avail:
+        # 无法注入命令：打开 App（尽量带 cwd）+ 由前端复制命令，粘贴回车即恢复
+        app = paste_avail[mode]
+        r = subprocess.run(["open", "-a", app, cwd],
+                           capture_output=True, text=True, timeout=20)
+        if r.returncode != 0:    # 该 App 不接受目录参数时退化为仅打开
+            subprocess.run(["open", "-a", app], capture_output=True, timeout=20)
+        disp = next(d for m, _, d in _PASTE_TERMS if m == mode)
+        return {"ok": True, "copy": True, "paste": True, "command": cmd,
+                "terminal": mode, "app": disp}
 
     if mode == "iterm":
         script = (
@@ -1502,7 +1698,7 @@ def api_resume(body):
             "wezterm": ["start", "--cwd", cwd, "--", "zsh", "-ic", keep],
             "alacritty": ["--working-directory", cwd, "-e", "zsh", "-ic", keep],
         }[mode]
-        proc = subprocess.run(["open", "-na", avail[mode], "--args", *args],
+        proc = subprocess.run(["open", "-na", run_avail[mode], "--args", *args],
                               capture_output=True, text=True, timeout=20)
     if proc.returncode != 0:
         return {"ok": False, "error": proc.stderr.strip()}
@@ -1545,7 +1741,7 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/history":
                 self._send(200, api_history(query))
             elif path == "/api/settings":
-                self._send(200, get_settings())
+                self._send(200, _settings_response())
             elif path == "/api/terminals":
                 self._send(200, api_terminals())
             elif path == "/api/events":
@@ -1610,6 +1806,7 @@ def main():
     _events_load()
     _alert_state_load()
     threading.Thread(target=_sampler_loop, daemon=True).start()
+    threading.Thread(target=_keepawake_loop, daemon=True).start()
     server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     print(f"agentdeckd listening on http://127.0.0.1:{PORT}")
     server.serve_forever()
