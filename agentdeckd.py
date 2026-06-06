@@ -45,7 +45,7 @@ HISTORY_KEEP = 7 * 86400       # 历史保留 7 天
 
 # 更新检测：向自托管的 Cloudflare Pages 清单查最新版本号（不带任何凭据；可在设置中关闭）。
 # 部署后把域名改成你的 Pages 项目地址即可。
-UPDATE_MANIFEST_URL = "https://agentdeck.pages.dev/version.json"
+UPDATE_MANIFEST_URL = "https://agentdeck.yilin.dev/version.json"
 
 # 模型单价 (USD / MTok): (input, output, cache_read, cache_write)
 MODEL_PRICES = {   # $/Mtok: input, output, cache_read, cache_write_5m, cache_write_1h

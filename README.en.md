@@ -121,7 +121,7 @@ Everything is **processed locally only** — no telemetry, no reporting:
 | Data | Source | Notes |
 |------|--------|-------|
 | Claude quota | Claude Code OAuth credential in Keychain → `api.anthropic.com/api/oauth/usage` | Your own credentials reading your own quota |
-| Update check | `agentdeck.pages.dev/version.json` (static manifest, 6h cache) | Version string comparison only — no credentials, no machine info; can be disabled in Settings |
+| Update check | `agentdeck.yilin.dev/version.json` (static manifest, 6h cache) | Version string comparison only — no credentials, no machine info; can be disabled in Settings |
 | Claude usage / sessions | parses local `~/.claude/projects/**/*.jsonl` | token stats, cost estimates, session list |
 | Codex quota / usage / sessions | parses local `~/.codex/sessions` rollout files | same as above |
 | Done events | Claude Stop hook / Codex notify callback (see optional config) | done alerts and the event stream |

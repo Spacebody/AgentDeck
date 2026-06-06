@@ -10,6 +10,7 @@
 
 ## 历史
 
+- **1.23.1** 更新清单与官网迁移至自有域名 `agentdeck.yilin.dev`（部署时发现 `agentdeck.pages.dev` 已被他人项目占用——更新清单绝不能放在不受控域名下，落地页 canonical / OG 与 README 同步更正）
 - **1.23.0** 新版本发现：daemon 定时拉取静态清单（`agentdeck.pages.dev/version.json`，6 小时缓存，仅比对版本号、不带凭据与本机信息），面板顶部出现可关闭的更新横幅，点击经默认浏览器打开下载页；设置内新增「检查更新」开关（默认开）。新增 `site/` 官网落地页（暗色液态玻璃 + 极光背景，中 / EN / 日三语自动检测，零依赖单文件，可直接部署 Cloudflare Pages），更新清单与落地页同源托管
 - **1.22.2** 跳转会话成功后自动收起主面板，让目标终端独占前台（此前误发 `panel` 消息反而把 AgentDeck 重新激活，与刚聚焦的终端抢焦点）
 - **1.22.1** 修跳转会话卡死：宿主识别会把 macOS `Python.framework` 内置的 `Python.app` 误当宿主，随后 `tell application "Python" to activate` 挂起 12s。改为**跳过 `.framework` 内置 bundle 与解释器/自身**，且通用激活改用 `open <bundle 路径>`（命中已运行实例、绝不挂起）；识别不到宿主时优雅回退而非超时

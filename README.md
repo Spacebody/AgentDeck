@@ -121,7 +121,7 @@ scripts/             图标与 DMG 背景生成、Codex notify 包装、CSRF 回
 | 数据 | 来源 | 说明 |
 |------|------|------|
 | Claude 额度 | 钥匙串中 Claude Code 的 OAuth 凭据 → `api.anthropic.com/api/oauth/usage` | 使用用户本人凭据查询本人额度 |
-| 新版检查 | `agentdeck.pages.dev/version.json`（静态清单，6 小时缓存） | 仅比对版本号，不带任何凭据与本机信息；设置内可关闭 |
+| 新版检查 | `agentdeck.yilin.dev/version.json`（静态清单，6 小时缓存） | 仅比对版本号，不带任何凭据与本机信息；设置内可关闭 |
 | Claude 用量 / 会话 | 解析本地 `~/.claude/projects/**/*.jsonl` | token 统计、成本估算、会话列表 |
 | Codex 额度 / 用量 / 会话 | 解析本地 `~/.codex/sessions` rollout 文件 | 同上 |
 | 完成事件 | Claude Stop hook / Codex notify 回调（见可选配置） | 完成提醒与事件流 |
