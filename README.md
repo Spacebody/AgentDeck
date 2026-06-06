@@ -38,7 +38,7 @@ macOS 菜单栏应用，为 **Claude Code** 与 **Codex** 提供统一的额度�
 ## 安装
 
 ```bash
-git clone <repo-url> && cd agentdeck
+git clone https://github.com/Spacebody/AgentDeck.git && cd agentdeck
 ./build.sh install
 ```
 
