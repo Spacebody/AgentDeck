@@ -1,0 +1,9 @@
+AgentDeck.app/
+dist/
+data/
+__pycache__/
+*.pyc
+*.log
+*.dmg
+*.iconset/
+.DS_Store
