@@ -356,29 +356,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard abs(s - uiScale) > 0.001 else { return }
         uiScale = s
         UserDefaults.standard.set(Double(s), forKey: "fontScale")
-        // 平滑过渡到新尺寸（极致版）：frame 逐帧动画会让 WKWebView 每帧重排，必卡。
-        // 改为窗口一步到位（仅一次重排），内容层从旧尺寸比例经 CASpringAnimation 缩回 1
-        // —— 全程 GPU 合成、零重排，锚定顶边中心与窗口定位一致。
+        // 尺寸切换用交叉淡变：WKWebView 渲染异步，任何「边框动画 + 内容追赶」的同步
+        // 方案都可能出现玻璃先到、内容后到的脱节。淡出 → 不可见时一步切到新尺寸并等
+        // 内容绘制提交（双 rAF）→ 淡入，中间状态不可见，绝无撕裂。
         let animate: (NSWindow, NSRect) -> Void = { w, target in
-            let old = w.frame
-            w.setFrame(target, display: true)
-            guard old.size != target.size, let v = w.contentView else { return }
-            v.wantsLayer = true
-            guard let layer = v.layer else { return }
-            layer.anchorPoint = CGPoint(x: 0.5, y: 1)   // 顶边中心
-            layer.position = CGPoint(x: v.bounds.midX, y: v.bounds.maxY)
-            let spring = CASpringAnimation(keyPath: "transform")
-            spring.fromValue = CATransform3DMakeScale(old.width / target.width,
-                                                      old.height / target.height, 1)
-            spring.toValue = CATransform3DIdentity
-            spring.damping = 26; spring.stiffness = 280; spring.mass = 1
-            spring.duration = spring.settlingDuration
-            layer.add(spring, forKey: "uiScale")
-            layer.transform = CATransform3DIdentity
-            w.invalidateShadow()
-            DispatchQueue.main.asyncAfter(deadline: .now() + spring.settlingDuration) {
-                [weak w] in w?.invalidateShadow()
+            guard w.frame.size != target.size else { w.setFrame(target, display: true); return }
+            func findWeb(_ v: NSView) -> WKWebView? {
+                if let wk = v as? WKWebView { return wk }
+                for sub in v.subviews { if let hit = findWeb(sub) { return hit } }
+                return nil
             }
+            let wk = w.contentView.flatMap(findWeb)
+            NSAnimationContext.runAnimationGroup({ ctx in
+                ctx.duration = 0.12
+                ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
+                w.animator().alphaValue = 0
+            }, completionHandler: { [weak w, weak wk] in
+                guard let w else { return }
+                w.setFrame(target, display: true)
+                w.invalidateShadow()
+                let fadeIn = { [weak w] in
+                    guard let w else { return }
+                    NSAnimationContext.runAnimationGroup({ ctx in
+                        ctx.duration = 0.18
+                        ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                        w.animator().alphaValue = 1
+                    }, completionHandler: { [weak w] in w?.invalidateShadow() })
+                }
+                if let wk {   // 等新布局绘制提交后再淡入
+                    wk.callAsyncJavaScript(
+                        "await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(r, 16))))",
+                        arguments: [:], in: nil, in: .page) { _ in fadeIn() }
+                } else {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { fadeIn() }
+                }
+            })
         }
         if let p = panel, p.isVisible {          // 面板：锚定顶边中心重排
             let d = UserDefaults.standard
