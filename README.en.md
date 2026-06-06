@@ -54,7 +54,9 @@ AgentDeck tucks Claude Code's and Codex's **quota, sessions, and usage** into on
 
 **Interface & system**
 - Multilingual UI: Simplified Chinese / English / 日本語, follows the system, switch instantly in Settings
+- Adjustable font size (scales the panel and widget as a whole); panel dimming, minimal mode and other appearance options
 - Keeps the system awake while a session is active, so long tasks survive sleep / network drops (toggle, on by default)
+- Update discovery: automatic check (version number only, can be disabled) + manual check in Settings, with a dismissible banner when a new version ships
 
 ## Quick start
 
@@ -145,7 +147,7 @@ Runtime artifacts: data dir `~/Library/Application Support/AgentDeck/`, log `~/L
 ## Credits
 
 - Menu-bar brand glyphs are taken from Claude / Codex's official in-app menu-bar template images, copyright Anthropic / OpenAI, used purely for source attribution
-- The "focus by working directory" idea for Ghostty references MioIsland
+- Terminal focusing for session jumps originally borrowed MioIsland's idea (Ghostty cwd-precise focus); it has since evolved into automatic host detection for any terminal via the process tree
 - Usage stats are cross-calibrated against [ccusage](https://github.com/ryoppippi/ccusage) as an independent baseline
 
 ## Changelog

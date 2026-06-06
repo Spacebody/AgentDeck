@@ -92,6 +92,7 @@ DEFAULT_SETTINGS = {
     "refresh_interval": 30,    # 前端自动刷新（秒）
     "sample_interval": 180,    # 额度采样间隔（秒）
     "terminal": "auto",        # auto | iterm | terminal | copy
+    "font_scale": 100,         # 面板/小组件字体缩放 %（整体 zoom）
     "language": "auto",        # 界面语言：auto（跟随系统）| zh-CN | en | ja
     "keep_awake": True,        # 有活跃会话时阻止系统休眠（避免会话因休眠/断网中断）
     "update_check": True,      # 检查新版本（向自托管 Pages 清单查版本号，不带凭据）
@@ -103,6 +104,7 @@ SETTING_RANGES = {
     "notify_done_min_secs": (5, 3600),
     "island_dwell_secs": (2, 30),
     "glass_dim": (20, 90),
+    "font_scale": (80, 160),
     "sessions_limit": (5, 100),
     "refresh_interval": (5, 600),
     "sample_interval": (60, 3600),
@@ -245,8 +247,9 @@ def _ver_key(v):
     return tuple(int(n) for n in (nums or ["0"]))
 
 
-def api_update():
-    """查自托管清单的最新版本（6 小时缓存；设置关闭时不发任何请求）。"""
+def api_update(force=False):
+    """查自托管清单的最新版本（6 小时缓存；设置关闭时不发任何请求）。
+    force=True（设置页「立即检查」）时绕过缓存强制拉取，失败标记 error。"""
     if not get_settings().get("update_check", True):
         return {"current": VERSION, "available": False, "disabled": True}
 
@@ -256,9 +259,12 @@ def api_update():
         with urllib.request.urlopen(req, timeout=8) as resp:
             return json.loads(resp.read().decode())
     try:
+        if force:
+            with _cache_lock:
+                _ttl_cache.pop("update_manifest", None)
         m = cached("update_manifest", 6 * 3600, fetch)
     except Exception:
-        return {"current": VERSION, "available": False}
+        return {"current": VERSION, "available": False, "error": True}
     latest = str(m.get("version") or "")
     return {"current": VERSION, "latest": latest,
             "available": bool(latest) and _ver_key(latest) > _ver_key(VERSION),
@@ -1789,7 +1795,7 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/settings":
                 self._send(200, _settings_response())
             elif path == "/api/update":
-                self._send(200, api_update())
+                self._send(200, api_update(force=query.get("force") == ["1"]))
             elif path == "/api/terminals":
                 self._send(200, api_terminals())
             elif path == "/api/events":

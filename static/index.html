@@ -818,10 +818,13 @@ const I18N = {
     'set.menubarUsage': '常显用量', 'set.menubarUsageHint': '可多选，全不选只留图标',
     'set.showActive': '活跃会话卡片', 'set.minimal': '精简模式', 'set.minimalHint': '降低视觉噪声，更耐看',
     'set.glassDim': '面板暗化强度', 'set.glassDimHint': '越低越透明',
+    'set.fontScale': '字体大小', 'set.fontScaleHint': '面板与小组件整体缩放',
     'set.sessionsLimit': '会话列表数量', 'set.sessionsLimitHint': '每端各取 N 条',
     'set.refreshInterval': '自动刷新间隔', 'set.sampleInterval': '额度采样间隔', 'set.minUnit': '{n} 分钟',
     'set.keepAwake': '保持唤醒', 'set.keepAwakeHint': '有活跃会话时阻止系统休眠，避免会话断网中断',
     'set.updateCheck': '自动检查更新', 'set.updateCheckHint': '仅向项目主页查询版本号，不发送任何数据',
+    'set.checkNow': '手动检查', 'set.checkNowHint': '立即查询一次最新版本', 'set.checkNowBtn': '立即检查',
+    'update.latest': '已是最新版本', 'update.checkFail': '检查失败，请稍后再试',
     'update.available': '新版本 {v} 可用', 'update.go': '前往下载',
     'set.language': '语言', 'set.langAuto': '跟随系统',
     'set.resumeMethod': '恢复方式', 'set.resumeMethodHint': '仅列已安装终端', 'set.termAuto': '自动（按优先级）', 'set.termCopy': '仅复制命令',
@@ -884,10 +887,13 @@ const I18N = {
     'set.menubarUsage': 'Always-on usage', 'set.menubarUsageHint': 'Multi-select; none = icon only',
     'set.showActive': 'Active sessions card', 'set.minimal': 'Minimal mode', 'set.minimalHint': 'Less visual noise, easier on the eyes',
     'set.glassDim': 'Panel dimming', 'set.glassDimHint': 'Lower = more transparent',
+    'set.fontScale': 'Font size', 'set.fontScaleHint': 'Scales the panel and widget as a whole',
     'set.sessionsLimit': 'Sessions list size', 'set.sessionsLimitHint': 'N per tool',
     'set.refreshInterval': 'Auto-refresh interval', 'set.sampleInterval': 'Quota sampling interval', 'set.minUnit': '{n} min',
     'set.keepAwake': 'Keep awake', 'set.keepAwakeHint': 'Prevent system sleep while sessions are active, so they survive sleep/network drops',
     'set.updateCheck': 'Check for updates', 'set.updateCheckHint': 'Only asks the project site for a version number; sends nothing',
+    'set.checkNow': 'Manual check', 'set.checkNowHint': 'Query the latest version right now', 'set.checkNowBtn': 'Check now',
+    'update.latest': 'You are up to date', 'update.checkFail': 'Check failed, try again later',
     'update.available': 'Version {v} available', 'update.go': 'Download',
     'set.language': 'Language', 'set.langAuto': 'Follow system',
     'set.resumeMethod': 'Resume method', 'set.resumeMethodHint': 'Only installed terminals', 'set.termAuto': 'Auto (by priority)', 'set.termCopy': 'Copy command only',
@@ -950,10 +956,13 @@ const I18N = {
     'set.menubarUsage': '使用率を常時表示', 'set.menubarUsageHint': '複数選択可、未選択ならアイコンのみ',
     'set.showActive': 'アクティブセッション', 'set.minimal': 'ミニマルモード', 'set.minimalHint': '視覚ノイズを抑えて見やすく',
     'set.glassDim': 'パネルの暗さ', 'set.glassDimHint': '低いほど透明',
+    'set.fontScale': '文字サイズ', 'set.fontScaleHint': 'パネルとウィジェット全体を拡大縮小',
     'set.sessionsLimit': 'セッション一覧の件数', 'set.sessionsLimitHint': 'ツールごとに N 件',
     'set.refreshInterval': '自動更新の間隔', 'set.sampleInterval': '残量サンプリング間隔', 'set.minUnit': '{n} 分',
     'set.keepAwake': 'スリープ防止', 'set.keepAwakeHint': 'アクティブなセッション中はスリープを防ぎ、切断による中断を回避',
     'set.updateCheck': '更新を自動確認', 'set.updateCheckHint': 'プロジェクトサイトにバージョン番号のみ照会、データ送信なし',
+    'set.checkNow': '手動チェック', 'set.checkNowHint': '今すぐ最新バージョンを照会', 'set.checkNowBtn': '今すぐ確認',
+    'update.latest': 'すでに最新バージョンです', 'update.checkFail': '確認に失敗しました。後でもう一度お試しください',
     'update.available': '新バージョン {v} が利用可能', 'update.go': 'ダウンロード',
     'set.language': '言語', 'set.langAuto': 'システムに従う',
     'set.resumeMethod': '再開方法', 'set.resumeMethodHint': 'インストール済みのみ表示', 'set.termAuto': '自動（優先度順）', 'set.termCopy': 'コマンドをコピーのみ',
@@ -1646,6 +1655,24 @@ $('#search').oninput = e => { query = e.target.value.trim().toLowerCase(); rende
 let settings = null;
 // label/hint/sec/btns.name 存 i18n key，渲染时经 t() 解析（语言切换即时生效）
 const SET_SCHEMA = [
+  // 常用優先：外观/语言在前，告警阈值类「设一次就不动」的往后
+  {sec: 'set.secPanel'},
+  {key: 'language', label: 'set.language', type: 'select',
+   opts: ['auto', 'zh-CN', 'en', 'ja'], optKeys: {auto: 'set.langAuto'},
+   names: {'zh-CN': '中文', 'en': 'English', 'ja': '日本語'}},
+  {key: 'font_scale', label: 'set.fontScale', hint: 'set.fontScaleHint', type: 'chips',
+   opts: [100, 110, 120, 135], fmt: v => v + '%', custom: [80, 160]},
+  {key: 'glass_dim', label: 'set.glassDim', hint: 'set.glassDimHint', type: 'chips',
+   opts: [40, 55, 68, 80], fmt: v => v + '%', custom: [20, 90]},
+  {key: 'minimal_mode', label: 'set.minimal', hint: 'set.minimalHint', type: 'toggle'},
+  {key: 'show_active', label: 'set.showActive', type: 'toggle'},
+  {key: 'sessions_limit', label: 'set.sessionsLimit', hint: 'set.sessionsLimitHint', type: 'chips', opts: [10, 15, 20, 30], custom: [5, 100]},
+  {key: 'refresh_interval', label: 'set.refreshInterval', type: 'chips', opts: [15, 30, 60], fmt: v => v + 's', custom: [5, 600]},
+  {key: 'sample_interval', label: 'set.sampleInterval', type: 'chips',
+   opts: [60, 180, 300, 600], fmt: v => t('set.minUnit', {n: v / 60}), custom: [60, 3600]},
+  {sec: 'set.secMenubar'},
+  {label: 'set.menubarUsage', hint: 'set.menubarUsageHint', type: 'multi',
+   opts: [{k: 'menubar_claude', name: 'Claude'}, {k: 'menubar_codex', name: 'Codex'}]},
   {sec: 'set.secNotify'},
   {key: 'notify_enabled', label: 'set.notifyEnabled', type: 'toggle'},
   {key: 'notify_warn', label: 'set.notifyWarn', type: 'chips', opts: [70, 80, 90], fmt: v => v + '%', custom: [50, 99]},
@@ -1657,27 +1684,14 @@ const SET_SCHEMA = [
   {key: 'island_dwell_secs', label: 'set.dwell', type: 'chips',
    opts: [3, 5, 8, 10], fmt: v => v + 's', custom: [2, 30]},
   {key: 'notify_sound', label: 'set.sound', type: 'toggle'},
-  {sec: 'set.secMenubar'},
-  {label: 'set.menubarUsage', hint: 'set.menubarUsageHint', type: 'multi',
-   opts: [{k: 'menubar_claude', name: 'Claude'}, {k: 'menubar_codex', name: 'Codex'}]},
-  {sec: 'set.secPanel'},
-  {key: 'show_active', label: 'set.showActive', type: 'toggle'},
-  {key: 'minimal_mode', label: 'set.minimal', hint: 'set.minimalHint', type: 'toggle'},
-  {key: 'glass_dim', label: 'set.glassDim', hint: 'set.glassDimHint', type: 'chips',
-   opts: [40, 55, 68, 80], fmt: v => v + '%', custom: [20, 90]},
-  {key: 'sessions_limit', label: 'set.sessionsLimit', hint: 'set.sessionsLimitHint', type: 'chips', opts: [10, 15, 20, 30], custom: [5, 100]},
-  {key: 'refresh_interval', label: 'set.refreshInterval', type: 'chips', opts: [15, 30, 60], fmt: v => v + 's', custom: [5, 600]},
-  {key: 'sample_interval', label: 'set.sampleInterval', type: 'chips',
-   opts: [60, 180, 300, 600], fmt: v => t('set.minUnit', {n: v / 60}), custom: [60, 3600]},
-  {sec: 'set.secSystem'},
-  {key: 'keep_awake', label: 'set.keepAwake', hint: 'set.keepAwakeHint', type: 'toggle'},
-  {key: 'update_check', label: 'set.updateCheck', hint: 'set.updateCheckHint', type: 'toggle'},
-  {key: 'language', label: 'set.language', type: 'select',
-   opts: ['auto', 'zh-CN', 'en', 'ja'], optKeys: {auto: 'set.langAuto'},
-   names: {'zh-CN': '中文', 'en': 'English', 'ja': '日本語'}},
   {sec: 'set.secResume'},
   {key: 'terminal', label: 'set.resumeMethod', hint: 'set.resumeMethodHint', type: 'select',
    opts: ['auto', 'copy'], optKeys: {auto: 'set.termAuto', copy: 'set.termCopy'}},
+  {sec: 'set.secSystem'},
+  {key: 'keep_awake', label: 'set.keepAwake', hint: 'set.keepAwakeHint', type: 'toggle'},
+  {key: 'update_check', label: 'set.updateCheck', hint: 'set.updateCheckHint', type: 'toggle'},
+  {label: 'set.checkNow', hint: 'set.checkNowHint', type: 'btns', btns: [
+    {act: 'check_update', name: 'set.checkNowBtn'}]},
   {sec: 'set.secData'},
   {label: 'set.dataManage', hint: 'set.dataManageHint', type: 'btns', btns: [
     {act: 'open', name: 'set.openData'},
@@ -1759,6 +1773,7 @@ function applySettings() {
   if (!settings) return;
   $('#active').style.display = settings.show_active ? '' : 'none';
   document.documentElement.style.setProperty('--dim', (settings.glass_dim || 68) / 100);
+  document.body.style.zoom = (settings.font_scale || 100) / 100;   // 字体大小（整体缩放）
   document.body.classList.toggle('minimal', !!settings.minimal_mode);
   if (bridge) bridge.postMessage('sync');   // 通知 Swift 立即刷新菜单栏
   clearInterval(pollTimer);
@@ -1809,6 +1824,19 @@ $('#setbody').addEventListener('click', e => {
   const multi = e.target.closest('.chip[data-multi]');
   if (multi) return saveSetting(multi.dataset.multi, !multi.classList.contains('on'));
   const act = e.target.closest('.chip[data-act]');
+  if (act && act.dataset.act === 'check_update') {  // 主动检查更新（绕过 6h 缓存）
+    act.disabled = true;
+    fetch('/api/update?force=1').then(r => r.json()).then(r => {
+      _update = r;
+      if (r.available) {
+        const bar = $('#updatebar'); if (bar) delete bar.dataset.dismissed;
+        renderUpdateBar();
+        toast(t('update.available', {v: 'v' + r.latest}));
+      } else toast(r.error ? t('update.checkFail') : t('update.latest'));
+    }).catch(() => toast(t('update.checkFail')))
+      .finally(() => { act.disabled = false; });
+    return;
+  }
   if (act) {
     fetch('/api/data', {method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({action: act.dataset.act})})
@@ -1835,10 +1863,12 @@ document.querySelectorAll('#tabbar .tab').forEach(t => t.onclick = () => {
   document.querySelectorAll('.tabview').forEach(v =>
     v.classList.toggle('on', v.id === 'view-' + t.dataset.t));
 });
-{ // ?tab=sessions 直开指定 Tab（调试 / 截图用）
-  const t0 = new URLSearchParams(location.search).get('tab');
+{ // ?tab=sessions / ?settings=1 直开指定视图（调试 / 截图用）
+  const q0 = new URLSearchParams(location.search);
+  const t0 = q0.get('tab');
   const btn = t0 && document.querySelector(`#tabbar .tab[data-t="${CSS.escape(t0)}"]`);
   if (btn) btn.onclick();
+  if (q0.get('settings')) $('#settings').classList.add('show');
 }
 $('#closesettings').onclick = () => $('#settings').classList.remove('show');
 
