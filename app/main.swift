@@ -435,6 +435,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var lastEventId = 0
     var eventsPrimed = false
     var loaded = false
+    var appearanceObs: NSKeyValueObservation?   // 菜单栏明暗变化 → 重绘混色图标
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -447,6 +448,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             button.action = #selector(handleClick)
             button.target = self
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+            // 混色图标的常规段颜色取决于菜单栏明暗，外观变化时重绘
+            appearanceObs = button.observe(\.effectiveAppearance) { [weak self] _, _ in
+                DispatchQueue.main.async { self?.updateIconState() }
+            }
         }
 
         ensureBackend { [weak self] in
@@ -582,23 +587,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return img
     }
 
-    /// 多段「图标+百分比」合成单张模板图：垂直居中自己掌控；告警色统一走 contentTintColor
+    /// 多段「图标+百分比」合成单张状态栏图：垂直居中自己掌控；各段按自身额度独立着色。
+    /// 全段常规 → 模板图（随菜单栏自适应黑白）；任一段告警 → 混色非模板图，
+    /// 常规段按菜单栏明暗自行取黑/白，告警段烘入告警色
+    /// （macOS 26 起对模板图设 contentTintColor 会整体渲染成黑色，故颜色一律画进图里）。
     /// items 为空 → 仅显示 AgentDeck 仪表图标
-    func composedIcon(items: [(tool: String, pct: Double)]) -> NSImage? {
+    func composedIcon(items: [(tool: String, pct: Double, alert: NSColor?)]) -> NSImage? {
         let barH: CGFloat = 22, gap: CGFloat = 3, groupGap: CGFloat = 8
+        let anyAlert = items.contains { $0.alert != nil }
+        let isDark = statusItem.button?.effectiveAppearance
+            .bestMatch(from: [.darkAqua, .vibrantDark, .aqua, .vibrantLight])
+            .map { $0 == .darkAqua || $0 == .vibrantDark } ?? true
+        // 模板模式只取 alpha，黑色即可；混色模式常规段需匹配菜单栏明暗
+        let normalInk: NSColor = anyAlert ? (isDark ? .white : .black) : .black
         var parts: [(NSImage, NSAttributedString)] = []
         for it in items {
             guard let g = agentGlyph(it.tool) else { continue }
-            parts.append((g, NSAttributedString(
+            let ink = it.alert ?? normalInk
+            parts.append((tinted(g, ink), NSAttributedString(
                 string: String(format: "%.0f%%", it.pct),
                 attributes: [
                     .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .semibold),
-                    .foregroundColor: NSColor.black,   // 模板图只取 alpha 通道
+                    .foregroundColor: ink,
                 ])))
         }
         var symbols: [(NSImage, NSAttributedString?)] = parts.map { ($0.0, $0.1) }
         if symbols.isEmpty {
-            symbols = [(deckGlyph(), nil)]   // 全不选 → 自身双环字形
+            symbols = [(tinted(deckGlyph(), normalInk), nil)]   // 全不选 → 自身双环字形
         }
         var width: CGFloat = 0
         for (i, s) in symbols.enumerated() {
@@ -621,8 +636,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
             return true
         }
-        img.isTemplate = true
+        img.isTemplate = !anyAlert
         return img
+    }
+
+    /// 用指定颜色给字形上色（sourceAtop 保留 alpha 形状）；黑色即原样返回
+    func tinted(_ img: NSImage, _ color: NSColor) -> NSImage {
+        if color == .black { return img }
+        let out = NSImage(size: img.size, flipped: false) { rect in
+            img.draw(in: rect)
+            color.set()
+            rect.fill(using: .sourceAtop)
+            return true
+        }
+        return out
     }
 
     // MARK: - 点击处理
@@ -932,30 +959,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
             else { return }
             let mb = json["menubar"] as? [String: Any]
-            var maxPct = 0.0                          // 全窗口最大值 → 决定告警色
-            var items: [(tool: String, pct: Double)] = []   // 勾选的 agent → 常显段
+            let alertEnabled = mb?["alert_color"] as? Bool ?? true   // 设置开关：菜单栏告警变色
+            // 按 agent 各自的全窗口最大值决定该段告警色（37% 与 92% 不应一起变橙）
+            var items: [(tool: String, pct: Double, alert: NSColor?)] = []
             for tool in ["claude", "codex"] {
                 guard let node = json[tool] as? [String: Any],
                       let windows = node["windows"] as? [[String: Any]] else { continue }
+                var toolMax = 0.0, primary: Double?
                 for (i, w) in windows.enumerated() {
                     if let p = w["used_percent"] as? Double {
-                        maxPct = max(maxPct, p)
-                        if i == 0 && (mb?[tool] as? Bool ?? false) {
-                            items.append((tool, p))
-                        }
+                        toolMax = max(toolMax, p)
+                        if i == 0 { primary = p }
                     }
+                }
+                if let p = primary, mb?[tool] as? Bool ?? false {
+                    let alert: NSColor? = !alertEnabled ? nil
+                                        : toolMax >= 95 ? .systemRed
+                                        : toolMax >= 80 ? .systemOrange : nil
+                    items.append((tool, p, alert))
                 }
             }
             DispatchQueue.main.async {
                 guard let button = self?.statusItem.button else { return }
                 self?.statusItem.isVisible = true   // 兜底：被系统/误操作隐藏后自动恢复
-                if maxPct >= 95 {
-                    button.contentTintColor = .systemRed
-                } else if maxPct >= 80 {
-                    button.contentTintColor = .systemOrange
-                } else {
-                    button.contentTintColor = nil
-                }
+                // 告警色烘进图标本体；不再用 contentTintColor——
+                // macOS 26 对模板图设置 tint 会渲染成黑色（实测）
+                button.contentTintColor = nil
                 if let img = self?.composedIcon(items: items) {
                     button.image = img
                 }

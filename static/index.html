@@ -830,6 +830,7 @@ const I18N = {
     'set.notifyReset': '重置回满提醒', 'set.sessionDone': '会话完成提醒', 'set.sessionDoneHint': '灵动岛弹出，点击跳会话',
     'set.shortFilter': '短任务过滤', 'set.shortFilterHint': '低于该时长不提醒', 'set.dwell': '提醒停留时长', 'set.sound': '提示音',
     'set.menubarUsage': '常显用量', 'set.menubarUsageHint': '可多选，全不选只留图标',
+    'set.menubarAlert': '额度告警变色', 'set.menubarAlertHint': '对应段 ≥80% 变橙、≥95% 变红',
     'set.showActive': '活跃会话卡片', 'set.minimal': '精简模式', 'set.minimalHint': '降低视觉噪声，更耐看',
     'set.glassDim': '面板暗化强度', 'set.glassDimHint': '越低越透明',
     'set.fontScale': '字体大小', 'set.fontScaleHint': '面板与小组件整体缩放',
@@ -899,6 +900,7 @@ const I18N = {
     'set.notifyReset': 'Reset-to-full alert', 'set.sessionDone': 'Session-done alert', 'set.sessionDoneHint': 'Island popup; click to jump',
     'set.shortFilter': 'Short-task filter', 'set.shortFilterHint': "Don't alert below this duration", 'set.dwell': 'Alert dwell time', 'set.sound': 'Sound',
     'set.menubarUsage': 'Always-on usage', 'set.menubarUsageHint': 'Multi-select; none = icon only',
+    'set.menubarAlert': 'Quota alert colors', 'set.menubarAlertHint': 'Segment turns orange at ≥80%, red at ≥95%',
     'set.showActive': 'Active sessions card', 'set.minimal': 'Minimal mode', 'set.minimalHint': 'Less visual noise, easier on the eyes',
     'set.glassDim': 'Panel dimming', 'set.glassDimHint': 'Lower = more transparent',
     'set.fontScale': 'Font size', 'set.fontScaleHint': 'Scales the panel and widget as a whole',
@@ -968,6 +970,7 @@ const I18N = {
     'set.notifyReset': '回復時に通知', 'set.sessionDone': 'セッション完了通知', 'set.sessionDoneHint': 'アイランド表示、クリックで移動',
     'set.shortFilter': '短時間タスク除外', 'set.shortFilterHint': 'この時間未満は通知しない', 'set.dwell': '通知の表示時間', 'set.sound': '通知音',
     'set.menubarUsage': '使用率を常時表示', 'set.menubarUsageHint': '複数選択可、未選択ならアイコンのみ',
+    'set.menubarAlert': 'クォータ警告色', 'set.menubarAlertHint': '該当セグメントが ≥80% で橙、≥95% で赤に',
     'set.showActive': 'アクティブセッション', 'set.minimal': 'ミニマルモード', 'set.minimalHint': '視覚ノイズを抑えて見やすく',
     'set.glassDim': 'パネルの暗さ', 'set.glassDimHint': '低いほど透明',
     'set.fontScale': '文字サイズ', 'set.fontScaleHint': 'パネルとウィジェット全体を拡大縮小',
@@ -1687,6 +1690,7 @@ const SET_SCHEMA = [
   {sec: 'set.secMenubar'},
   {label: 'set.menubarUsage', hint: 'set.menubarUsageHint', type: 'multi',
    opts: [{k: 'menubar_claude', name: 'Claude'}, {k: 'menubar_codex', name: 'Codex'}]},
+  {key: 'menubar_alert_color', label: 'set.menubarAlert', hint: 'set.menubarAlertHint', type: 'toggle'},
   {sec: 'set.secNotify'},
   {key: 'notify_enabled', label: 'set.notifyEnabled', type: 'toggle'},
   {key: 'notify_warn', label: 'set.notifyWarn', type: 'chips', opts: [70, 80, 90], fmt: v => v + '%', custom: [50, 99]},
@@ -1810,8 +1814,8 @@ function applySettings(key) {
   if (all || key === 'minimal_mode')
     document.body.classList.toggle('minimal', !!settings.minimal_mode);
   // 仅壳层关心的设置才喊 Swift（菜单栏 / 小组件外观 / 语言 / 灵动岛）
-  if (bridge && (all || ['menubar_claude', 'menubar_codex', 'language', 'font_scale',
-                         'glass_dim', 'minimal_mode', 'island_dwell_secs'].includes(key)))
+  if (bridge && (all || ['menubar_claude', 'menubar_codex', 'menubar_alert_color', 'language',
+                         'font_scale', 'glass_dim', 'minimal_mode', 'island_dwell_secs'].includes(key)))
     bridge.postMessage('sync');
   if (all || key === 'refresh_interval') {
     clearInterval(pollTimer);

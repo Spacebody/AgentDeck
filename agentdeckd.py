@@ -87,6 +87,7 @@ DEFAULT_SETTINGS = {
     "notify_sound": True,      # 提示音
     "menubar_claude": True,    # 菜单栏常显 Claude 图标+百分比
     "menubar_codex": True,     # 菜单栏常显 Codex 图标+百分比（可多选/全不选）
+    "menubar_alert_color": True,   # 菜单栏图标按额度变色（≥80% 橙 / ≥95% 红，分段独立）
     "show_active": True,       # 活跃会话卡片
     "sessions_limit": 15,      # 每端会话列表数量
     "refresh_interval": 30,    # 前端自动刷新（秒）
@@ -422,7 +423,8 @@ def api_quota():
     return {"claude": _resilient("claude_quota", 120, _claude_quota),
             "codex": _resilient("codex_quota", 30, _codex_quota),
             "menubar": {"claude": s["menubar_claude"],
-                        "codex": s["menubar_codex"]},
+                        "codex": s["menubar_codex"],
+                        "alert_color": s.get("menubar_alert_color", True)},
             "ts": time.time()}
 
 
