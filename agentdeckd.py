@@ -723,6 +723,29 @@ def api_active():
                 if cands:
                     e["status"] = "busy" if now - max(cands) < 30 else "idle"
 
+        # 仍无状态来源的会话（如 Xcode 内置 Coding Assistant 拉起的 headless claude，
+        # 不写 transcript 也无 pidfile）：按进程瞬时 CPU 占用推断忙闲
+        unknown = [e for e in active if not e["status"]]
+        if unknown:
+            try:
+                out = subprocess.run(
+                    ["ps", "-o", "pid=,%cpu=",
+                     "-p", ",".join(str(e["pid"]) for e in unknown)],
+                    capture_output=True, text=True, timeout=5).stdout
+                cpu = {}
+                for ln in out.splitlines():
+                    p = ln.split()
+                    if len(p) == 2:
+                        try:
+                            cpu[int(p[0])] = float(p[1].replace(",", "."))
+                        except ValueError:
+                            pass
+                for e in unknown:
+                    if e["pid"] in cpu:
+                        e["status"] = "busy" if cpu[e["pid"]] >= 5 else "idle"
+            except Exception:
+                pass
+
         # Codex 桌面端会话：宿主是常驻 app-server（被进程扫描排除），
         # 改按 rollout 近期写入 + originator == "Codex Desktop" 识别
         now = time.time()
