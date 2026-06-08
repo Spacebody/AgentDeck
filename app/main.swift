@@ -902,16 +902,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func ensureBackend(then done: @escaping () -> Void) {
-        healthCheck { [weak self] alive in
-            if alive { done(); return }
-            self?.spawnBackend()
+        let mine = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
+        healthCheck { [weak self] alive, version in
+            guard let self = self else { return }
+            // 端口上跑着同版本 daemon 才复用；版本不符（装了新版仍占着旧后端）则清掉换新——
+            // daemon 是常驻进程，磁盘换了 .py 也不会自动重载，必须强制重起才跑新代码。
+            if alive, version == mine { done(); return }
+            if alive { self.killStaleBackend() }
+            self.spawnBackend()
             // 等后端起来再加载页面，最多重试 10 次
-            self?.waitHealthy(retries: 10, then: done)
+            self.waitHealthy(retries: 10, then: done)
         }
     }
 
     func waitHealthy(retries: Int, then done: @escaping () -> Void) {
-        healthCheck { [weak self] alive in
+        healthCheck { [weak self] alive, _ in
             if alive || retries <= 0 { done(); return }
             DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) {
                 self?.waitHealthy(retries: retries - 1, then: done)
@@ -919,15 +924,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
-    func healthCheck(_ cb: @escaping (Bool) -> Void) {
+    func healthCheck(_ cb: @escaping (Bool, String?) -> Void) {
         var req = URLRequest(url: URL(string: "\(kBase)/api/health")!)
         req.timeoutInterval = 2
         URLSession.shared.dataTask(with: req) { data, _, _ in
             // 校验响应身份：端口被其他进程占用时不能误当作后端
-            let ok = data.flatMap {
+            let obj = data.flatMap {
                 try? JSONSerialization.jsonObject(with: $0) as? [String: Any]
-            }?["ok"] as? Bool ?? false
-            cb(ok)
+            }
+            cb(obj?["ok"] as? Bool ?? false, obj?["version"] as? String)
         }.resume()
     }
 

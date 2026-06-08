@@ -1894,9 +1894,24 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
+def _parent_watchdog():
+    """壳进程（App）退出后自杀，避免后台 daemon 残留成孤儿。
+    App 用 Process 拉起时 daemon 的父进程就是 App；App 一死，daemon 被 launchd
+    收养、PPID 变为 1，据此退出。启动时若已是孤儿（PPID≤1，如 launchd 直拉）则不看守，
+    手动 `python3 agentdeckd.py` 直跑时父是 shell，关掉 shell 也会随之退出（开发以前台 Ctrl-C 为主，不受影响）。"""
+    start_ppid = os.getppid()
+    if start_ppid <= 1:
+        return
+    while True:
+        time.sleep(2)
+        if os.getppid() != start_ppid:
+            os._exit(0)
+
+
 def main():
     _events_load()
     _alert_state_load()
+    threading.Thread(target=_parent_watchdog, daemon=True).start()
     threading.Thread(target=_sampler_loop, daemon=True).start()
     threading.Thread(target=_keepawake_loop, daemon=True).start()
     server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
