@@ -208,10 +208,13 @@ WINDOW_LABELS = {
 
 
 def _system_locale():
-    """系统首选语言 → zh-CN / en / ja，识别不出回退 en。"""
+    """系统首选语言 → zh-CN / en / ja；探测失败/无法识别返回 None。
+    失败不返回 en，是为了让上层区分『确实是英文』与『这次没探到』，后者不进缓存。"""
     try:
         out = subprocess.run(["defaults", "read", "-g", "AppleLanguages"],
                              capture_output=True, text=True, timeout=5)
+        if out.returncode != 0:
+            return None
         for line in out.stdout.splitlines():
             tok = line.strip().strip('(),"').lower()
             if not tok:
@@ -220,20 +223,30 @@ def _system_locale():
                 return "zh-CN"
             if tok.startswith("ja"):
                 return "ja"
-            if tok.startswith("en"):
-                return "en"
-            return "en"   # 首个非空语言码无法识别，回退
+            return "en"   # 首个非空语言码：英文或其它语种，均按 en
     except Exception:
         pass
-    return "en"
+    return None
 
 
 def _effective_locale():
-    """设置为 auto 时跟随系统；否则用设置值。系统探测带 5 分钟缓存。"""
+    """设置为 auto 时跟随系统；否则用设置值。
+    系统探测成功才写 5 分钟缓存——探测失败本次回退 en 但不缓存，
+    否则启动期一次 defaults 抖动会把界面锁成英文 5 分钟（且 auto 下切不回来）。"""
     lang = get_settings().get("language", "auto")
     if lang in LOCALES:
         return lang
-    return cached("syslang", 300, _system_locale)
+    now = time.time()
+    with _cache_lock:
+        hit = _ttl_cache.get("syslang")
+        if hit and hit[0] > now:
+            return hit[1]
+    loc = _system_locale()
+    if loc is None:
+        return "en"   # 不写缓存，下个刷新周期立即重探
+    with _cache_lock:
+        _ttl_cache["syslang"] = (now + 300, loc)
+    return loc
 
 
 def _settings_response():
