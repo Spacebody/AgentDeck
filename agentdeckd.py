@@ -802,10 +802,24 @@ def _resilient(key, ttl, fn):
         return out
 
 
-def api_quota():
+_last_force_quota = 0.0
+
+
+def api_quota(force=False):
     s = get_settings()
     # 面板隐藏的 agent 不再拉额度（省钥匙串读取 / Anthropic usage 调用 / 限流消耗）
     ttl = s.get("quota_interval", CLAUDE_QUOTA_TTL)   # 用户可调的额度查询间隔（Claude/Codex 共用）
+    # 手动刷新（🔄）：清掉额度缓存键，逼一次真实重拉，不再只回读上次缓存——否则把查询
+    # 间隔调大（如 1 小时）后点刷新也拿不到新数据。带 10s 防连点闸，避免狂点把接口打到 429。
+    if force:
+        global _last_force_quota
+        now = time.time()
+        with _cache_lock:
+            if now - _last_force_quota >= 10:
+                _last_force_quota = now
+                for k in [k for k in _ttl_cache
+                          if k.startswith("claude_quota") or k.startswith("codex_quota")]:
+                    _ttl_cache.pop(k, None)
     claude_accts = _claude_quota_accounts(ttl) if s.get("show_claude", True) else []
     codex_accts = _codex_quota_accounts(ttl) if s.get("show_codex", True) else []
     # 向后兼容：claude/codex 仍为「主账号」单对象；新增 accounts 列表供 carousel/轮转
@@ -2337,7 +2351,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, {"ok": True, "pid": os.getpid(),
                                  "version": VERSION})
             elif path == "/api/quota":
-                self._send(200, api_quota())
+                self._send(200, api_quota(
+                    force=query.get("force", ["0"])[0] in ("1", "true")))
             elif path == "/api/diag":
                 # 含凭据指纹 + 本机路径，比其他 GET 敏感：加 Host 校验封 DNS rebinding
                 if self.headers.get("Host", "") not in (

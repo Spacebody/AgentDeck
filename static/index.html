@@ -1280,9 +1280,9 @@ function renderQuotaTool(el, name, accounts, gradId) {
   animateQuota(el);
 }
 
-async function loadQuota() {
+async function loadQuota(force) {
   try {
-    const d = await (await fetch('/api/quota')).json();
+    const d = await (await fetch('/api/quota' + (force ? '?force=1' : ''))).json();
     const acc = d.accounts || {};
     renderQuotaTool($('#qc-claude'), 'Claude', acc.claude || (d.claude ? [d.claude] : []), 'grad-claude');
     renderQuotaTool($('#qc-codex'), 'Codex', acc.codex || (d.codex ? [d.codex] : []), 'grad-codex');
@@ -2166,7 +2166,7 @@ async function refreshAll(manual) {
       applySettings();
     }
   } catch {}
-  const jobs = [loadQuota(), loadSessions(), loadUsage(), loadActive(),
+  const jobs = [loadQuota(manual), loadSessions(), loadUsage(), loadActive(),
                 loadToday(), loadDone(), loadUpdate()];
   if ($('#usage').classList.contains('curve')) jobs.push(loadCurve());
   await Promise.all(jobs);
