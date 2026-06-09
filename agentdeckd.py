@@ -9,6 +9,7 @@ API:
   POST /api/resume    在终端中恢复指定会话
 """
 
+import hashlib
 import json
 import os
 import re
@@ -42,6 +43,10 @@ except OSError:
     VERSION = "dev"
 SAMPLE_INTERVAL = 180          # 额度采样周期（秒）
 HISTORY_KEEP = 7 * 86400       # 历史保留 7 天
+# Claude 官方 usage 端点限流偏严：缓存 5 分钟（额度窗口是 5h/7d，无需更勤）。
+# 多账号时每账号各拉一次，本 TTL 直接决定每个账号的真实外部调用频率。
+CLAUDE_QUOTA_TTL = 300
+CODEX_QUOTA_TTL = 30           # Codex 是本地 jsonl 解析，无外部限流，可勤
 
 # 更新检测：向自托管的 Cloudflare Pages 清单查最新版本号（不带任何凭据；可在设置中关闭）。
 # 部署后把域名改成你的 Pages 项目地址即可。
@@ -88,12 +93,22 @@ DEFAULT_SETTINGS = {
     "menubar_claude": True,    # 菜单栏常显 Claude 图标+百分比
     "menubar_codex": True,     # 菜单栏常显 Codex 图标+百分比（可多选/全不选）
     "menubar_alert_color": True,   # 菜单栏图标按额度变色（≥80% 橙 / ≥95% 红，分段独立）
+    "menubar_value_dim": "shortest",  # 菜单栏显示哪个窗口的百分比：shortest/weekly/max
+    "menubar_color_dim": "shortest",  # 菜单栏颜色由哪个窗口驱动：shortest/weekly/max
+    "menubar_rotate_secs": 0,  # 多账号菜单栏轮转间隔（秒）；0=不轮转，只显主账号
+    "claude_dirs": [],         # 手动添加的额外 Claude 配置目录（多账号并行）
+    "codex_dirs": [],          # 手动添加的额外 Codex 配置目录
     "show_active": True,       # 活跃会话卡片
+    "show_claude": True,       # 面板展示 Claude 板块（只用 Codex 的用户可关）
+    "show_codex": True,        # 面板展示 Codex 板块（只用 Claude 的用户可关）
     "sessions_limit": 15,      # 每端会话列表数量
     "refresh_interval": 30,    # 前端自动刷新（秒）
-    "sample_interval": 180,    # 额度采样间隔（秒）
+    "sample_interval": 180,    # 历史曲线采样间隔（秒）——只影响记录密度，不决定查询频率
+    "quota_interval": 600,     # 额度查询间隔（秒）——Claude 直接决定外部 API 频率（调大可避限流），Codex 为本地读取节流
     "terminal": "auto",        # auto | iterm | terminal | copy
     "font_scale": 100,         # 面板/小组件字体缩放 %（整体 zoom）
+    "color_claude": "",        # 自定义 Claude 主色（#rrggbb）；空=内置橙
+    "color_codex": "",         # 自定义 Codex 主色（#rrggbb）；空=内置青
     "language": "auto",        # 界面语言：auto（跟随系统）| zh-CN | en | ja
     "keep_awake": True,        # 有活跃会话时阻止系统休眠（避免会话因休眠/断网中断）
     "update_check": True,      # 检查新版本（向自托管 Pages 清单查版本号，不带凭据）
@@ -109,15 +124,24 @@ SETTING_RANGES = {
     "sessions_limit": (5, 100),
     "refresh_interval": (5, 600),
     "sample_interval": (60, 3600),
+    "quota_interval": (300, 21600),   # 5 分钟 ~ 6 小时
+    "menubar_rotate_secs": (0, 60),
 }
 _settings_lock = threading.Lock()
+_settings_cache = None   # (mtime, 解析后的 saved dict)——按 mtime 命中，免每次读盘+解析
 
 
 def get_settings():
+    global _settings_cache
     s = dict(DEFAULT_SETTINGS)
     with _settings_lock:
         try:
-            saved = json.loads(SETTINGS_FILE.read_text())
+            mt = SETTINGS_FILE.stat().st_mtime
+            if _settings_cache and _settings_cache[0] == mt:
+                saved = _settings_cache[1]
+            else:
+                saved = json.loads(SETTINGS_FILE.read_text())
+                _settings_cache = (mt, saved)
             s.update({k: v for k, v in saved.items() if k in DEFAULT_SETTINGS})
         except (OSError, ValueError):
             pass
@@ -133,6 +157,26 @@ def api_settings_save(body):
         if isinstance(default, bool):
             if not isinstance(v, bool):
                 continue
+        elif isinstance(default, list):
+            if not isinstance(v, list):
+                continue
+            # 目录列表：仅留字符串、去空白、去重、限长，防注入与膨胀
+            seen, clean_list = set(), []
+            for item in v:
+                if not isinstance(item, str):
+                    continue
+                p = item.strip()
+                if p and p not in seen:
+                    seen.add(p)
+                    clean_list.append(p[:512])
+                if len(clean_list) >= 16:
+                    break
+            v = clean_list
+            clean[k] = v
+            with _cache_lock:        # 目录变更立即重扫数据源
+                _ttl_cache.pop("sources_claude", None)
+                _ttl_cache.pop("sources_codex", None)
+            continue
         elif isinstance(default, int):
             if isinstance(v, bool) or not isinstance(v, (int, float)):
                 continue
@@ -144,7 +188,15 @@ def api_settings_save(body):
             continue
         elif k == "language" and v != "auto" and v not in LOCALES:
             continue
+        elif k in ("color_claude", "color_codex"):
+            # 仅接受 #rrggbb 或空串（清除）——防 CSS 注入
+            if v != "" and not re.fullmatch(r"#[0-9a-fA-F]{6}", v):
+                continue
+        elif k in ("menubar_value_dim", "menubar_color_dim"):
+            if v not in ("shortest", "weekly", "max"):
+                continue
         clean[k] = v
+    global _settings_cache
     with _settings_lock:
         try:
             cur = json.loads(SETTINGS_FILE.read_text())
@@ -153,8 +205,18 @@ def api_settings_save(body):
         cur.update(clean)
         SETTINGS_FILE.parent.mkdir(exist_ok=True)
         SETTINGS_FILE.write_text(json.dumps(cur, ensure_ascii=False, indent=1))
+        _settings_cache = None   # 失效设置缓存，下次 get_settings 重读
     with _cache_lock:
         _ttl_cache.pop("sessions", None)   # 数量类设置立即生效
+        if "quota_interval" in clean:
+            # 间隔变更立即生效：把现有「成功」额度缓存的到期改为 now+新间隔（调大即刻
+            # 延长静默、不强制立刻重拉）。退避/降级条目(stale/error)不动，让其跑完退避，
+            # 否则缩短到期会在限流中提前重试又被打。
+            now = time.time()
+            for key, (_exp, val) in list(_ttl_cache.items()):
+                if (key.startswith(("claude_quota", "codex_quota"))
+                        and isinstance(val, dict) and val.get("ok") and not val.get("stale")):
+                    _ttl_cache[key] = (now + clean["quota_interval"], val)
     if "keep_awake" in clean:   # 立即生效，不阻塞响应
         threading.Thread(target=_update_keepawake, daemon=True).start()
     return {"ok": True, "settings": _settings_response()}
@@ -163,6 +225,7 @@ def api_settings_save(body):
 _cache_lock = threading.Lock()
 _ttl_cache = {}        # key -> (expire_ts, value)，接口级 TTL 缓存
 _file_agg_cache = {}   # path -> (mtime, size, parsed)，文件级解析缓存
+_compute_locks = {}    # key -> Lock，防缓存击穿：同 key 到期时只放一个线程算 fn
 
 
 def cached(key, ttl, fn):
@@ -171,10 +234,145 @@ def cached(key, ttl, fn):
         hit = _ttl_cache.get(key)
         if hit and hit[0] > now:
             return hit[1]
-    val = fn()
-    with _cache_lock:
-        _ttl_cache[key] = (now + ttl, val)
-    return val
+        lock = _compute_locks.get(key)
+        if lock is None:
+            lock = _compute_locks[key] = threading.Lock()
+    # 同 key 串行：缓存到期时若多请求并发（Swift 15s + 前端 30s + 采样器），
+    # 只第一个真打外部接口，其余在锁上等它的结果——杜绝缓存击穿打爆限流
+    with lock:
+        now = time.time()
+        with _cache_lock:
+            hit = _ttl_cache.get(key)
+            if hit and hit[0] > now:
+                return hit[1]
+        val = fn()
+        with _cache_lock:
+            _ttl_cache[key] = (now + ttl, val)
+        return val
+
+
+# -------------------------------------------------- 数据源发现（多账号并行）
+# 用户可能用 CLAUDE_CONFIG_DIR 把不同账号隔离到独立目录（如 ~/.claude-personal /
+# ~/.claude-work）。守护进程看不到终端别名注入的 env，故综合多条线索发现目录：
+#   ① 守护进程自身的 CLAUDE_CONFIG_DIR ② 默认 ~/.claude
+#   ③ ~/.claude-* 通配 ④ 反查 shell 启动文件里的 CLAUDE_CONFIG_DIR=
+#   ⑤ 设置里手动添加。每个候选都校验「确为 Claude 配置目录」以排除 .claude-mem 等同名异类目录。
+
+def _slug(text):
+    return re.sub(r"[^a-z0-9]+", "-", str(text).lower()).strip("-") or "x"
+
+
+def _is_claude_dir(p):
+    """判定是否为真实 Claude Code 配置目录。
+    强标志：projects/(用过) | .credentials.json(登录过) | history.jsonl(命令历史)。
+    不用 settings.json——太通用，会误纳 .claude-mem 等同名异类工具目录。"""
+    try:
+        return p.is_dir() and (
+            (p / "projects").is_dir() or (p / ".credentials.json").exists()
+            or (p / "history.jsonl").exists())
+    except OSError:
+        return False
+
+
+def _is_codex_dir(p):
+    try:
+        return p.is_dir() and (
+            (p / "sessions").is_dir() or (p / "config.toml").exists()
+            or (p / "auth.json").exists())
+    except OSError:
+        return False
+
+
+def _expand(raw):
+    s = str(raw).strip().strip('"').strip("'")
+    s = s.replace("${HOME}", str(HOME)).replace("$HOME", str(HOME))
+    return Path(os.path.expanduser(s))
+
+
+def _shell_rc_dirs(var):
+    """从 shell 启动文件里反查 <var>=...（值含 $HOME/~ 时展开）。"""
+    found = []
+    pat = re.compile(re.escape(var) + r'=(?:"([^"]*)"|\'([^\']*)\'|([^\s;]+))')
+    for name in (".zshrc", ".zprofile", ".zshenv", ".bashrc",
+                 ".bash_profile", ".profile"):
+        try:
+            txt = (HOME / name).read_text(errors="replace")
+        except OSError:
+            continue
+        for m in pat.finditer(txt):
+            raw = m.group(1) or m.group(2) or m.group(3) or ""
+            if raw:
+                found.append(raw)
+    return found
+
+
+def _label_for_dir(p, default_label):
+    name = p.name
+    if name in (".claude", ".codex"):
+        return default_label
+    for pre in (".claude-", ".codex-"):
+        if name.startswith(pre):
+            return name[len(pre):] or default_label
+    return name.lstrip(".") or default_label
+
+
+def _discover(env_var, default_dir, glob_pat, settings_key,
+              is_dir_fn, default_label):
+    seen, order = {}, []
+
+    def add(raw):
+        p = _expand(raw)
+        if not is_dir_fn(p):
+            return
+        try:
+            rp = os.path.realpath(p)
+        except OSError:
+            return
+        if rp in seen:
+            return
+        src = {
+            "id": _slug(p.name) if p != default_dir else "default",
+            "label": _label_for_dir(p, default_label),
+            "path": p,
+            "is_default": (p == default_dir),
+        }
+        seen[rp] = src
+        order.append(src)
+
+    env = os.environ.get(env_var)
+    if env:
+        add(env)
+    add(default_dir)                              # 默认目录恒在
+    for p in sorted(HOME.glob(glob_pat)):         # ~/.claude-* / ~/.codex-*
+        add(p)
+    for raw in _shell_rc_dirs(env_var):           # 反查 shell 配置
+        add(raw)
+    for raw in get_settings().get(settings_key, []):   # 手动添加
+        add(raw)
+    # id 去重：同名 slug 追加序号，保证前端/Swift key 唯一
+    used = set()
+    for src in order:
+        base = src["id"]
+        i, sid = 1, base
+        while sid in used:
+            i += 1
+            sid = f"{base}-{i}"
+        src["id"] = sid
+        used.add(sid)
+    return order
+
+
+def claude_sources():
+    """发现所有 Claude 配置目录，默认目录排首位。结果短缓存（30s）。"""
+    return cached("sources_claude", 30, lambda: _discover(
+        "CLAUDE_CONFIG_DIR", HOME / ".claude", ".claude-*",
+        "claude_dirs", _is_claude_dir, "默认"))
+
+
+def codex_sources():
+    return cached("sources_codex", 30, lambda: _discover(
+        "CODEX_HOME", HOME / ".codex", ".codex-*",
+        "codex_dirs", _is_codex_dir, "默认"))
 
 
 # ----------------------------------------------------------------- 多语言 i18n
@@ -288,18 +486,109 @@ def api_update(force=False):
 
 # ---------------------------------------------------------------- Claude 额度
 
+def _keychain_item(service="Claude Code-credentials", account=None):
+    """读某条 generic-password 的 JSON；不存在/解析失败返回 None（不抛）。"""
+    cmd = ["security", "find-generic-password", "-s", service]
+    if account is not None:
+        cmd += ["-a", account]
+    cmd += ["-w"]
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        if out.returncode != 0:
+            return None
+        return json.loads(out.stdout.strip())
+    except (ValueError, OSError, subprocess.SubprocessError):
+        # SubprocessError 含 TimeoutExpired：security 卡住时跳过该候选、继续探测下一项
+        return None
+
+
 def _keychain_token():
-    out = subprocess.run(
-        ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
-        capture_output=True, text=True, timeout=15,
-    )
-    if out.returncode != 0:
-        raise RuntimeError(f"keychain: {out.stderr.strip() or 'denied'}")
-    return json.loads(out.stdout.strip())["claudeAiOauth"]["accessToken"]
+    """共享项（无 -a）的订阅 token；取不到则抛——保留给 api_diag / 兜底用。"""
+    data = _keychain_item()
+    tok = (data or {}).get("claudeAiOauth", {}).get("accessToken") if data else None
+    if not tok:
+        raise RuntimeError("keychain: no claudeAiOauth")
+    return tok
 
 
-def _claude_quota():
-    token = _keychain_token()
+def _keychain_token_for(path, is_default=False):
+    """按 config dir 取对应钥匙串项里的订阅 token。
+    实测 macOS 新版 Claude Code 多账号会按 sha256(目录路径) 后缀把凭据「分项」存
+    （单账号 / 默认目录则是无后缀的共享项，account=$USER）。确切命名规则无法在
+    单账号机器上验证，故逐候选探测、命中即用。
+
+    关键：共享项（无后缀）只属于默认目录——只有 is_default 才回落它；非默认源若没
+    命中自己的 sha256 分项就返回 None（老实显示『无额度』），绝不误取主账号 token
+    造成额度错配、也不对同一 token 重复打 usage 接口。"""
+    abspath = os.path.realpath(str(path))
+    h = hashlib.sha256(abspath.encode()).hexdigest()[:8]
+    user = os.environ.get("USER") or ""
+    base = "Claude Code-credentials"
+    # 该目录专属的 sha256 分项（覆盖『后缀加在 service / account』两种可能）
+    candidates = [
+        (f"{base}-{h}", None),
+        (base, f"{user}-{h}" if user else None),
+        (base, h),
+    ]
+    if is_default:   # 共享项仅归默认目录
+        candidates += [(base, user or None), (base, None)]
+    for svc, acct in candidates:
+        data = _keychain_item(svc, acct)
+        tok = (data or {}).get("claudeAiOauth", {}).get("accessToken") if data else None
+        if tok:
+            return tok
+    return None
+
+
+def _gateway_settings(path):
+    """该源是否为网关/自建 API 账号：settings(.local).json 的 env 里声明了
+    ANTHROPIC_BASE_URL 或 ANTHROPIC_AUTH_TOKEN（中转网关 / 非官方 API，无 usage 端点）。"""
+    for name in ("settings.json", "settings.local.json"):
+        try:
+            s = json.loads((path / name).read_text())
+        except (OSError, ValueError):
+            continue
+        env = (s.get("env") or {}) if isinstance(s, dict) else {}
+        if env.get("ANTHROPIC_BASE_URL") or env.get("ANTHROPIC_AUTH_TOKEN"):
+            return True
+    return False
+
+
+def _source_token(src):
+    """解析某 Claude 源的额度 token 与账号类型 → (token, kind)。
+      "oauth"    → 可拉官方额度
+      "gateway"  → 中转网关 / 自建 API 账号，官方 usage 不可用
+      "no_login" → 该源未做订阅 OAuth 登录、也无可用凭据
+
+    取 token 顺序：目录自带文件凭据 → 网关源（settings 有 base_url）显式排除 →
+    按 config dir 解析钥匙串项（多账号 sha256 分项；单账号即共享 $USER 项）。
+    网关账号用 env 注入的 AUTH_TOKEN、从不写钥匙串，故排除以免误取订阅 token。"""
+    path = src["path"]
+    # 1. 目录内文件凭据（Linux / 部分 CLAUDE_CONFIG_DIR 配置直接落文件）
+    try:
+        data = json.loads((path / ".credentials.json").read_text())
+        tok = (data.get("claudeAiOauth") or {}).get("accessToken")
+        if tok:
+            return tok, "oauth"
+    except (OSError, ValueError):
+        pass
+    # 2. 网关 / 自建 API 账号：无官方额度端点，且不应误取钥匙串里的订阅 token
+    if _gateway_settings(path):
+        return None, "gateway"
+    # 3. 钥匙串：按目录取对应项（多账号 sha256 分项 / 单账号共享项，仅默认源回落共享项）
+    tok = _keychain_token_for(path, is_default=src.get("is_default", False))
+    return (tok, "oauth") if tok else (None, "no_login")
+
+
+def _claude_quota_for(src):
+    token, kind = _source_token(src)
+    if not token:
+        # 官方额度端点不可用，按账号类型给出可读原因（面板自动展示）
+        reason = {
+            "gateway": "中转网关 / 自建 API 账号，无官方额度（仅按会话用量统计）",
+            "no_login": "该目录未做订阅登录，钥匙串无 OAuth 凭据",
+        }.get(kind, "无可用额度凭据")
+        return {"ok": False, "kind": kind, "no_quota": True, "error": reason}
     req = urllib.request.Request(
         "https://api.anthropic.com/api/oauth/usage",
         headers={
@@ -329,13 +618,39 @@ def _claude_quota():
                 "used_percent": round(float(node["utilization"]), 1),
                 "resets_at": node.get("resets_at"),
             })
-    return {"ok": True, "windows": windows, "raw": raw}
+    return {"ok": True, "kind": "oauth", "windows": windows, "raw": raw}
+
+
+def _claude_quota():
+    """主账号（首个源）额度——保持原返回形状，向后兼容旧前端/Swift。"""
+    srcs = claude_sources()
+    if not srcs:
+        return {"ok": False, "error": "未发现 Claude 配置目录"}
+    return _claude_quota_for(srcs[0])
+
+
+def _claude_quota_accounts(ttl=CLAUDE_QUOTA_TTL):
+    """每个 Claude 账号各拉一次额度（各自缓存 + 失败降级）。ttl 即真实外部调用间隔。"""
+    out = []
+    for src in claude_sources():
+        # 默认账号用回稳定键 claude_quota，复用历史降级数据（不因多账号化丢失兜底）
+        key = "claude_quota" if src["is_default"] else f"claude_quota_{src['id']}"
+        q = _resilient(key, ttl, lambda s=src: _claude_quota_for(s))
+        out.append({"account_id": src["id"], "account": src["label"],
+                    "is_default": src["is_default"], **q})
+    return out
 
 
 # ----------------------------------------------------------------- Codex 额度
 
-def _iter_codex_files(limit=60):
-    files = sorted(CODEX_SESSIONS.glob("*/*/*/rollout-*.jsonl"), reverse=True)
+def _iter_codex_files(limit=60, base=None):
+    """rollout 文件列表（文件名按时间戳，词序倒排≈新→旧）。
+    base=None 聚合所有 Codex 源；指定 base（codex home 目录）则只扫该账号。"""
+    bases = [base] if base is not None else [s["path"] for s in codex_sources()]
+    files = []
+    for b in bases:
+        files.extend((b / "sessions").glob("*/*/*/rollout-*.jsonl"))
+    files.sort(reverse=True)
     return files[:limit]
 
 
@@ -348,9 +663,9 @@ def _tail_lines(path, size=262144):
     return data.decode("utf-8", "replace").splitlines()
 
 
-def _codex_quota():
+def _codex_quota(base=None):
     primary = secondary = credits = stamp = None
-    for path in _iter_codex_files(30):
+    for path in _iter_codex_files(30, base=base):
         for line in reversed(_tail_lines(path)):
             if '"rate_limits"' not in line:
                 continue
@@ -397,6 +712,17 @@ def _codex_quota():
             "sampled_at": stamp}
 
 
+def _codex_quota_accounts(ttl=CODEX_QUOTA_TTL):
+    """每个 Codex 账号各自解析 rate_limits（各自缓存）。"""
+    out = []
+    for src in codex_sources():
+        key = "codex_quota" if src["is_default"] else f"codex_quota_{src['id']}"
+        q = _resilient(key, ttl, lambda s=src: _codex_quota(base=s["path"]))
+        out.append({"account_id": src["id"], "account": src["label"],
+                    "is_default": src["is_default"], **q})
+    return out
+
+
 _last_good = {}        # key -> 最近一次成功结果（失败时降级返回）
 LAST_GOOD_FILE = None  # 延迟初始化，DATA_DIR 定义在前文
 
@@ -412,7 +738,9 @@ def _resilient(key, ttl, fn):
             pass
     try:
         val = cached(key, ttl, fn)
-        if not val.get("stale") and _last_good.get(key) != val:
+        # 只把「真正成功」的结果存为降级值：ok=False（如网关无额度 / 钥匙串抖动）
+        # 不得污染兜底，否则真额度 429 时拿不回上一次的好数据
+        if val.get("ok") and not val.get("stale") and _last_good.get(key) != val:
             _last_good[key] = val
             try:
                 DATA_DIR.mkdir(exist_ok=True)
@@ -433,11 +761,81 @@ def _resilient(key, ttl, fn):
 
 def api_quota():
     s = get_settings()
-    return {"claude": _resilient("claude_quota", 120, _claude_quota),
-            "codex": _resilient("codex_quota", 30, _codex_quota),
+    # 面板隐藏的 agent 不再拉额度（省钥匙串读取 / Anthropic usage 调用 / 限流消耗）
+    ttl = s.get("quota_interval", CLAUDE_QUOTA_TTL)   # 用户可调的额度查询间隔（Claude/Codex 共用）
+    claude_accts = _claude_quota_accounts(ttl) if s.get("show_claude", True) else []
+    codex_accts = _codex_quota_accounts(ttl) if s.get("show_codex", True) else []
+    # 向后兼容：claude/codex 仍为「主账号」单对象；新增 accounts 列表供 carousel/轮转
+    if claude_accts:
+        primary_claude = claude_accts[0]
+    elif not s.get("show_claude", True):
+        primary_claude = {"ok": False, "hidden": True}   # 隐藏 → 不拉取
+    else:
+        primary_claude = _resilient("claude_quota", ttl, _claude_quota)
+    if codex_accts:
+        primary_codex = codex_accts[0]
+    elif not s.get("show_codex", True):
+        primary_codex = {"ok": False, "hidden": True}
+    else:
+        primary_codex = _resilient("codex_quota", ttl, _codex_quota)
+    return {"claude": primary_claude,
+            "codex": primary_codex,
+            "accounts": {"claude": claude_accts, "codex": codex_accts},
             "menubar": {"claude": s["menubar_claude"],
                         "codex": s["menubar_codex"],
-                        "alert_color": s.get("menubar_alert_color", True)},
+                        "alert_color": s.get("menubar_alert_color", True),
+                        "value_dim": s.get("menubar_value_dim", "shortest"),
+                        "color_dim": s.get("menubar_color_dim", "shortest"),
+                        "rotate_secs": s.get("menubar_rotate_secs", 0)},
+            "ts": time.time()}
+
+
+def api_diag():
+    """账号/额度自动诊断（脱敏，不含任何 token 明文）。
+    面板可在打开时自动拉取，把『为什么这个账号没额度』讲清楚。"""
+    def redact(t):
+        return f"len={len(t)}·…{t[-4:]}" if t else None
+
+    keychain = {}
+    try:
+        out = subprocess.run(
+            ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
+            capture_output=True, text=True, timeout=15)
+        if out.returncode != 0:
+            keychain = {"found": False, "error": (out.stderr or "denied").strip()[:80]}
+        else:
+            kc = json.loads(out.stdout.strip() or "{}")
+            oa = kc.get("claudeAiOauth") or {}
+            keychain = {"found": True,
+                        "has_claudeAiOauth": bool(oa.get("accessToken")),
+                        "subscriptionType": oa.get("subscriptionType"),
+                        "accessToken": redact(oa.get("accessToken")),
+                        "has_mcpOAuth": "mcpOAuth" in kc}
+    except Exception as exc:
+        keychain = {"found": False, "error": str(exc)[:80]}
+
+    sources = []
+    for src in claude_sources():
+        path = src["path"]
+        cf = path / ".credentials.json"
+        file_oauth = None
+        try:
+            d = json.loads(cf.read_text())
+            file_oauth = bool((d.get("claudeAiOauth") or {}).get("accessToken"))
+        except (OSError, ValueError):
+            pass
+        tok, kind = _source_token(src)
+        sources.append({
+            "id": src["id"], "label": src["label"], "path": str(path),
+            "is_default": src["is_default"],
+            "has_credentials_file": cf.exists(),
+            "file_has_claudeAiOauth": file_oauth,
+            "is_gateway": _gateway_settings(path),
+            "resolved_kind": kind,
+            "resolved_token": redact(tok),
+        })
+    return {"sources": sources, "keychain": keychain,
+            "codex_sources": [s["label"] for s in codex_sources()],
             "ts": time.time()}
 
 
@@ -467,50 +865,55 @@ def _clean_title(text):
 
 
 def _claude_sessions(limit=15):
-    files = sorted(CLAUDE_PROJECTS.glob("*/*.jsonl"),
-                   key=lambda p: p.stat().st_mtime, reverse=True)
     out = []
-    for path in files:
-        if len(out) >= limit:
-            break
-        if path.name.startswith("agent-"):   # subagent 旁链
-            continue
-        title, cwd, branch = "", "", ""
-        try:
-            with open(path, encoding="utf-8", errors="replace") as f:
-                for _ in range(80):
-                    line = f.readline()
-                    if not line:
-                        break
-                    try:
-                        evt = json.loads(line)
-                    except ValueError:
-                        continue
-                    if evt.get("isSidechain"):
-                        title = None
-                        break
-                    cwd = evt.get("cwd") or cwd
-                    branch = evt.get("gitBranch") or branch
-                    if evt.get("type") == "user":
-                        text = _msg_text((evt.get("message") or {}).get("content"))
-                        if text and not text.lstrip().startswith(_SKIP_PREFIXES):
-                            title = _clean_title(text)
+    for src in claude_sources():
+        files = sorted((src["path"] / "projects").glob("*/*.jsonl"),
+                       key=lambda p: p.stat().st_mtime, reverse=True)
+        taken = 0
+        for path in files:
+            if taken >= limit:
+                break
+            if path.name.startswith("agent-"):   # subagent 旁链
+                continue
+            title, cwd, branch = "", "", ""
+            try:
+                with open(path, encoding="utf-8", errors="replace") as f:
+                    for _ in range(80):
+                        line = f.readline()
+                        if not line:
                             break
-        except OSError:
-            continue
-        if not title:
-            continue
-        st = path.stat()
-        out.append({
-            "tool": "claude",
-            "id": path.stem,
-            "title": title,
-            "cwd": cwd,
-            "project": Path(cwd).name if cwd else path.parent.name,
-            "branch": branch,
-            "mtime": st.st_mtime,
-            "size": st.st_size,
-        })
+                        try:
+                            evt = json.loads(line)
+                        except ValueError:
+                            continue
+                        if evt.get("isSidechain"):
+                            title = None
+                            break
+                        cwd = evt.get("cwd") or cwd
+                        branch = evt.get("gitBranch") or branch
+                        if evt.get("type") == "user":
+                            text = _msg_text((evt.get("message") or {}).get("content"))
+                            if text and not text.lstrip().startswith(_SKIP_PREFIXES):
+                                title = _clean_title(text)
+                                break
+            except OSError:
+                continue
+            if not title:
+                continue
+            st = path.stat()
+            taken += 1
+            out.append({
+                "tool": "claude",
+                "id": path.stem,
+                "title": title,
+                "cwd": cwd,
+                "project": Path(cwd).name if cwd else path.parent.name,
+                "branch": branch,
+                "mtime": st.st_mtime,
+                "size": st.st_size,
+                "account": src["label"],
+                "account_id": src["id"],
+            })
     return out
 
 
@@ -547,24 +950,29 @@ def _codex_session_info(path):
 
 def _codex_sessions(limit=15):
     out = []
-    for path in _iter_codex_files(40):
-        if len(out) >= limit:
-            break
-        info = _codex_session_info(path)
-        if not info:
-            continue
-        sid, cwd, title = info
-        st = path.stat()
-        out.append({
-            "tool": "codex",
-            "id": sid,
-            "title": title,
-            "cwd": cwd,
-            "project": Path(cwd).name if cwd else "",
-            "branch": "",
-            "mtime": st.st_mtime,
-            "size": st.st_size,
-        })
+    for src in codex_sources():
+        taken = 0
+        for path in _iter_codex_files(40, base=src["path"]):
+            if taken >= limit:
+                break
+            info = _codex_session_info(path)
+            if not info:
+                continue
+            sid, cwd, title = info
+            st = path.stat()
+            taken += 1
+            out.append({
+                "tool": "codex",
+                "id": sid,
+                "title": title,
+                "cwd": cwd,
+                "project": Path(cwd).name if cwd else "",
+                "branch": "",
+                "mtime": st.st_mtime,
+                "size": st.st_size,
+                "account": src["label"],
+                "account_id": src["id"],
+            })
     return out
 
 
@@ -676,11 +1084,17 @@ def _pid_cwd(pid):
     return ""
 
 
+def _iter_claude_pidfiles():
+    """所有 Claude 源的 per-PID 索引文件（多账号合并）。"""
+    for src in claude_sources():
+        yield from (src["path"] / "sessions").glob("*.json")
+
+
 def api_active():
     def build():
         active, claude_pids = [], {}
         # Claude: 官方 per-PID 索引文件，含 sessionId/cwd/status
-        for f in CLAUDE_PIDFILES.glob("*.json"):
+        for f in _iter_claude_pidfiles():
             try:
                 info = json.loads(f.read_text())
             except (OSError, ValueError):
@@ -866,10 +1280,13 @@ def api_preview(query):
     sid = query.get("id", [""])[0]
     if tool not in ("claude", "codex") or not _ID_RE.match(sid):
         return {"ok": False, "error": "invalid args"}
+    files = []
     if tool == "claude":
-        files = list(CLAUDE_PROJECTS.glob(f"*/{sid}.jsonl"))
+        for src in claude_sources():
+            files += list((src["path"] / "projects").glob(f"*/{sid}.jsonl"))
     else:
-        files = list(CODEX_SESSIONS.glob(f"*/*/*/rollout-*{sid}.jsonl"))
+        for src in codex_sources():
+            files += list((src["path"] / "sessions").glob(f"*/*/*/rollout-*{sid}.jsonl"))
     if not files:
         return {"ok": False, "error": "transcript not found"}
     path = max(files, key=lambda p: p.stat().st_mtime)
@@ -955,9 +1372,10 @@ def api_event(body):
         sid = body.get("session_id") or ""
         cwd = body.get("cwd") or ""
         project = Path(cwd).name if cwd else ""
-        # 外部输入→文件读取的唯一路径：限定在 ~/.claude 内，防任意文件读取
+        # 外部输入→文件读取的唯一路径：限定在已发现的 Claude 配置目录内，防任意文件读取
         tp = os.path.realpath(os.path.expanduser(body.get("transcript_path") or ""))
-        if tp.startswith(str(HOME / ".claude") + os.sep) and os.path.exists(tp):
+        _roots = [os.path.realpath(src["path"]) + os.sep for src in claude_sources()]
+        if any(tp.startswith(r) for r in _roots) and os.path.exists(tp):
             t, text = _last_user_msg(tp)
             title = _clean_title(text)[:60]
             if t:
@@ -1016,7 +1434,7 @@ _TERM_APPS = {   # 兜底清单：仅用于个别非 .app 启动 / 进程名无�
 
 
 def _find_claude_pid(sid):
-    for f in CLAUDE_PIDFILES.glob("*.json"):
+    for f in _iter_claude_pidfiles():
         try:
             info = json.loads(f.read_text())
         except (OSError, ValueError):
@@ -1568,7 +1986,9 @@ def api_usage():
         hourly = {}   # epoch_hour -> {"c": tokens, "x": tokens}
         projects = {}  # cwd -> {"tokens": n, "cost": $}（近 7 天）
 
-        for path in CLAUDE_PROJECTS.glob("*/*.jsonl"):
+        _claude_usage_files = (p for src in claude_sources()
+                               for p in (src["path"] / "projects").glob("*/*.jsonl"))
+        for path in _claude_usage_files:
             try:
                 if path.stat().st_mtime < cutoff:
                     continue
@@ -1820,6 +2240,13 @@ class Handler(BaseHTTPRequestHandler):
                                  "version": VERSION})
             elif path == "/api/quota":
                 self._send(200, api_quota())
+            elif path == "/api/diag":
+                # 含凭据指纹 + 本机路径，比其他 GET 敏感：加 Host 校验封 DNS rebinding
+                if self.headers.get("Host", "") not in (
+                        f"127.0.0.1:{PORT}", f"localhost:{PORT}"):
+                    self._send(403, {"error": "forbidden"})
+                else:
+                    self._send(200, api_diag())
             elif path == "/api/sessions":
                 self._send(200, api_sessions())
             elif path == "/api/usage":

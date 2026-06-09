@@ -40,7 +40,9 @@ AgentDeck 将 Claude Code 与 Codex 的额度监控、会话管理与用量统�
 
 **额度监控**
 - 实时聚合 Claude 官方额度（5 小时 / 7 天窗口）与 Codex rate limits
-- 菜单栏常显用量百分比（可配置显示单端 / 双端 / 隐藏）
+- 多账号并行：自动发现多个 Claude 配置目录（`CLAUDE_CONFIG_DIR` / `~/.claude-*` / shell 启动文件），逐账号查询额度，面板轮播切换、菜单栏可按间隔轮显各账号
+- 菜单栏常显用量百分比（可配置显示单端 / 双端 / 隐藏；数字与变色各自可选 5h / 周 / 最吃紧窗口）
+- 额度查询间隔可调（默认 10 分钟，可至 6 小时），按需降低官方接口调用频率以缓解多账号限流
 - 窗口重置进度条；额度临界与回满的系统通知（阈值可配置）
 
 **会话管理**
@@ -56,8 +58,11 @@ AgentDeck 将 Claude Code 与 Codex 的额度监控、会话管理与用量统�
 - 支持导出 CSV
 
 **界面与系统**
+- 主题配色：用取色器自定义 Claude / Codex 主色，额度环、进度条、用量曲线、Logo 渐变全部同步换色，一键恢复内置橙 / 青
+- 展示 Agent 开关：只用 Claude 或仅用 Codex 的用户可隐藏另一端，隐藏后不再为其拉取额度（省钥匙串读取与官方接口调用）
 - 字体大小 80–160% 整体缩放（面板与小组件同步）；暗化强度、精简模式等外观配置
 - 活跃会话期间保持系统唤醒，防止长任务因休眠断流（默认开，可关）
+- 兼容企业代理环境：App 访问本机 daemon 的流量绕过系统级 PAC 代理，避免回环被改道导致面板空白
 - 版本更新发现：自动检查（仅查询版本号，可关闭）与设置内手动检查；有新版时面板顶部横幅提示
 - 桌面小组件：常驻桌面层的玻璃信息卡，支持拖动、缩放与位置记忆
 
@@ -70,7 +75,7 @@ git clone https://github.com/Spacebody/AgentDeck.git && cd AgentDeck
 
 编译、安装至 `/Applications` 并启动，首次启动注册登录项实现自启。
 
-**环境要求**：macOS 13+；已安装 [Claude Code](https://claude.com/claude-code) 或 [Codex](https://openai.com/codex)（任一）；Xcode Command Line Tools（提供 `swiftc`，可经 `xcode-select --install` 安装）。
+**环境要求**：macOS 13+（产出 Apple Silicon + Intel 通用二进制）；已安装 [Claude Code](https://claude.com/claude-code) 或 [Codex](https://openai.com/codex)（任一）；Xcode Command Line Tools（提供 `swiftc`，可经 `xcode-select --install` 安装）。
 
 其余构建目标：
 
@@ -126,9 +131,9 @@ scripts/             图标与 DMG 背景生成、Codex notify 包装、CSRF 回
 
 | 数据 | 来源 | 说明 |
 |------|------|------|
-| Claude 额度 | 钥匙串中 Claude Code 的 OAuth 凭据 → `api.anthropic.com/api/oauth/usage` | 以用户本人凭据查询本人额度 |
+| Claude 额度 | 钥匙串中 Claude Code 的 OAuth 凭据 → `api.anthropic.com/api/oauth/usage` | 以用户本人凭据查询本人额度；多账号时按配置目录各自精确取对应凭据 |
 | 版本检查 | `agentdeck.yilin.dev/version.json`（静态清单，6 小时缓存） | 仅比对版本号，不携带凭据或本机信息；可在设置中关闭 |
-| Claude 用量 / 会话 | 解析本地 `~/.claude/projects/**/*.jsonl` | token 统计、成本估算、会话列表 |
+| Claude 用量 / 会话 | 解析已发现的各 Claude 配置目录下 `projects/**/*.jsonl` | token 统计、成本估算、会话列表 |
 | Codex 额度 / 用量 / 会话 | 解析本地 `~/.codex/sessions` rollout 文件 | 同上 |
 | 完成事件 | Claude Stop hook / Codex notify 回调（见可选配置） | 完成提醒与事件流 |
 
@@ -138,7 +143,8 @@ scripts/             图标与 DMG 背景生成、Codex notify 包装、CSRF 回
 
 - daemon 仅绑定回环地址 `127.0.0.1`，不对局域网暴露
 - 全部 POST 接口设有 CSRF 屏障：Content-Type 精确匹配、Origin 结构化校验、Host 白名单（防 DNS rebinding）；附回归测试 `scripts/test-csrf.sh`
-- 「按请求参数读取文件」的路径统一收口至 `~/.claude` 目录内（realpath 校验）
+- 「按请求参数读取文件」的路径统一收口至已发现的 Claude 配置目录内（realpath 校验）
+- 账号诊断接口 `/api/diag` 含凭据指纹与本机路径，单独加 Host 校验封 DNS rebinding；输出全程脱敏（token 仅留末 4 位）
 - 健康检查带身份校验，避免端口被其他进程占用时误判
 
 ## 统计口径

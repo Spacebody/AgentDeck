@@ -222,6 +222,7 @@ body.wgt #aurora { opacity: .14; }
 
 /* ----- 额度区 ----- */
 #quota { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; animation-delay: .05s; }
+#quota.solo { grid-template-columns: 1fr; }   /* 只显示一个 agent 时占满整行 */
 .qcard { padding: 13px 13px 11px; position: relative; overflow: hidden; }
 .qcard::before {
   content: ""; position: absolute; inset: 0; pointer-events: none; opacity: .5;
@@ -229,6 +230,18 @@ body.wgt #aurora { opacity: .14; }
 }
 .qcard.claude { --tint: rgba(232,116,79,.22); --ac: var(--claude); --ac-deep: var(--claude-deep); }
 .qcard.codex  { --tint: rgba(79,209,197,.18); --ac: var(--codex);  --ac-deep: var(--codex-deep); }
+/* 多账号 carousel：卡片外壳不变，内容横向滑动切换（scroll-snap 原生触控/触摸板） */
+.qcard.is-carousel { padding-bottom: 8px; }
+.qtrack { display: flex; overflow-x: auto; scroll-snap-type: x mandatory;
+  scrollbar-width: none; overscroll-behavior-x: contain; }
+.qtrack::-webkit-scrollbar { display: none; }
+.qpage { flex: 0 0 100%; min-width: 0; scroll-snap-align: start; }
+.qacctTag { font-size: 9.5px; font-weight: 600; padding: 1px 6px; border-radius: 6px;
+  background: rgba(255,255,255,.09); color: var(--ink-2); margin-left: 2px; letter-spacing: .2px; }
+.qdots { display: flex; justify-content: center; align-items: center; gap: 5px; margin-top: 8px; }
+.qdot { width: 6px; height: 6px; padding: 0; border: none; border-radius: 50%; cursor: pointer;
+  background: rgba(255,255,255,.22); transition: width .25s, background .25s; }
+.qdot.on { width: 15px; border-radius: 3px; background: var(--ac); }
 .qhead { display: flex; align-items: center; gap: 6px; margin-bottom: 9px; }
 /* 品牌徽章基类：半透明品牌色底 + 单色字形 */
 .qbadge, .sbadge, .abadge {
@@ -242,6 +255,30 @@ body.wgt #aurora { opacity: .14; }
 .qbadge.codex, .sbadge.codex, .abadge.codex {
   color: var(--codex); background: rgba(79,209,197,.12);
   border-color: rgba(79,209,197,.26);
+}
+/* 调色盘自定义主色时，徽章底色/描边、卡片辉光、品牌 chip 用 color-mix 跟随；
+   旧 WebKit 无 color-mix 则保持上面的 rgba 定值，不破样式（@supports 门控对自定义属性也可靠） */
+@supports (color: color-mix(in srgb, red, blue)) {
+  .qcard.claude { --tint: color-mix(in srgb, var(--claude) 22%, transparent); }
+  .qcard.codex  { --tint: color-mix(in srgb, var(--codex) 18%, transparent); }
+  .qbadge.claude, .sbadge.claude, .abadge.claude {
+    background: color-mix(in srgb, var(--claude) 16%, transparent);
+    border-color: color-mix(in srgb, var(--claude) 30%, transparent);
+  }
+  .qbadge.codex, .sbadge.codex, .abadge.codex {
+    background: color-mix(in srgb, var(--codex) 14%, transparent);
+    border-color: color-mix(in srgb, var(--codex) 28%, transparent);
+  }
+  .chip[data-multi="menubar_claude"].on {
+    background: color-mix(in srgb, var(--claude) 22%, transparent);
+    border-color: color-mix(in srgb, var(--claude) 55%, transparent);
+    color: color-mix(in srgb, var(--claude) 60%, white);
+  }
+  .chip[data-multi="menubar_codex"].on {
+    background: color-mix(in srgb, var(--codex) 18%, transparent);
+    border-color: color-mix(in srgb, var(--codex) 50%, transparent);
+    color: color-mix(in srgb, var(--codex) 60%, white);
+  }
 }
 .qbadge svg, .sbadge svg, .abadge svg { display: block; }
 .bglyph { display: block; background: currentColor;
@@ -380,9 +417,9 @@ body.wgt #today, body.wgt #done { display: none !important; }
 .prow .pcost { flex: none; font-size: 9px; color: var(--ink-3); }
 .prow .pbar { height: 4px; border-radius: 2px; background: rgba(255,255,255,.08); }
 .prow .pbar i { display: block; height: 100%; border-radius: 2px;
-  background: linear-gradient(90deg, #ffb38a, #e8744f); width: 0;
+  background: linear-gradient(90deg, var(--claude), var(--claude-deep)); width: 0;
   transition: width .5s cubic-bezier(.2,.7,.2,1); }
-.prow.codex .pbar i { background: linear-gradient(90deg, #8be9e2, #3aa79c); }
+.prow.codex .pbar i { background: linear-gradient(90deg, var(--codex), var(--codex-deep)); }
 #curvesvg { width: 100%; height: 144px; flex: 1; min-height: 144px; max-height: 300px; display: block; }
 .cv-line { fill: none; stroke-width: 1.8; stroke-linejoin: round; stroke-linecap: round; }
 .cv-grid { stroke: rgba(255,255,255,.12); stroke-width: 1; }
@@ -416,7 +453,7 @@ body.wgt #today, body.wgt #done { display: none !important; }
 .cseg.sonnet { background: linear-gradient(180deg, #9db8ff, #5f7de8); }
 .cseg.haiku  { background: linear-gradient(180deg, #aef0c8, #5fc78f); }
 .cseg.other  { background: rgba(255,255,255,.25); }
-.cseg.codex  { background: linear-gradient(180deg, #8be9e2, #3aa79c); }
+.cseg.codex  { background: linear-gradient(180deg, var(--codex), var(--codex-deep)); }
 #tip {
   position: fixed; z-index: 50; pointer-events: none; opacity: 0; transition: opacity .15s;
   background: rgba(20,20,28,.92); border: 1px solid var(--edge-hi); border-radius: 10px;
@@ -555,7 +592,7 @@ body.wgt #today, body.wgt #done { display: none !important; }
   border-bottom: 1px solid rgba(255,255,255,.06); min-height: 24px;
 }
 .setrow:last-child { border-bottom: none; }
-.setlabel { font-size: 13px; flex: 1; }
+.setlabel { font-size: 13px; flex: 1; min-width: 6.5em; }   /* 防 chips 过多把标签挤成逐字竖排 */
 .setlabel small { display: block; font-size: 10.5px; color: var(--ink-3); margin-top: 3px; }
 .tgl {
   width: 36px; height: 21px; border-radius: 99px; cursor: pointer; flex: none;
@@ -583,6 +620,14 @@ body.wgt #today, body.wgt #done { display: none !important; }
 .tgl.on::before { opacity: 1; }
 .tgl.on::after { transform: translateX(15px); }
 .setchips { display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; }
+.setcolors { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; justify-content: flex-end; }
+.colordot { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--ink-2); cursor: pointer; }
+.colordot input[type="color"] {
+  width: 22px; height: 22px; padding: 0; border: 1px solid var(--edge-hi);
+  border-radius: 7px; background: none; cursor: pointer; -webkit-appearance: none; appearance: none;
+}
+.colordot input[type="color"]::-webkit-color-swatch-wrapper { padding: 2px; }
+.colordot input[type="color"]::-webkit-color-swatch { border: none; border-radius: 5px; }
 .setchips .chip { font-size: 9.5px; padding: 4px 10px; }
 /* 多选 chip 点亮态走品牌色，与未选态拉开对比 */
 .chip[data-multi="menubar_claude"].on {
@@ -627,10 +672,10 @@ body.wgt #today, body.wgt #done { display: none !important; }
 <svg width="0" height="0" style="position:absolute">
   <defs>
     <linearGradient id="grad-claude" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="#ffb38a"/><stop offset="100%" stop-color="#e8744f"/>
+      <stop offset="0%" stop-color="var(--claude)"/><stop offset="100%" stop-color="var(--claude-deep)"/>
     </linearGradient>
     <linearGradient id="grad-codex" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="#8be9e2"/><stop offset="100%" stop-color="#3aa79c"/>
+      <stop offset="0%" stop-color="var(--codex)"/><stop offset="100%" stop-color="var(--codex-deep)"/>
     </linearGradient>
     <linearGradient id="grad-warn" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0%" stop-color="#ffd28a"/><stop offset="100%" stop-color="#e8a04f"/>
@@ -791,6 +836,7 @@ const I18N = {
     'quota.extra': '额外用量 <b>${used}</b> / ${limit}', 'quota.dataStale': '⚠ 数据已 {h} 小时未更新，额度可能不准',
     'quota.credits': 'Credits 余额 <b>{bal}</b>', 'quota.sampledAt': '采样于 {time}',
     'quota.used': '已用', 'quota.noOther': '暂无其他窗口数据',
+    'quota.noQuota': '网关 / 未登录账号，无官方额度（仅按会话用量统计）',
     'quota.burnSafe': '✓ 当前速率安全，可撑到重置', 'quota.burnWarn': '⚠ 按当前速率约 {dur}后用尽，建议放缓',
     'quota.winMins': '{n} 分钟窗口',
     'win.five_hour': '5 小时窗口', 'win.seven_day': '周限额', 'win.seven_day_sonnet': '周限额 · Sonnet',
@@ -826,16 +872,24 @@ const I18N = {
     'proj.none7d': '近 7 天暂无项目用量',
     'set.secNotify': '通知', 'set.secMenubar': '菜单栏', 'set.secPanel': '面板', 'set.secResume': '会话恢复',
     'set.secSystem': '系统', 'set.secData': '数据',
-    'set.notifyEnabled': '额度告警通知', 'set.notifyWarn': '提醒阈值', 'set.notifyCrit': '严重阈值', 'set.withSound': '带提示音',
+    'set.notifyEnabled': '额度告警通知', 'set.notifyWarn': '一级提醒阈值', 'set.notifyCrit': '二级严重阈值', 'set.withSound': '带提示音',
+    'set.notifyWarnHint': '用量达此发出提醒', 'set.notifyCritHint': '用量更高时发严重告警（带提示音）',
     'set.notifyReset': '重置回满提醒', 'set.sessionDone': '会话完成提醒', 'set.sessionDoneHint': '灵动岛弹出，点击跳会话',
     'set.shortFilter': '短任务过滤', 'set.shortFilterHint': '低于该时长不提醒', 'set.dwell': '提醒停留时长', 'set.sound': '提示音',
     'set.menubarUsage': '常显用量', 'set.menubarUsageHint': '可多选，全不选只留图标',
     'set.menubarAlert': '额度告警变色', 'set.menubarAlertHint': '对应段 ≥80% 变橙、≥95% 变红',
+    'set.mbValueDim': '百分比窗口', 'set.mbValueDimHint': '菜单栏数字取自该额度窗口',
+    'set.mbColorDim': '告警依据窗口', 'set.mbColorDimHint': '图标按该窗口用量变色',
+    'set.dimShortest': '5 小时', 'set.dimWeekly': '周限额', 'set.dimMax': '用量最高',
+    'set.menubarRotate': '多账号轮转', 'set.menubarRotateHint': '多个账号时菜单栏按间隔轮流显示各账号额度', 'set.rotateOff': '关闭',
     'set.showActive': '活跃会话卡片', 'set.minimal': '精简模式', 'set.minimalHint': '降低视觉噪声，更耐看',
+    'set.showAgents': '展示 Agent', 'set.showAgentsHint': '只用其中一个时，可隐藏不需要的板块与会话',
+    'set.colors': '主题配色', 'set.colorsHint': '自定义 Claude / Codex 主色（额度环、进度条、用量图同步）', 'set.resetColors': '恢复默认', 'set.colorsReset': '已恢复默认配色',
     'set.glassDim': '面板暗化强度', 'set.glassDimHint': '越低越透明',
     'set.fontScale': '字体大小', 'set.fontScaleHint': '面板与小组件整体缩放',
     'set.sessionsLimit': '会话列表数量', 'set.sessionsLimitHint': '每端各取 N 条',
-    'set.refreshInterval': '自动刷新间隔', 'set.sampleInterval': '额度采样间隔', 'set.minUnit': '{n} 分钟',
+    'set.refreshInterval': '自动刷新间隔', 'set.refreshIntervalHint': '面板自动刷新显示的间隔', 'set.sampleInterval': '曲线采样间隔', 'set.sampleIntervalHint': '额度历史曲线的记点间隔，与接口频率无关', 'set.minUnit': '{n} 分钟',
+    'set.quotaInterval': '额度查询间隔', 'set.quotaIntervalHint': '调大可避免触发官方接口限流',
     'set.keepAwake': '保持唤醒', 'set.keepAwakeHint': '有活跃会话时阻止系统休眠，避免会话断网中断',
     'set.updateCheck': '自动检查更新', 'set.updateCheckHint': '仅向项目主页查询版本号，不发送任何数据',
     'set.checkNow': '手动检查', 'set.checkNowHint': '立即查询一次最新版本', 'set.checkNowBtn': '立即检查',
@@ -861,6 +915,7 @@ const I18N = {
     'quota.extra': 'Extra usage <b>${used}</b> / ${limit}', 'quota.dataStale': '⚠ Data {h}h stale; quota may be off',
     'quota.credits': 'Credits <b>{bal}</b>', 'quota.sampledAt': 'sampled {time}',
     'quota.used': 'used', 'quota.noOther': 'No other windows',
+    'quota.noQuota': 'Gateway / signed-out account — no official quota (usage only)',
     'quota.burnSafe': '✓ Current rate is safe through reset', 'quota.burnWarn': '⚠ At this rate, ~{dur} until depleted — ease up',
     'quota.winMins': '{n}-min window',
     'win.five_hour': '5-hour', 'win.seven_day': 'Weekly', 'win.seven_day_sonnet': 'Weekly · Sonnet',
@@ -896,16 +951,24 @@ const I18N = {
     'proj.none7d': 'No project usage in the last 7 days',
     'set.secNotify': 'Notifications', 'set.secMenubar': 'Menu bar', 'set.secPanel': 'Panel', 'set.secResume': 'Session resume',
     'set.secSystem': 'System', 'set.secData': 'Data',
-    'set.notifyEnabled': 'Quota alerts', 'set.notifyWarn': 'Warn threshold', 'set.notifyCrit': 'Critical threshold', 'set.withSound': 'with sound',
+    'set.notifyEnabled': 'Quota alerts', 'set.notifyWarn': 'Warning threshold', 'set.notifyCrit': 'Critical threshold', 'set.withSound': 'with sound',
+    'set.notifyWarnHint': 'Notify when usage reaches this', 'set.notifyCritHint': 'Stronger alert with sound at a higher level',
     'set.notifyReset': 'Reset-to-full alert', 'set.sessionDone': 'Session-done alert', 'set.sessionDoneHint': 'Island popup; click to jump',
     'set.shortFilter': 'Short-task filter', 'set.shortFilterHint': "Don't alert below this duration", 'set.dwell': 'Alert dwell time', 'set.sound': 'Sound',
     'set.menubarUsage': 'Always-on usage', 'set.menubarUsageHint': 'Multi-select; none = icon only',
     'set.menubarAlert': 'Quota alert colors', 'set.menubarAlertHint': 'Segment turns orange at ≥80%, red at ≥95%',
+    'set.mbValueDim': 'Percent window', 'set.mbValueDimHint': 'Menubar number is taken from this window',
+    'set.mbColorDim': 'Alert window', 'set.mbColorDimHint': 'Icon color follows this window’s usage',
+    'set.dimShortest': '5-hour', 'set.dimWeekly': 'Weekly', 'set.dimMax': 'Highest',
+    'set.menubarRotate': 'Rotate accounts', 'set.menubarRotateHint': 'With multiple accounts, cycle each account\'s quota in the menubar', 'set.rotateOff': 'Off',
     'set.showActive': 'Active sessions card', 'set.minimal': 'Minimal mode', 'set.minimalHint': 'Less visual noise, easier on the eyes',
+    'set.showAgents': 'Show agents', 'set.showAgentsHint': 'Using only one? Hide the panel and sessions you do not use',
+    'set.colors': 'Theme colors', 'set.colorsHint': 'Customize Claude / Codex accent (rings, bars, usage chart follow)', 'set.resetColors': 'Reset', 'set.colorsReset': 'Colors reset to default',
     'set.glassDim': 'Panel dimming', 'set.glassDimHint': 'Lower = more transparent',
     'set.fontScale': 'Font size', 'set.fontScaleHint': 'Scales the panel and widget as a whole',
     'set.sessionsLimit': 'Sessions list size', 'set.sessionsLimitHint': 'N per tool',
-    'set.refreshInterval': 'Auto-refresh interval', 'set.sampleInterval': 'Quota sampling interval', 'set.minUnit': '{n} min',
+    'set.refreshInterval': 'Auto-refresh interval', 'set.refreshIntervalHint': 'How often the panel refreshes its display', 'set.sampleInterval': 'Chart sampling interval', 'set.sampleIntervalHint': 'How often the history chart records a point; unrelated to API frequency', 'set.minUnit': '{n} min',
+    'set.quotaInterval': 'Quota query interval', 'set.quotaIntervalHint': 'Raise to avoid hitting API rate limits',
     'set.keepAwake': 'Keep awake', 'set.keepAwakeHint': 'Prevent system sleep while sessions are active, so they survive sleep/network drops',
     'set.updateCheck': 'Check for updates', 'set.updateCheckHint': 'Only asks the project site for a version number; sends nothing',
     'set.checkNow': 'Manual check', 'set.checkNowHint': 'Query the latest version right now', 'set.checkNowBtn': 'Check now',
@@ -931,6 +994,7 @@ const I18N = {
     'quota.extra': '追加使用 <b>${used}</b> / ${limit}', 'quota.dataStale': '⚠ データが{h}時間未更新。残量がずれている可能性',
     'quota.credits': 'Credits 残高 <b>{bal}</b>', 'quota.sampledAt': '{time} に取得',
     'quota.used': '使用', 'quota.noOther': '他の枠データなし',
+    'quota.noQuota': 'ゲートウェイ / 未ログイン — 公式残量なし（使用量のみ）',
     'quota.burnSafe': '✓ 現在のペースならリセットまで安全', 'quota.burnWarn': '⚠ 現ペースで約{dur}で枯渇。ペースダウン推奨',
     'quota.winMins': '{n}分枠',
     'win.five_hour': '5時間枠', 'win.seven_day': '週間上限', 'win.seven_day_sonnet': '週間 · Sonnet',
@@ -967,15 +1031,23 @@ const I18N = {
     'set.secNotify': '通知', 'set.secMenubar': 'メニューバー', 'set.secPanel': 'パネル', 'set.secResume': 'セッション再開',
     'set.secSystem': 'システム', 'set.secData': 'データ',
     'set.notifyEnabled': '残量アラート', 'set.notifyWarn': '警告しきい値', 'set.notifyCrit': '重大しきい値', 'set.withSound': '通知音あり',
+    'set.notifyWarnHint': '使用量がこの値で通知', 'set.notifyCritHint': 'さらに高い値で重大警告（通知音あり）',
     'set.notifyReset': '回復時に通知', 'set.sessionDone': 'セッション完了通知', 'set.sessionDoneHint': 'アイランド表示、クリックで移動',
     'set.shortFilter': '短時間タスク除外', 'set.shortFilterHint': 'この時間未満は通知しない', 'set.dwell': '通知の表示時間', 'set.sound': '通知音',
     'set.menubarUsage': '使用率を常時表示', 'set.menubarUsageHint': '複数選択可、未選択ならアイコンのみ',
     'set.menubarAlert': 'クォータ警告色', 'set.menubarAlertHint': '該当セグメントが ≥80% で橙、≥95% で赤に',
+    'set.mbValueDim': '％の参照枠', 'set.mbValueDimHint': 'メニューバーの数値をこの枠から取得',
+    'set.mbColorDim': '警告の参照枠', 'set.mbColorDimHint': 'アイコン色はこの枠の使用量に従う',
+    'set.dimShortest': '5時間', 'set.dimWeekly': '週間', 'set.dimMax': '最大',
+    'set.menubarRotate': 'アカウント切替表示', 'set.menubarRotateHint': '複数アカウント時、メニューバーで各残量を順番に表示', 'set.rotateOff': 'オフ',
     'set.showActive': 'アクティブセッション', 'set.minimal': 'ミニマルモード', 'set.minimalHint': '視覚ノイズを抑えて見やすく',
+    'set.showAgents': 'Agent を表示', 'set.showAgentsHint': '片方だけ使う場合、不要なパネルとセッションを隠せます',
+    'set.colors': 'テーマカラー', 'set.colorsHint': 'Claude / Codex のアクセント色をカスタム（リング・バー・使用量グラフに反映）', 'set.resetColors': 'リセット', 'set.colorsReset': '既定の配色に戻しました',
     'set.glassDim': 'パネルの暗さ', 'set.glassDimHint': '低いほど透明',
     'set.fontScale': '文字サイズ', 'set.fontScaleHint': 'パネルとウィジェット全体を拡大縮小',
     'set.sessionsLimit': 'セッション一覧の件数', 'set.sessionsLimitHint': 'ツールごとに N 件',
-    'set.refreshInterval': '自動更新の間隔', 'set.sampleInterval': '残量サンプリング間隔', 'set.minUnit': '{n} 分',
+    'set.refreshInterval': '自動更新の間隔', 'set.refreshIntervalHint': 'パネルの表示を更新する間隔', 'set.sampleInterval': 'グラフ採取間隔', 'set.sampleIntervalHint': '履歴グラフの記録間隔。API頻度とは無関係', 'set.minUnit': '{n} 分',
+    'set.quotaInterval': '残量の取得間隔', 'set.quotaIntervalHint': '長くするとAPIのレート制限を回避',
     'set.keepAwake': 'スリープ防止', 'set.keepAwakeHint': 'アクティブなセッション中はスリープを防ぎ、切断による中断を回避',
     'set.updateCheck': '更新を自動確認', 'set.updateCheckHint': 'プロジェクトサイトにバージョン番号のみ照会、データ送信なし',
     'set.checkNow': '手動チェック', 'set.checkNowHint': '今すぐ最新バージョンを照会', 'set.checkNowBtn': '今すぐ確認',
@@ -1082,14 +1154,15 @@ function burnHint(w) {       // 按消耗速率预测耗尽时间
   return t('quota.burnWarn', {dur: fmtDur(burnMs / 1000)});
 }
 
-function renderQuotaCard(el, name, data, gradId) {
+function quotaCardInner(name, data, gradId, accountLabel) {
   const tool = name.toLowerCase();
   const icon = badge(tool, 12);
+  const acctTag = accountLabel ? `<span class="qacctTag">${esc(accountLabel)}</span>` : '';
   if (!data || !data.ok) {
-    el.innerHTML = `<div class="qhead"><span class="qbadge ${tool}">${icon}</span>
-      <span class="qname">${name}</span></div>
-      <div class="qerr">${t('quota.fetchFailed')}<br>${esc((data && data.error || '').slice(0,80))}</div>`;
-    return;
+    const msg = data && data.no_quota ? t('quota.noQuota') : t('quota.fetchFailed');
+    return `<div class="qhead"><span class="qbadge ${tool}">${icon}</span>
+      <span class="qname">${name}</span>${acctTag}</div>
+      <div class="qerr">${msg}<br>${esc((data && data.error || '').slice(0,80))}</div>`;
   }
   const ws = data.windows || [];
   const wgt = document.body.classList.contains('wgt');   // 小组件窄卡精简
@@ -1137,9 +1210,9 @@ function renderQuotaCard(el, name, data, gradId) {
       resetBar = `<span class="qreset"><i style="width:${(elapsed * 100).toFixed(1)}%"></i></span>`;
     }
   }
-  el.innerHTML = `
+  return `
     <div class="qhead"><span class="qbadge ${tool}">${icon}</span>
-      <span class="qname">${name}</span>
+      <span class="qname">${name}</span>${acctTag}
       <span class="qsub">${esc(winLabel(main))}${wgt ? '' : ' · ' + t('quota.used')}<br>${cd(main.resets_at)}${resetBar}</span></div>
     <div class="qbody">
       ${ringSvg(main.used_percent, mainGrad)}
@@ -1153,18 +1226,66 @@ function renderQuotaCard(el, name, data, gradId) {
       </div>
     </div>
     ${foot ? `<div class="qfoot"><span>${foot}</span></div>` : ''}`;
+}
 
+function animateQuota(el) {
   requestAnimationFrame(() => requestAnimationFrame(() => {
     el.querySelectorAll('.arc').forEach(a => a.style.strokeDashoffset = a.dataset.off);
     el.querySelectorAll('.wbar i').forEach(b => b.style.width = b.dataset.w + '%');
   }));
 }
 
+function renderQuotaCard(el, name, data, gradId) {
+  el.classList.remove('is-carousel');
+  el.innerHTML = quotaCardInner(name, data, gradId);
+  animateQuota(el);
+}
+
+// 多账号：单账号→原单卡；多账号→carousel（左右滑动 + 圆点翻页，记住当前页）
+const _quotaPage = {claude: 0, codex: 0};
+function renderQuotaTool(el, name, accounts, gradId) {
+  const tool = name.toLowerCase();
+  if (!accounts || accounts.length <= 1) {
+    renderQuotaCard(el, name, (accounts && accounts[0]) || null, gradId);
+    return;
+  }
+  if (_quotaPage[tool] >= accounts.length) _quotaPage[tool] = 0;
+  el.classList.add('is-carousel');
+  const pages = accounts.map(a =>
+    `<div class="qpage">${quotaCardInner(name, a, gradId, a.account)}</div>`).join('');
+  const dots = accounts.map((a, i) =>
+    `<button type="button" class="qdot${i === _quotaPage[tool] ? ' on' : ''}" data-i="${i}" title="${esc(a.account || '')}"></button>`).join('');
+  el.innerHTML = `<div class="qtrack">${pages}</div><div class="qdots">${dots}</div>`;
+  const track = el.querySelector('.qtrack');
+  const setDot = i => el.querySelectorAll('.qdot').forEach((x, j) => x.classList.toggle('on', j === i));
+  // 恢复当前页：同步 + 双 rAF 多次校正，期间用 restoring 守卫屏蔽 scroll-snap
+  // 触发的伪 scroll 事件（否则初始页会被 snap 拽到末页，污染 _quotaPage）
+  let restoring = true;
+  const restore = () => { track.scrollLeft = track.clientWidth * (_quotaPage[tool] || 0); };
+  restore();
+  requestAnimationFrame(() => { restore(); requestAnimationFrame(() => { restore(); restoring = false; }); });
+  el.querySelectorAll('.qdot').forEach(d => d.onclick = () => {
+    const i = +d.dataset.i; _quotaPage[tool] = i; setDot(i);
+    track.scrollTo({ left: track.clientWidth * i, behavior: 'smooth' });
+  });
+  let raf;
+  track.onscroll = () => {
+    if (restoring) return;
+    cancelAnimationFrame(raf);
+    raf = requestAnimationFrame(() => {
+      const i = Math.max(0, Math.min(accounts.length - 1, Math.round(track.scrollLeft / track.clientWidth)));
+      if (i !== _quotaPage[tool]) { _quotaPage[tool] = i; setDot(i); }
+    });
+  };
+  animateQuota(el);
+}
+
 async function loadQuota() {
   try {
     const d = await (await fetch('/api/quota')).json();
-    renderQuotaCard($('#qc-claude'), 'Claude', d.claude, 'grad-claude');
-    renderQuotaCard($('#qc-codex'), 'Codex', d.codex, 'grad-codex');
+    const acc = d.accounts || {};
+    renderQuotaTool($('#qc-claude'), 'Claude', acc.claude || (d.claude ? [d.claude] : []), 'grad-claude');
+    renderQuotaTool($('#qc-codex'), 'Codex', acc.codex || (d.codex ? [d.codex] : []), 'grad-codex');
     $('#live').classList.remove('err');
   } catch (e) { $('#live').classList.add('err'); }
 }
@@ -1215,7 +1336,7 @@ async function loadUsage() {
     const GRAD = {
       opus:   ['#ffb38a', '#e8744f'], sonnet: ['#9db8ff', '#5f7de8'],
       haiku:  ['#aef0c8', '#5fc78f'], other:  ['#9a9aa5', '#6a6a75'],
-      codex:  ['#8be9e2', '#3aa79c'],
+      codex:  ['var(--codex)', 'var(--codex-deep)'],   // Codex agent 段跟随主题色
     };
     let body = '<defs>' + Object.entries(GRAD).map(([k, [a, b]]) => `
       <linearGradient id="ug-${k}" x1="0" y1="0" x2="0" y2="1">
@@ -1272,8 +1393,12 @@ async function loadUsage() {
 }
 
 /* ---------- 会话列表 ---------- */
+// agent 面板可见性：只用其一的用户可在设置里隐藏另一个（默认都显示）
+const agentOn = tool => !settings || settings['show_' + tool] !== false;
+
 function renderSessions() {
   const list = sessions.filter(s =>
+    agentOn(s.tool) &&
     (filter === 'all' || s.tool === filter) &&
     (!query || (s.title + s.project + s.branch).toLowerCase().includes(query)));
   const now = Date.now() / 1000;
@@ -1405,7 +1530,7 @@ window.addEventListener('resize', () => {
 async function loadActive() {
   try {
     const d = await (await fetch('/api/active')).json();
-    const list = d.active || [];
+    const list = (d.active || []).filter(a => agentOn(a.tool));
     const el = $('#active');
     el.classList.toggle('has', list.length > 0);
     if (!list.length) { el.innerHTML = ''; return; }
@@ -1488,12 +1613,12 @@ async function loadCurve() {
 
     let body = `<defs>
       <linearGradient id="cvf-c" x1="0" y1="0" x2="0" y2="1">
-        <stop offset="0%" stop-color="#ff9d7a" stop-opacity=".28"/>
-        <stop offset="100%" stop-color="#ff9d7a" stop-opacity="0"/>
+        <stop offset="0%" stop-color="var(--claude)" stop-opacity=".28"/>
+        <stop offset="100%" stop-color="var(--claude)" stop-opacity="0"/>
       </linearGradient>
       <linearGradient id="cvf-x" x1="0" y1="0" x2="0" y2="1">
-        <stop offset="0%" stop-color="#8be9e2" stop-opacity=".25"/>
-        <stop offset="100%" stop-color="#8be9e2" stop-opacity="0"/>
+        <stop offset="0%" stop-color="var(--codex)" stop-opacity=".25"/>
+        <stop offset="100%" stop-color="var(--codex)" stop-opacity="0"/>
       </linearGradient>
     </defs>`;
 
@@ -1512,8 +1637,8 @@ async function loadCurve() {
     }
 
     const series = [
-      {key: 'c', color: '#ff9d7a', name: 'Claude', fill: 'url(#cvf-c)'},
-      {key: 'x', color: '#8be9e2', name: 'Codex', fill: 'url(#cvf-x)'},
+      {key: 'c', color: 'var(--claude)', name: 'Claude', fill: 'url(#cvf-c)'},
+      {key: 'x', color: 'var(--codex)', name: 'Codex', fill: 'url(#cvf-x)'},
     ];
     const legend = [];
     for (const s of series) {
@@ -1567,7 +1692,7 @@ $('#usageinfo').onclick = () => showInfoPop('usage');
 
 /* ---------- 今日摘要条（token / 等值$ / 24h 环比 + 模型分布环） ---------- */
 const FAM_COLORS = {opus: '#e8744f', sonnet: '#5f7de8', haiku: '#5fc78f',
-                    other: '#9a9aa5', codex: '#3aa79c'};
+                    other: '#9a9aa5', codex: 'var(--codex-deep)'};
 function miniDonut(parts, sz = 22) {   // parts: [{v, color}]
   const total = parts.reduce((a, p) => a + p.v, 0);
   if (!total) return '';
@@ -1625,7 +1750,7 @@ async function loadToday() {
 async function loadDone() {
   try {
     const d = await (await fetch('/api/events?recent=4')).json();
-    const list = (d.events || []).filter(e => e.ts > Date.now() / 1000 - 86400);
+    const list = (d.events || []).filter(e => e.ts > Date.now() / 1000 - 86400 && agentOn(e.tool));
     const el = $('#done');
     el.classList.toggle('has', list.length > 0);
     if (!list.length) { el.innerHTML = ''; return; }
@@ -1681,20 +1806,35 @@ const SET_SCHEMA = [
    opts: [100, 110, 120, 135], fmt: v => v + '%', custom: [80, 160]},
   {key: 'glass_dim', label: 'set.glassDim', hint: 'set.glassDimHint', type: 'chips',
    opts: [40, 55, 68, 80], fmt: v => v + '%', custom: [20, 90]},
+  {type: 'colors', label: 'set.colors', hint: 'set.colorsHint',
+   opts: [{k: 'color_claude', name: 'Claude', def: '#ff9d7a'},
+          {k: 'color_codex', name: 'Codex', def: '#4fd1c5'}]},
   {key: 'minimal_mode', label: 'set.minimal', hint: 'set.minimalHint', type: 'toggle'},
   {key: 'show_active', label: 'set.showActive', type: 'toggle'},
+  {label: 'set.showAgents', hint: 'set.showAgentsHint', type: 'multi',
+   opts: [{k: 'show_claude', name: 'Claude'}, {k: 'show_codex', name: 'Codex'}]},
   {key: 'sessions_limit', label: 'set.sessionsLimit', hint: 'set.sessionsLimitHint', type: 'chips', opts: [10, 15, 20, 30], custom: [5, 100]},
-  {key: 'refresh_interval', label: 'set.refreshInterval', type: 'chips', opts: [15, 30, 60], fmt: v => v + 's', custom: [5, 600]},
-  {key: 'sample_interval', label: 'set.sampleInterval', type: 'chips',
+  {key: 'refresh_interval', label: 'set.refreshInterval', hint: 'set.refreshIntervalHint', type: 'chips', opts: [15, 30, 60], fmt: v => v + 's', custom: [5, 600]},
+  {key: 'sample_interval', label: 'set.sampleInterval', hint: 'set.sampleIntervalHint', type: 'chips',
    opts: [60, 180, 300, 600], fmt: v => t('set.minUnit', {n: v / 60}), custom: [60, 3600]},
+  {key: 'quota_interval', label: 'set.quotaInterval', hint: 'set.quotaIntervalHint', type: 'chips',
+   opts: [300, 600, 1800, 3600], fmt: v => t('set.minUnit', {n: v / 60}), custom: [300, 21600]},
   {sec: 'set.secMenubar'},
   {label: 'set.menubarUsage', hint: 'set.menubarUsageHint', type: 'multi',
    opts: [{k: 'menubar_claude', name: 'Claude'}, {k: 'menubar_codex', name: 'Codex'}]},
+  {key: 'menubar_value_dim', label: 'set.mbValueDim', hint: 'set.mbValueDimHint', type: 'select',
+   opts: ['shortest', 'weekly', 'max'],
+   optKeys: {shortest: 'set.dimShortest', weekly: 'set.dimWeekly', max: 'set.dimMax'}},
   {key: 'menubar_alert_color', label: 'set.menubarAlert', hint: 'set.menubarAlertHint', type: 'toggle'},
+  {key: 'menubar_color_dim', label: 'set.mbColorDim', hint: 'set.mbColorDimHint', type: 'select',
+   opts: ['shortest', 'weekly', 'max'],
+   optKeys: {shortest: 'set.dimShortest', weekly: 'set.dimWeekly', max: 'set.dimMax'}},
+  {key: 'menubar_rotate_secs', label: 'set.menubarRotate', hint: 'set.menubarRotateHint', type: 'chips',
+   opts: [0, 4, 6, 10], fmt: v => v === 0 ? t('set.rotateOff') : v + 's', custom: [0, 60]},
   {sec: 'set.secNotify'},
   {key: 'notify_enabled', label: 'set.notifyEnabled', type: 'toggle'},
-  {key: 'notify_warn', label: 'set.notifyWarn', type: 'chips', opts: [70, 80, 90], fmt: v => v + '%', custom: [50, 99]},
-  {key: 'notify_crit', label: 'set.notifyCrit', hint: 'set.withSound', type: 'chips', opts: [90, 95, 98], fmt: v => v + '%', custom: [60, 100]},
+  {key: 'notify_warn', label: 'set.notifyWarn', hint: 'set.notifyWarnHint', type: 'chips', opts: [70, 80, 90], fmt: v => v + '%', custom: [50, 99]},
+  {key: 'notify_crit', label: 'set.notifyCrit', hint: 'set.notifyCritHint', type: 'chips', opts: [90, 95, 98], fmt: v => v + '%', custom: [60, 100]},
   {key: 'notify_reset', label: 'set.notifyReset', type: 'toggle'},
   {key: 'notify_session_done', label: 'set.sessionDone', hint: 'set.sessionDoneHint', type: 'toggle'},
   {key: 'notify_done_min_secs', label: 'set.shortFilter', hint: 'set.shortFilterHint', type: 'chips',
@@ -1738,6 +1878,11 @@ function renderSettings() {
       : it.type === 'btns'   // 动作按钮组（数据管理等一次性操作）
       ? `<div class="setchips">${it.btns.map(b => `
           <button type="button" class="chip" data-act="${b.act}">${t(b.name)}</button>`).join('')}</div>`
+      : it.type === 'colors'   // 调色盘：每色一个取色器 + 恢复默认
+      ? `<div class="setcolors">${it.opts.map(o => `
+          <label class="colordot" title="${o.name}"><input type="color" data-color="${o.k}"
+            value="${settings[o.k] || o.def}"><span>${o.name}</span></label>`).join('')}
+          <button type="button" class="chip" data-act="reset_colors">${t('set.resetColors')}</button></div>`
       : it.type === 'select'
       ? `<select class="setselect" data-k="${it.key}">${it.opts.map(o => `
           <option value="${o}" ${String(o) === String(v) ? 'selected' : ''}>${optName(it, o)}</option>`).join('')}</select>`
@@ -1795,6 +1940,34 @@ function applyLanguage(loc) {       // 运行时切换语言：设语言并重�
   refreshAll(false);
 }
 
+// 自定义主色：覆盖 --claude/--codex 及自动加深的 -deep 变体；空串=移除覆盖回内置
+function darkenHex(hex, f = 0.82) {
+  const m = /^#([0-9a-fA-F]{6})$/.exec(hex || '');
+  if (!m) return hex;
+  const n = parseInt(m[1], 16);
+  const c = i => Math.round(((n >> i) & 255) * f).toString(16).padStart(2, '0');
+  return '#' + c(16) + c(8) + c(0);
+}
+function applyColors(rerender) {
+  const root = document.documentElement.style;
+  for (const [name, val] of [['claude', settings.color_claude], ['codex', settings.color_codex]]) {
+    if (val) {
+      root.setProperty('--' + name, val);
+      root.setProperty('--' + name + '-deep', darkenHex(val));
+    } else {
+      root.removeProperty('--' + name);
+      root.removeProperty('--' + name + '-deep');
+    }
+  }
+  // SVG 里 var() 作为 presentation 属性不随变量响应式重绘（CSS 规则里的 var 才会），
+  // 故颜色变更时主动重渲额度环 / 用量图；启动时 SVG 本就以默认色新渲，无需重渲。
+  if (rerender) {   // SVG 渐变/描边的 var() 非响应式，颜色变更须重渲相关图表
+    if (typeof loadQuota === 'function') loadQuota();
+    if (typeof loadUsage === 'function') loadUsage();
+    if (typeof loadToday === 'function') loadToday();
+  }
+}
+
 let pollTimer = null;
 function applySettings(key) {
   /* 不传 key = 全量应用（启动/重载）；传 key = 只应用该项的副作用。
@@ -1803,8 +1976,16 @@ function applySettings(key) {
   const all = !key;
   if (all || key === 'show_active')
     $('#active').style.display = settings.show_active ? '' : 'none';
+  if (all || key === 'show_claude' || key === 'show_codex') {
+    const sc = agentOn('claude'), sx = agentOn('codex');
+    $('#qc-claude').style.display = sc ? '' : 'none';
+    $('#qc-codex').style.display = sx ? '' : 'none';
+    $('#quota').classList.toggle('solo', sc !== sx);   // 只剩一个 → 单列占满
+    if (!all) { renderSessions(); loadActive(); loadDone(); }   // 立即反映到列表
+  }
   if (all || key === 'glass_dim')
     document.documentElement.style.setProperty('--dim', (settings.glass_dim || 68) / 100);
+  if (all || key === 'color_claude' || key === 'color_codex') applyColors(!all);
   if (all || key === 'font_scale') {
     const z = (settings.font_scale || 100) / 100;
     document.body.style.zoom = z;   // 字体大小（整体缩放）
@@ -1814,7 +1995,8 @@ function applySettings(key) {
   if (all || key === 'minimal_mode')
     document.body.classList.toggle('minimal', !!settings.minimal_mode);
   // 仅壳层关心的设置才喊 Swift（菜单栏 / 小组件外观 / 语言 / 灵动岛）
-  if (bridge && (all || ['menubar_claude', 'menubar_codex', 'menubar_alert_color', 'language',
+  if (bridge && (all || ['menubar_claude', 'menubar_codex', 'menubar_alert_color', 'menubar_rotate_secs',
+                         'menubar_value_dim', 'menubar_color_dim', 'language',
                          'font_scale', 'glass_dim', 'minimal_mode', 'island_dwell_secs'].includes(key)))
     bridge.postMessage('sync');
   if (all || key === 'refresh_interval') {
@@ -1875,6 +2057,15 @@ $('#setbody').addEventListener('click', e => {
   const multi = e.target.closest('.chip[data-multi]');
   if (multi) return saveSetting(multi.dataset.multi, !multi.classList.contains('on'));
   const act = e.target.closest('.chip[data-act]');
+  if (act && act.dataset.act === 'reset_colors') {   // 恢复默认配色（单请求清两色，避免竞态）
+    settings.color_claude = ''; settings.color_codex = '';   // 乐观即时恢复
+    applyColors(true);
+    fetch('/api/settings', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({color_claude: '', color_codex: ''})})
+      .then(r => r.json()).then(r => { settings = r.settings; renderSettings(); applyColors(); toast(t('set.colorsReset')); })
+      .catch(() => toast(t('common.opFailed')));
+    return;
+  }
   if (act && act.dataset.act === 'check_update') {  // 主动检查更新（绕过 6h 缓存）
     act.disabled = true;
     fetch('/api/update?force=1').then(r => r.json()).then(r => {
@@ -1907,6 +2098,14 @@ $('#setbody').addEventListener('click', e => {
 $('#setbody').addEventListener('change', e => {
   const sel = e.target.closest('select.setselect');
   if (sel) saveSetting(sel.dataset.k, sel.value);
+  const col = e.target.closest('input[type="color"][data-color]');
+  if (col) {
+    settings[col.dataset.color] = col.value;   // 乐观即时上色
+    applyColors(true);
+    // 直接 POST 持久化（不走 saveSetting，避免其延迟整体替换 settings 造成竞态回退）
+    fetch('/api/settings', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({[col.dataset.color]: col.value})}).catch(() => {});
+  }
 });
 $('#opensettings').onclick = () => $('#settings').classList.add('show');
 document.querySelectorAll('#tabbar .tab').forEach(t => t.onclick = () => {

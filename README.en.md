@@ -40,7 +40,9 @@ AgentDeck integrates quota monitoring, session management, and usage analytics f
 
 **Quota monitoring**
 - Live aggregation of Claude's official quota (5-hour / 7-day windows) and Codex rate limits
-- Always-on usage percentage in the menu bar (configurable: one side, both, or hidden)
+- Multi-account in parallel: auto-discovers multiple Claude config directories (`CLAUDE_CONFIG_DIR` / `~/.claude-*` / shell startup files), queries quota per account, with a panel carousel and an optional menu-bar rotation across accounts
+- Always-on usage percentage in the menu bar (configurable: one side, both, or hidden; the number and the alert color each pick from the 5h / weekly / tightest window)
+- Adjustable quota-query interval (default 10 minutes, up to 6 hours) to throttle official-endpoint calls and ease multi-account rate limiting
 - Window-reset progress bars; system notifications for nearing or refilled quota (configurable thresholds)
 
 **Session management**
@@ -56,8 +58,11 @@ AgentDeck integrates quota monitoring, session management, and usage analytics f
 - CSV export
 
 **Interface & system**
+- Theme palette: pick custom Claude / Codex accent colors; quota rings, progress bars, usage curves, and the logo gradient all recolor in sync, with one-click reset to the built-in orange / teal
+- Show-Agent toggles: users of only Claude or only Codex can hide the other side, after which no quota is fetched for it (skips Keychain reads and official-endpoint calls)
 - Font scaling from 80–160% (panel and widget in sync); panel dimming, minimal mode, and other appearance options
 - Keeps the system awake while sessions are active so long tasks survive sleep (on by default, can be disabled)
+- Works behind corporate proxies: the app's traffic to its local daemon bypasses system-level PAC proxies, avoiding a blank panel when loopback gets rerouted
 - Update discovery: automatic checks (version number only, can be disabled) plus a manual check in Settings; a dismissible banner appears when a new version ships
 - Desktop widget: a glass info card on the desktop layer with drag, resize, and position memory
 
@@ -70,7 +75,7 @@ git clone https://github.com/Spacebody/AgentDeck.git && cd AgentDeck
 
 Compiles, installs to `/Applications`, and launches; the first launch registers a login item.
 
-**Requirements**: macOS 13+; [Claude Code](https://claude.com/claude-code) or [Codex](https://openai.com/codex) installed (either); Xcode Command Line Tools (provides `swiftc`; install via `xcode-select --install`).
+**Requirements**: macOS 13+ (produces an Apple Silicon + Intel universal binary); [Claude Code](https://claude.com/claude-code) or [Codex](https://openai.com/codex) installed (either); Xcode Command Line Tools (provides `swiftc`; install via `xcode-select --install`).
 
 Other build targets:
 
@@ -126,9 +131,9 @@ All data is **processed locally** — no telemetry, no reporting:
 
 | Data | Source | Notes |
 |------|--------|-------|
-| Claude quota | Claude Code OAuth credential in Keychain → `api.anthropic.com/api/oauth/usage` | Your own credentials querying your own quota |
+| Claude quota | Claude Code OAuth credential in Keychain → `api.anthropic.com/api/oauth/usage` | Your own credentials querying your own quota; with multiple accounts, the matching credential is resolved per config directory |
 | Update check | `agentdeck.yilin.dev/version.json` (static manifest, 6-hour cache) | Version comparison only; carries no credentials or machine info; can be disabled in Settings |
-| Claude usage / sessions | parses local `~/.claude/projects/**/*.jsonl` | token stats, cost estimates, session list |
+| Claude usage / sessions | parses `projects/**/*.jsonl` under each discovered Claude config directory | token stats, cost estimates, session list |
 | Codex quota / usage / sessions | parses local `~/.codex/sessions` rollout files | same as above |
 | Done events | Claude Stop hook / Codex notify callback (see optional config) | done alerts and the event stream |
 
@@ -138,7 +143,8 @@ Runtime artifacts: data directory `~/Library/Application Support/AgentDeck/`, lo
 
 - The daemon binds only the loopback address `127.0.0.1` and is never exposed to the LAN
 - All POST endpoints sit behind a CSRF barrier: exact Content-Type matching, structured Origin validation, and a Host allowlist (blocks DNS rebinding); regression test at `scripts/test-csrf.sh`
-- Any "read a file from a request parameter" path is confined to `~/.claude` (realpath-checked)
+- Any "read a file from a request parameter" path is confined to the discovered Claude config directories (realpath-checked)
+- The account-diagnostics endpoint `/api/diag` exposes credential fingerprints and local paths, so it carries an extra Host check to block DNS rebinding; its output is fully redacted (tokens kept to their last 4 characters)
 - The health check is identity-verified so a port occupied by another process is not mistaken for the app
 
 ## Cost methodology

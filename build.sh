@@ -12,12 +12,25 @@ APP="$DIST/AgentDeck.app"
 VERSION="$(tr -d '[:space:]' < "$ROOT/VERSION")"
 BUNDLE_ID="com.agentdeck.app"
 
+MIN_MACOS="13.0"   # 部署目标：不显式指定时 swiftc 会按构建机系统版本打 minos，
+                   # 在更低系统上直接拒绝启动（实测 macOS 26 上构建会要求 26）。
+
 build() {
-  echo "▸ 编译 AgentDeck.app ($VERSION)…"
+  echo "▸ 编译 AgentDeck.app ($VERSION) — 通用二进制 (arm64+x86_64)，最低 macOS ${MIN_MACOS}…"
   rm -rf "$APP"
   mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-  swiftc -O -framework Cocoa -framework WebKit -framework ServiceManagement \
-    -o "$APP/Contents/MacOS/AgentDeck" "$ROOT/app/main.swift"
+  local FRAMEWORKS=(-framework Cocoa -framework WebKit -framework ServiceManagement)
+  local A="$DIST/.AgentDeck-arm64" X="$DIST/.AgentDeck-x86_64"
+  swiftc -O "${FRAMEWORKS[@]}" -target arm64-apple-macos${MIN_MACOS} \
+    -o "$A" "$ROOT/app/main.swift"
+  if swiftc -O "${FRAMEWORKS[@]}" -target x86_64-apple-macos${MIN_MACOS} \
+       -o "$X" "$ROOT/app/main.swift" 2>/dev/null; then
+    lipo -create "$A" "$X" -o "$APP/Contents/MacOS/AgentDeck"
+    rm -f "$A" "$X"
+  else
+    echo "  ⚠️ x86_64 交叉编译失败，回退为 arm64-only（仍适配 ${MIN_MACOS}+ 的 Apple Silicon）"
+    mv "$A" "$APP/Contents/MacOS/AgentDeck"
+  fi
 
   # 自包含：后端 + UI + 图标全部入包
   cp "$ROOT/agentdeckd.py" "$APP/Contents/Resources/"

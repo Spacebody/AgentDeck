@@ -4,7 +4,116 @@ import ServiceManagement
 import WebKit
 
 let kPort = 7777
-let kBase = "http://127.0.0.1:\(kPort)"
+let kBase = "http://127.0.0.1:\(kPort)"          // Swift 原生请求 / 浏览器打开用
+let kWebBase = "agentdeck://app"                 // WebView 经自定义 scheme 走，绕系统代理
+
+// App→自身 daemon 的连接必须绕过系统代理：某些企业安全软件装的是系统级 PAC，会把
+// 127.0.0.1 也改道到 SOCKS（代理到不了回环）→ WebView/URLSession 连不上本机后端。
+// 显式禁用所有代理后直连回环。
+let kDirectSession: URLSession = {
+    let cfg = URLSessionConfiguration.ephemeral
+    cfg.connectionProxyDictionary = [
+        kCFNetworkProxiesHTTPEnable as String: false,
+        kCFNetworkProxiesHTTPSEnable as String: false,
+        kCFNetworkProxiesSOCKSEnable as String: false,
+        kCFNetworkProxiesProxyAutoConfigEnable as String: false,
+    ]
+    cfg.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+    cfg.timeoutIntervalForRequest = 20
+    return URLSession(configuration: cfg)
+}()
+
+/// WKWebView 自定义 scheme handler：页面与 /api 全走 agentdeck://，由本 handler 经
+/// 禁代理 session 转发到 http://127.0.0.1:kPort。WebView 自身不再直发 HTTP 到回环，
+/// 从根上绕开系统 PAC 把回环改道到 SOCKS 的问题。
+final class LocalSchemeHandler: NSObject, WKURLSchemeHandler {
+    static let shared = LocalSchemeHandler()
+    private var active = Set<ObjectIdentifier>()
+    private let lock = NSLock()
+
+    private func isActive(_ t: WKURLSchemeTask) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return active.contains(ObjectIdentifier(t))
+    }
+    private func drop(_ t: WKURLSchemeTask) {
+        lock.lock(); active.remove(ObjectIdentifier(t)); lock.unlock()
+    }
+
+    func webView(_ webView: WKWebView, start task: WKURLSchemeTask) {
+        lock.lock(); active.insert(ObjectIdentifier(task)); lock.unlock()
+        let req = task.request
+        guard let u = req.url,
+              let comps = URLComponents(url: u, resolvingAgainstBaseURL: false),
+              comps.host == "app" else {   // 只服务自身 origin，拒绝 agentdeck://其他host
+            fail(task, URLError(.badURL)); return
+        }
+        var dst = URLComponents()
+        dst.scheme = "http"; dst.host = "127.0.0.1"; dst.port = kPort
+        let p = comps.percentEncodedPath
+        dst.percentEncodedPath = p.isEmpty ? "/" : p
+        dst.percentEncodedQuery = comps.percentEncodedQuery
+        guard let durl = dst.url else { fail(task, URLError(.badURL)); return }
+
+        var out = URLRequest(url: durl)
+        out.httpMethod = req.httpMethod ?? "GET"
+        var headers = req.allHTTPHeaderFields ?? [:]
+        // WKURLSchemeTask 的 POST httpBody 常为空 → 前端 fetch 已把 body 经 X-AD-Body(base64) 头透传
+        if let b64 = headers.removeValue(forKey: "X-AD-Body"),
+           let d = Data(base64Encoded: b64) {
+            out.httpBody = d
+        } else if let b = req.httpBody {
+            out.httpBody = b
+        }
+        // Origin=agentdeck://app 会被 daemon CSRF 拒；Host 让 URLSession 自设为 127.0.0.1
+        headers.removeValue(forKey: "Origin")
+        headers.removeValue(forKey: "Host")
+        for (k, v) in headers { out.setValue(v, forHTTPHeaderField: k) }
+
+        kDirectSession.dataTask(with: out) { [weak self] data, resp, err in
+            guard let self else { return }
+            DispatchQueue.main.async {
+                guard self.isActive(task) else { return }   // 已 stop（页面切走）→ 禁止回调，防崩
+                if let err = err { self.fail(task, err); return }
+                let http = resp as? HTTPURLResponse
+                let r = HTTPURLResponse(url: u, statusCode: http?.statusCode ?? 200,
+                                        httpVersion: "HTTP/1.1",
+                                        headerFields: http?.allHeaderFields as? [String: String])
+                    ?? URLResponse(url: u, mimeType: http?.mimeType,
+                                   expectedContentLength: data?.count ?? -1, textEncodingName: nil)
+                task.didReceive(r)
+                if let data { task.didReceive(data) }
+                task.didFinish()
+                self.drop(task)
+            }
+        }.resume()
+    }
+
+    func webView(_ webView: WKWebView, stop task: WKURLSchemeTask) { drop(task) }
+
+    private func fail(_ task: WKURLSchemeTask, _ error: Error) {
+        guard isActive(task) else { return }
+        task.didFailWithError(error); drop(task)
+    }
+}
+
+/// 注入到 WebView 的 fetch 包装：把字符串 body 经 X-AD-Body(base64) 头透传，
+/// 规避 WKURLSchemeTask 拿不到 POST httpBody 的限制。
+let kBodyWrapJS = """
+(function(){
+  if (window.__adWrap) return; window.__adWrap = 1;
+  const _f = window.fetch.bind(window);
+  window.fetch = function(input, init){
+    try {
+      if (init && typeof init.body === 'string') {
+        const h = Object.assign({}, init.headers);
+        h['X-AD-Body'] = btoa(unescape(encodeURIComponent(init.body)));
+        init = Object.assign({}, init, {headers: h});
+      }
+    } catch (e) {}
+    return _f(input, init);
+  };
+})();
+"""
 // 默认高取概览页全显 + 设置页大半的折中值，展示时钳制到屏幕可视高度
 let kPanelW: CGFloat = 420, kPanelH: CGFloat = 780
 
@@ -95,20 +204,18 @@ final class EdgeCursorView: NSView {
         let m: CGFloat = 7
         let l = p.x < m, r = p.x > bounds.width - m
         let b = p.y < m, t = allowTop && p.y > bounds.height - m
-        var pos: NSCursor.FrameResizePosition?
-        if l && b { pos = .bottomLeft } else if r && b { pos = .bottomRight }
-        else if l && t { pos = .topLeft } else if r && t { pos = .topRight }
-        else if l { pos = .left } else if r { pos = .right }
-        else if b { pos = .bottom } else if t { pos = .top }
-        guard let pos else { return }   // 非边带不干预，光标交还 WKWebView
+        guard l || r || b || t else { return }   // 非边带不干预，光标交还 WKWebView
+        // NSCursor.FrameResizePosition 是 macOS 15+ 类型，整段引用须收进可用性守卫内，
+        // 否则部署目标 13.0 编译报错（14.4.1 等旧系统支持的前提）
         if #available(macOS 15.0, *) {
+            var pos: NSCursor.FrameResizePosition
+            if l && b { pos = .bottomLeft } else if r && b { pos = .bottomRight }
+            else if l && t { pos = .topLeft } else if r && t { pos = .topRight }
+            else if l { pos = .left } else if r { pos = .right }
+            else if b { pos = .bottom } else { pos = .top }
             NSCursor.frameResize(position: pos, directions: .all).set()
         } else {
-            switch pos {
-            case .left, .right: NSCursor.resizeLeftRight.set()
-            case .top, .bottom: NSCursor.resizeUpDown.set()
-            default: NSCursor.crosshair.set()
-            }
+            if l || r { NSCursor.resizeLeftRight.set() } else { NSCursor.resizeUpDown.set() }
         }
     }
 }
@@ -193,6 +300,11 @@ final class WebViewController: NSViewController {
     override func loadView() {
         let conf = WKWebViewConfiguration()
         conf.userContentController.add(ControlBridge.shared, name: "control")
+        // 自定义 scheme + fetch body 包装：所有页面/接口请求绕系统代理直连 daemon
+        conf.setURLSchemeHandler(LocalSchemeHandler.shared, forURLScheme: "agentdeck")
+        conf.userContentController.addUserScript(
+            WKUserScript(source: kBodyWrapJS, injectionTime: .atDocumentStart,
+                         forMainFrameOnly: false))
         webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 420, height: 640),
                             configuration: conf)
         webView.setValue(false, forKey: "drawsBackground") // 透明背景与玻璃 UI 融合
@@ -202,7 +314,7 @@ final class WebViewController: NSViewController {
 
     func load() {
         _ = view   // 确保 loadView 已执行（无 NSPopover 提前触发后必须显式拉起）
-        webView.load(URLRequest(url: URL(string: "\(kBase)\(path)")!))
+        webView.load(URLRequest(url: URL(string: "\(kWebBase)\(path)")!))
     }
 
     func refresh() {
@@ -436,6 +548,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var eventsPrimed = false
     var loaded = false
     var appearanceObs: NSKeyValueObservation?   // 菜单栏明暗变化 → 重绘混色图标
+    // 多账号菜单栏轮转
+    typealias MBItem = (tool: String, text: String, alert: NSColor?)
+    var rotateTimer: Timer?
+    var mbFull: [MBItem] = []      // 全部 (tool×账号) 项，轮转用
+    var mbPrimary: [MBItem] = []   // 每 tool 仅主账号一段，不轮转时显示（=今天行为）
+    var rotateSecs = 0
+    var rotateIdx = 0
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -492,7 +611,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try? JSONSerialization.data(withJSONObject: [
             "tool": event.tool, "session": event.session, "cwd": event.cwd])
-        URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
+        kDirectSession.dataTask(with: req) { [weak self] data, _, _ in
             let ok = (data.flatMap {
                 try? JSONSerialization.jsonObject(with: $0) as? [String: Any]
             })?["ok"] as? Bool ?? false
@@ -504,7 +623,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func pollEvents() {
         guard let url = URL(string: "\(kBase)/api/events?since=\(lastEventId)") else { return }
-        URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
+        kDirectSession.dataTask(with: url) { [weak self] data, _, _ in
             guard let self, let data,
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let events = json["events"] as? [[String: Any]] else { return }
@@ -592,7 +711,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// 常规段按菜单栏明暗自行取黑/白，告警段烘入告警色
     /// （macOS 26 起对模板图设 contentTintColor 会整体渲染成黑色，故颜色一律画进图里）。
     /// items 为空 → 仅显示 AgentDeck 仪表图标
-    func composedIcon(items: [(tool: String, pct: Double, alert: NSColor?)]) -> NSImage? {
+    func composedIcon(items: [MBItem]) -> NSImage? {
         let barH: CGFloat = 22, gap: CGFloat = 3, groupGap: CGFloat = 8
         let anyAlert = items.contains { $0.alert != nil }
         let isDark = statusItem.button?.effectiveAppearance
@@ -605,7 +724,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             guard let g = agentGlyph(it.tool) else { continue }
             let ink = it.alert ?? normalInk
             parts.append((tinted(g, ink), NSAttributedString(
-                string: String(format: "%.0f%%", it.pct),
+                string: it.text,
                 attributes: [
                     .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .semibold),
                     .foregroundColor: ink,
@@ -927,7 +1046,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func healthCheck(_ cb: @escaping (Bool, String?) -> Void) {
         var req = URLRequest(url: URL(string: "\(kBase)/api/health")!)
         req.timeoutInterval = 2
-        URLSession.shared.dataTask(with: req) { data, _, _ in
+        kDirectSession.dataTask(with: req) { data, _, _ in
             // 校验响应身份：端口被其他进程占用时不能误当作后端
             let obj = data.flatMap {
                 try? JSONSerialization.jsonObject(with: $0) as? [String: Any]
@@ -959,42 +1078,100 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     // MARK: - 额度状态映射到 icon 颜色
     func updateIconState() {
         guard let url = URL(string: "\(kBase)/api/quota") else { return }
-        URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
+        kDirectSession.dataTask(with: url) { [weak self] data, _, _ in
             guard let data,
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
             else { return }
             let mb = json["menubar"] as? [String: Any]
             let alertEnabled = mb?["alert_color"] as? Bool ?? true   // 设置开关：菜单栏告警变色
-            // 按 agent 各自的全窗口最大值决定该段告警色（37% 与 92% 不应一起变橙）
-            var items: [(tool: String, pct: Double, alert: NSColor?)] = []
-            for tool in ["claude", "codex"] {
-                guard let node = json[tool] as? [String: Any],
-                      let windows = node["windows"] as? [[String: Any]] else { continue }
-                var toolMax = 0.0, primary: Double?
-                for (i, w) in windows.enumerated() {
-                    if let p = w["used_percent"] as? Double {
-                        toolMax = max(toolMax, p)
-                        if i == 0 { primary = p }
-                    }
+            let rotateSecs = mb?["rotate_secs"] as? Int ?? 0
+            let accounts = json["accounts"] as? [String: Any]
+            // 单段（pct）/ 标注账号段（label pct）按需着色
+            let valueDim = mb?["value_dim"] as? String ?? "shortest"
+            let colorDim = mb?["color_dim"] as? String ?? "shortest"
+            func alertFor(_ pct: Double) -> NSColor? {
+                !alertEnabled ? nil : pct >= 95 ? .systemRed
+                              : pct >= 80 ? .systemOrange : nil
+            }
+            // 抽象维度 → 各 agent 自己的窗口（对 Claude/Codex 都成立）
+            //   shortest=首窗口(5h)  weekly=seven_day(缺则次窗口/末窗口)  max=所有窗口最大值
+            func dimPct(_ windows: [[String: Any]], _ dim: String) -> Double? {
+                let pcts = windows.map { $0["used_percent"] as? Double }
+                switch dim {
+                case "max":
+                    return pcts.compactMap { $0 }.max()
+                case "weekly":
+                    if let w = windows.first(where: { ($0["id"] as? String) == "seven_day" }),
+                       let p = w["used_percent"] as? Double { return p }
+                    return (windows.count > 1 ? windows.last : windows.first)?["used_percent"] as? Double
+                default:   // shortest
+                    return windows.first?["used_percent"] as? Double
                 }
-                if let p = primary, mb?[tool] as? Bool ?? false {
-                    let alert: NSColor? = !alertEnabled ? nil
-                                        : toolMax >= 95 ? .systemRed
-                                        : toolMax >= 80 ? .systemOrange : nil
-                    items.append((tool, p, alert))
+            }
+            var full: [MBItem] = []      // 全部 tool×账号，轮转用
+            var primaryList: [MBItem] = []   // 每 tool 主账号一段
+            for tool in ["claude", "codex"] {
+                guard mb?[tool] as? Bool ?? false else { continue }
+                // accounts 列表（新后端）；缺失则回退到顶层单账号对象
+                let list = (accounts?[tool] as? [[String: Any]])
+                    ?? (json[tool] as? [String: Any]).map { [$0] } ?? []
+                let multi = list.filter { ($0["windows"] as? [[String: Any]])?.isEmpty == false }.count > 1
+                for (i, node) in list.enumerated() {
+                    guard let windows = node["windows"] as? [[String: Any]],
+                          let p = dimPct(windows, valueDim) else { continue }
+                    let alert = alertFor(dimPct(windows, colorDim) ?? p)   // 颜色由所选维度独立驱动
+                    let pctStr = String(format: "%.0f%%", p)
+                    let raw = node["account"] as? String ?? ""
+                    let label = raw.count > 10 ? String(raw.prefix(10)) + "…" : raw  // 防长名撑宽菜单栏
+                    // 轮转项：同 tool 多账号时带账号名区分；否则仅百分比
+                    let text = (multi && !label.isEmpty) ? "\(label) \(pctStr)" : pctStr
+                    full.append((tool, text, alert))
+                    if i == 0 { primaryList.append((tool, pctStr, alert)) }  // 主账号
                 }
             }
             DispatchQueue.main.async {
-                guard let button = self?.statusItem.button else { return }
-                self?.statusItem.isVisible = true   // 兜底：被系统/误操作隐藏后自动恢复
-                // 告警色烘进图标本体；不再用 contentTintColor——
-                // macOS 26 对模板图设置 tint 会渲染成黑色（实测）
-                button.contentTintColor = nil
-                if let img = self?.composedIcon(items: items) {
-                    button.image = img
-                }
+                guard let self else { return }
+                self.statusItem.isVisible = true   // 兜底：被系统/误操作隐藏后自动恢复
+                self.statusItem.button?.contentTintColor = nil
+                self.mbFull = full
+                self.mbPrimary = primaryList
+                self.rotateSecs = rotateSecs
+                self.configureMenubar()
             }
         }.resume()
+    }
+
+    /// 决定菜单栏是「轮转」还是「主账号常显」，并立即重绘。
+    /// rotate_secs>0 且有多于一项（tool×账号）→ 起轮转定时器逐项显示；否则停轮转、显示主账号段。
+    func configureMenubar() {
+        let shouldRotate = rotateSecs > 0 && mbFull.count > 1
+        if shouldRotate {
+            if rotateTimer == nil || rotateTimer?.timeInterval != Double(rotateSecs) {
+                rotateTimer?.invalidate()
+                rotateTimer = Timer.scheduledTimer(withTimeInterval: Double(rotateSecs),
+                                                   repeats: true) { [weak self] _ in
+                    self?.advanceRotation()
+                }
+            }
+            if rotateIdx >= mbFull.count { rotateIdx = 0 }
+            drawMenubar([mbFull[rotateIdx]])   // 立即显示当前项，不等首次 tick
+        } else {
+            rotateTimer?.invalidate()
+            rotateTimer = nil
+            drawMenubar(mbPrimary)
+        }
+    }
+
+    func advanceRotation() {
+        guard !mbFull.isEmpty else { return }
+        rotateIdx = (rotateIdx + 1) % mbFull.count
+        drawMenubar([mbFull[rotateIdx]])
+    }
+
+    func drawMenubar(_ items: [MBItem]) {
+        guard let button = statusItem.button else { return }
+        button.contentTintColor = nil
+        if let img = composedIcon(items: items) { button.image = img }
     }
 }
 
