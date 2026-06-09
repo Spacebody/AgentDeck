@@ -1162,17 +1162,39 @@ def api_active():
                 continue
             claude_pids[int(pid)] = info
 
-        ps = subprocess.run(["ps", "-axo", "pid=,etime=,args="],
+        ps = subprocess.run(["ps", "-axo", "pid=,ppid=,etime=,args="],
                             capture_output=True, text=True, timeout=10)
+        ppid_of, rows, tool_pids = {}, [], set()
         for line in ps.stdout.splitlines():
-            parts = line.strip().split(None, 2)
-            if len(parts) < 3:
+            parts = line.strip().split(None, 3)
+            if len(parts) < 4:
                 continue
-            pid, etime, args = parts
+            pid, ppid, etime, args = parts
+            try:
+                pid_i, ppid_i = int(pid), int(ppid)
+            except ValueError:
+                continue
+            ppid_of[pid_i] = ppid_i
             m = re.match(r"^(?:\S+/)?(claude|codex)(?:\s+(.*))?$", args)
             if not m or "app-server" in (m.group(2) or ""):
                 continue
-            tool, pid_i = m.group(1), int(pid)
+            rows.append((pid_i, m.group(1), etime))
+            tool_pids.add(pid_i)
+
+        def _spawned_by_agent(pid):
+            # 沿父进程链上溯：祖先里有另一个 claude/codex ⇒ 这是 agent 自己拉起的子进程
+            # （后台标题生成 `claude -p`、子代理等一闪而过的 headless 助手），非用户会话。
+            seen, p = set(), ppid_of.get(pid)
+            while p and p > 1 and p not in seen:
+                seen.add(p)
+                if p in tool_pids:
+                    return True
+                p = ppid_of.get(p)
+            return False
+
+        for pid_i, tool, etime in rows:
+            if _spawned_by_agent(pid_i):
+                continue
             entry = {"tool": tool, "pid": pid_i, "runtime": _fmt_etime(etime),
                      "runtime_secs": _etime_secs(etime),
                      "status": "", "id": "", "cwd": "", "project": ""}
