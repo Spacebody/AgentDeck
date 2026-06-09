@@ -306,6 +306,38 @@ def _shell_rc_dirs(var):
     return found
 
 
+def _proc_env_dirs(var, tools):
+    """从在跑的目标进程环境里反查 <var>=...。IDE/扩展（如 Xcode 自带 claude、
+    各类编辑器插件）常把 CLAUDE_CONFIG_DIR / CODEX_HOME 只注入所拉起子进程的环境，
+    既不写 shell 配置、也不在守护进程自身环境里——只能从进程环境直接取。"""
+    if not tools:
+        return []
+    head = re.compile(r'^(?:\S+/)?(?:' + '|'.join(map(re.escape, tools)) + r')(?:\s|$)')
+    try:
+        ps = subprocess.run(["ps", "-axo", "pid=,command="],
+                            capture_output=True, text=True, timeout=10)
+    except Exception:
+        return []
+    pids = []
+    for line in ps.stdout.splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) == 2 and head.match(parts[1]) and "app-server" not in parts[1]:
+            pids.append(parts[0])
+    if not pids:
+        return []
+    pat, found = re.compile(re.escape(var) + r'=(\S+)'), []
+    try:
+        env = subprocess.run(["ps", "eww", "-o", "command=", "-p", ",".join(pids[:40])],
+                             capture_output=True, text=True, timeout=8).stdout
+    except Exception:
+        return []
+    for line in env.splitlines():
+        m = pat.search(line)
+        if m:
+            found.append(m.group(1))
+    return found
+
+
 def _label_for_dir(p, default_label):
     name = p.name
     if name in (".claude", ".codex"):
@@ -317,7 +349,7 @@ def _label_for_dir(p, default_label):
 
 
 def _discover(env_var, default_dir, glob_pat, settings_key,
-              is_dir_fn, default_label):
+              is_dir_fn, default_label, proc_tools=()):
     seen, order = {}, []
 
     def add(raw):
@@ -347,6 +379,8 @@ def _discover(env_var, default_dir, glob_pat, settings_key,
         add(p)
     for raw in _shell_rc_dirs(env_var):           # 反查 shell 配置
         add(raw)
+    for raw in _proc_env_dirs(env_var, proc_tools):    # 在跑进程环境（IDE 注入，如 Xcode 自带 claude）
+        add(raw)
     for raw in get_settings().get(settings_key, []):   # 手动添加
         add(raw)
     # id 去重：同名 slug 追加序号，保证前端/Swift key 唯一
@@ -366,13 +400,13 @@ def claude_sources():
     """发现所有 Claude 配置目录，默认目录排首位。结果短缓存（30s）。"""
     return cached("sources_claude", 30, lambda: _discover(
         "CLAUDE_CONFIG_DIR", HOME / ".claude", ".claude-*",
-        "claude_dirs", _is_claude_dir, "默认"))
+        "claude_dirs", _is_claude_dir, "默认", proc_tools=("claude",)))
 
 
 def codex_sources():
     return cached("sources_codex", 30, lambda: _discover(
         "CODEX_HOME", HOME / ".codex", ".codex-*",
-        "codex_dirs", _is_codex_dir, "默认"))
+        "codex_dirs", _is_codex_dir, "默认", proc_tools=("codex",)))
 
 
 # ----------------------------------------------------------------- 多语言 i18n
@@ -1090,6 +1124,30 @@ def _iter_claude_pidfiles():
         yield from (src["path"] / "sessions").glob("*.json")
 
 
+def _norm_claude_status(s):
+    """Claude pidfile 的 status 词表不止 busy/idle（实测还有 shell「正在跑命令」，
+    可能有 tool 等其它工作子态）。除明确 idle 外，一切非空工作态一律归 busy——
+    否则 shell 等会被当成「空闲」误显且 chip 失样。空值保持空，交给 transcript/CPU 兜底。"""
+    if not s:
+        return ""
+    return "idle" if s == "idle" else "busy"
+
+
+def _claude_tx_mtime(session_id):
+    """该 claude 会话 transcript（projects/*/<sid>.jsonl）最近写入时间；缺失返回 0。
+    用于 pidfile 不带 status 的 claude（如 Xcode 自带旧版）按写入活跃度判忙闲。"""
+    if not session_id:
+        return 0.0
+    best = 0.0
+    for src in claude_sources():
+        for f in (src["path"] / "projects").glob(f"*/{session_id}.jsonl"):
+            try:
+                best = max(best, f.stat().st_mtime)
+            except OSError:
+                pass
+    return best
+
+
 def api_active():
     def build():
         active, claude_pids = [], {}
@@ -1123,7 +1181,7 @@ def api_active():
                 if info:
                     entry.update(id=info.get("sessionId", ""),
                                  cwd=info.get("cwd", ""),
-                                 status=info.get("status", ""))
+                                 status=_norm_claude_status(info.get("status", "")))
             if not entry["cwd"]:
                 try:
                     entry["cwd"] = _pid_cwd(pid_i)
@@ -1152,8 +1210,17 @@ def api_active():
                 if cands:
                     e["status"] = "busy" if now - max(cands) < 30 else "idle"
 
-        # 仍无状态来源的会话（如 Xcode 内置 Coding Assistant 拉起的 headless claude，
-        # 不写 transcript 也无 pidfile）：按进程瞬时 CPU 占用推断忙闲
+        # Claude 会话的 pidfile 未必带 status（Xcode 自带的旧版 claude 即如此）：
+        # 按 transcript 最近写入活跃度判忙闲，与 Codex 同口径，远比 CPU 占用可靠。
+        tnow = time.time()
+        for e in active:
+            if e["tool"] == "claude" and not e["status"] and e["id"]:
+                mt = _claude_tx_mtime(e["id"])
+                if mt:
+                    e["status"] = "busy" if tnow - mt < 30 else "idle"
+
+        # 仍无任何状态来源的会话（无 sessionId、也无 transcript）：末路兜底，按进程
+        # CPU 占用粗判（对网络 I/O 密集的流式生成不准，仅作最后手段）
         unknown = [e for e in active if not e["status"]]
         if unknown:
             try:
