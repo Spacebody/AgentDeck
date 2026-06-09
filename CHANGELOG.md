@@ -10,6 +10,7 @@
 
 ## 历史
 
+- **1.25.12** 修 1.25.10 引入的副作用——IDE 注入的会话目录被误当成独立计费账号：Xcode 的 `ClaudeAgentConfig` 被当账号去拉额度，既多打一次 `oauth/usage` 撞 **429**、又在额度卡 carousel 里多出一张「ClaudeAgentConfig·429」废卡。现把**仅经在跑进程环境发现**的目录标记为 `session_only`——只读会话 / 活跃 / 用量，不计入额度账号、不拉 usage；被其它途径（用户自设 `CLAUDE_CONFIG_DIR`、`~/.claude-*` 等）发现的目录仍按账号先到先得，单账号时额度卡恢复无 carousel
 - **1.25.11** 修运行列表里同一项目重复出现：Claude Code 后台跑的一次性 `claude -p` 助手（标题生成、话题判定等）和子代理也被进程扫描当成会话列了出来——它们一闪而过、还跟随主会话目录，于是同一路径冒出第二行「0 分钟·空闲」。这类助手同样会写 `kind=interactive` 的 pidfile，光看 pidfile 区分不了；现改按**进程父链**过滤：祖先里有另一个 claude/codex 的，即 agent 自己拉起的子进程，不计入运行列表，仅保留用户实际发起的顶层会话（终端 / IDE 宿主拉起）
 - **1.25.10** 修 IDE 内置 agent（如 Xcode 自带 Claude）会话状态恒显「空闲」+ 运行列表状态 chip 渲染错位：① **数据源发现新增「在跑进程环境」一路**——IDE/扩展常把 `CLAUDE_CONFIG_DIR` / `CODEX_HOME` 只注入所拉起子进程的 env（既不写 shell 配置、也不在守护进程自身环境里），守护进程原先发现不到；现从在跑的 claude/codex 进程环境直接反查并纳入，Xcode 自带 claude 的 pidfile / transcript / 会话 / 用量随之全部可见（之前它虽被进程扫描命中、却因取不到 pidfile 而无状态来源）。② **claude 忙闲改用 transcript 最近写入活跃度兜底**（与 Codex 同口径，30s 内有写即「工作中」）——Xcode 自带的是旧版 claude，其 pidfile 不带 `status` 字段，此前只能退回按 CPU 占用判忙闲，而流式生成是网络 I/O 密集、CPU 又是全生命周期均值，于是恒显「空闲」。③ **pidfile status 词表归一**——实测 status 不止 busy/idle 还有 `shell`(跑命令) 等工作子态，旧逻辑「非 busy 即空闲」把正在跑命令的会话误显为「空闲」、且原始值落到 chip class 上无对应样式致 chip 失样；现除明确 `idle` 外的工作子态统一归「工作中」，运行列表 chip 始终正确渲染
 - **1.25.9** 收尾两处 CR 遗留：① `quota_interval` 变更**即时生效**——把现有「成功」额度缓存的到期改为 `now+新间隔`（调大即刻延长静默、不强制重拉），退避/降级条目(stale/429)不动以免在限流中提前重试；② `get_settings()` 加 **mtime 缓存**——按 `settings.json` 的 mtime 命中，免去每个请求都读盘+解析（保存时主动失效），高频轮询下减少冗余 I/O

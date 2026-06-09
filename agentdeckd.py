@@ -352,7 +352,7 @@ def _discover(env_var, default_dir, glob_pat, settings_key,
               is_dir_fn, default_label, proc_tools=()):
     seen, order = {}, []
 
-    def add(raw):
+    def add(raw, session_only=False):
         p = _expand(raw)
         if not is_dir_fn(p):
             return
@@ -367,6 +367,9 @@ def _discover(env_var, default_dir, glob_pat, settings_key,
             "label": _label_for_dir(p, default_label),
             "path": p,
             "is_default": (p == default_dir),
+            # 仅供会话/活跃/用量读取，不当作独立计费账号去拉额度（IDE 注入的配置目录
+            # 如 Xcode ClaudeAgentConfig：和用户是同一订阅，多拉一次 usage 只会撞 429）
+            "session_only": session_only,
         }
         seen[rp] = src
         order.append(src)
@@ -379,8 +382,10 @@ def _discover(env_var, default_dir, glob_pat, settings_key,
         add(p)
     for raw in _shell_rc_dirs(env_var):           # 反查 shell 配置
         add(raw)
-    for raw in _proc_env_dirs(env_var, proc_tools):    # 在跑进程环境（IDE 注入，如 Xcode 自带 claude）
-        add(raw)
+    # 在跑进程环境（IDE 注入，如 Xcode 自带 claude）——仅作会话源，不计额度账号。
+    # 若同一目录已被上面任一路发现（用户自己设的 CLAUDE_CONFIG_DIR 等），先到先得保留为账号。
+    for raw in _proc_env_dirs(env_var, proc_tools):
+        add(raw, session_only=True)
     for raw in get_settings().get(settings_key, []):   # 手动添加
         add(raw)
     # id 去重：同名 slug 追加序号，保证前端/Swift key 唯一
@@ -656,8 +661,8 @@ def _claude_quota_for(src):
 
 
 def _claude_quota():
-    """主账号（首个源）额度——保持原返回形状，向后兼容旧前端/Swift。"""
-    srcs = claude_sources()
+    """主账号（首个计费源）额度——保持原返回形状，向后兼容旧前端/Swift。"""
+    srcs = [s for s in claude_sources() if not s.get("session_only")]
     if not srcs:
         return {"ok": False, "error": "未发现 Claude 配置目录"}
     return _claude_quota_for(srcs[0])
@@ -667,6 +672,8 @@ def _claude_quota_accounts(ttl=CLAUDE_QUOTA_TTL):
     """每个 Claude 账号各拉一次额度（各自缓存 + 失败降级）。ttl 即真实外部调用间隔。"""
     out = []
     for src in claude_sources():
+        if src.get("session_only"):
+            continue          # IDE 注入的会话源（如 Xcode），非计费账号，不拉额度
         # 默认账号用回稳定键 claude_quota，复用历史降级数据（不因多账号化丢失兜底）
         key = "claude_quota" if src["is_default"] else f"claude_quota_{src['id']}"
         q = _resilient(key, ttl, lambda s=src: _claude_quota_for(s))
@@ -750,6 +757,8 @@ def _codex_quota_accounts(ttl=CODEX_QUOTA_TTL):
     """每个 Codex 账号各自解析 rate_limits（各自缓存）。"""
     out = []
     for src in codex_sources():
+        if src.get("session_only"):
+            continue          # IDE 注入的会话源，非计费账号，不拉额度
         key = "codex_quota" if src["is_default"] else f"codex_quota_{src['id']}"
         q = _resilient(key, ttl, lambda s=src: _codex_quota(base=s["path"]))
         out.append({"account_id": src["id"], "account": src["label"],
