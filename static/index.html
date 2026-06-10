@@ -820,6 +820,7 @@ body.wgt #today, body.wgt #done { display: none !important; }
 <script>
 const $ = s => document.querySelector(s);
 let sessions = [], filter = 'all', query = '';
+let searchResults = null, shown = [], searchTimer = 0;   // searchResults!==null 表示搜索态
 
 /* ---------- 多语言 i18n（中 / 英 / 日；有效 locale 由 daemon 下发） ---------- */
 let LOCALE = 'zh-CN';
@@ -1397,13 +1398,17 @@ async function loadUsage() {
 const agentOn = tool => !settings || settings['show_' + tool] !== false;
 
 function renderSessions() {
-  const list = sessions.filter(s =>
+  // 搜索时用服务端全量结果（searchResults）；否则用周期拉取的最近列表（sessions）。
+  // 服务端已按 title/project/cwd/分支匹配，故搜索态不再做客户端文本过滤（避免漏掉按 cwd 命中的项）。
+  const usingSearch = searchResults !== null;
+  shown = usingSearch ? searchResults : sessions;
+  const list = shown.filter(s =>
     agentOn(s.tool) &&
     (filter === 'all' || s.tool === filter) &&
-    (!query || (s.title + s.project + s.branch).toLowerCase().includes(query)));
+    (usingSearch || !query || (s.title + s.project + s.branch).toLowerCase().includes(query)));
   const now = Date.now() / 1000;
   $('#slist').innerHTML = list.length ? list.map((s, i) => `
-    <div class="srow ${s.pinned ? 'pinned-row' : ''}" data-i="${sessions.indexOf(s)}"
+    <div class="srow ${s.pinned ? 'pinned-row' : ''}" data-i="${shown.indexOf(s)}"
       style="animation:in .4s ${i*0.025}s cubic-bezier(.2,.7,.2,1) backwards">
       <div class="srowtop">
         <div class="sbadge ${s.tool}">${badge(s.tool, 14)}</div>
@@ -1463,7 +1468,7 @@ async function loadSessions() {
 $('#slist').addEventListener('click', async e => {
   const row = e.target.closest('.srow');
   if (!row) return;
-  const s = sessions[+row.dataset.i];
+  const s = shown[+row.dataset.i];
   if (!s) return;
   const btn = e.target.closest('.sbtn');
   if (!btn) {                              // 点击行身 → 展开/收起预览
@@ -1791,7 +1796,20 @@ async function loadProjects() {
   } catch {}
 }
 
-$('#search').oninput = e => { query = e.target.value.trim().toLowerCase(); renderSessions(); };
+$('#search').oninput = e => {
+  query = e.target.value.trim().toLowerCase();
+  clearTimeout(searchTimer);
+  if (!query) { searchResults = null; renderSessions(); return; }   // 清空→回默认列表
+  searchTimer = setTimeout(async () => {
+    const q = query;                                                // 防乱序：迟到响应不覆盖新查询
+    try {
+      const d = await (await fetch('/api/sessions?q=' + encodeURIComponent(q))).json();
+      if (q !== query) return;
+      searchResults = d.sessions || [];
+    } catch { if (q === query) searchResults = []; }
+    renderSessions();
+  }, 250);
+};
 
 /* ---------- 设置 ---------- */
 let settings = null;

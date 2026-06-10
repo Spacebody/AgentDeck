@@ -684,13 +684,22 @@ def _claude_quota_accounts(ttl=CLAUDE_QUOTA_TTL):
 
 # ----------------------------------------------------------------- Codex 额度
 
+def _codex_file_index(base):
+    # 单账号 rollout 文件列表（按文件名倒排≈新→旧），短 TTL 缓存。
+    # 搜索时扫描窗口放大到 240、连续按键反复进来，缓存 5s 免去重复 glob 枚举。
+    return cached(f"fidx:codex:{base}", 5, lambda: sorted(
+        (base / "sessions").glob("*/*/*/rollout-*.jsonl"), reverse=True))
+
+
 def _iter_codex_files(limit=60, base=None):
     """rollout 文件列表（文件名按时间戳，词序倒排≈新→旧）。
     base=None 聚合所有 Codex 源；指定 base（codex home 目录）则只扫该账号。"""
     bases = [base] if base is not None else [s["path"] for s in codex_sources()]
+    if len(bases) == 1:
+        return _codex_file_index(bases[0])[:limit]
     files = []
     for b in bases:
-        files.extend((b / "sessions").glob("*/*/*/rollout-*.jsonl"))
+        files.extend(_codex_file_index(b))
     files.sort(reverse=True)
     return files[:limit]
 
@@ -901,7 +910,11 @@ def api_diag():
 _SKIP_PREFIXES = ("<command-name>", "<local-command", "<user_instructions",
                   "<environment_context", "<ENVIRONMENT_CONTEXT", "Caveat:",
                   "<system-reminder>", "<task-notification>",
-                  "# AGENTS.md", "<permissions")
+                  "# AGENTS.md", "<permissions",
+                  # Claude Code 内部 housekeeping 会话（摘要 / compact），非用户交互，
+                  # 跳过其首条消息后该会话取不到有效标题即被丢弃，避免白占最近列表名额
+                  "You are summarizing a Claude Code session",
+                  "Apply maximum non-destructive compression")
 
 
 def _msg_text(content):
@@ -921,17 +934,43 @@ def _clean_title(text):
     return text[:120] if text else ""
 
 
-def _claude_sessions(limit=15):
+def _claude_file_index(src_path):
+    # 磁盘索引：(mtime, path) 按时间倒序，短 TTL 缓存。
+    # 搜索时连续按键会反复进 _claude_sessions，否则每次都要 glob+对全部文件 stat
+    # （O(N) 系统调用，上万会话时成主要开销）；缓存 5s 让一串按键复用同一份索引。
+    def build():
+        entries = []
+        for p in (src_path / "projects").glob("*/*.jsonl"):
+            try:
+                entries.append((p.stat().st_mtime, p))
+            except OSError:
+                continue
+        entries.sort(key=lambda e: e[0], reverse=True)
+        return entries
+    return cached(f"fidx:claude:{src_path}", 5, build)
+
+
+def _claude_sessions(limit=15, query=None):
+    # query 为空：取「跨全部项目按 mtime 最近 limit 条」（默认列表）。
+    # query 非空：全量磁盘搜索——目录名编码了完整 cwd，路径命中可零读直接入选；
+    # 对路径未命中的文件仅在读取预算内读首部做标题匹配，结果上限 SEARCH_CAP。
+    q = (query or "").lower()
+    SEARCH_CAP, READ_BUDGET = 60, 240
     out = []
     for src in claude_sources():
-        files = sorted((src["path"] / "projects").glob("*/*.jsonl"),
-                       key=lambda p: p.stat().st_mtime, reverse=True)
-        taken = 0
-        for path in files:
-            if taken >= limit:
+        taken = reads = 0
+        for mtime, path in _claude_file_index(src["path"]):
+            if not q and taken >= limit:
+                break
+            if q and len(out) >= SEARCH_CAP:
                 break
             if path.name.startswith("agent-"):   # subagent 旁链
                 continue
+            path_hit = bool(q) and q in path.parent.name.lower()
+            if q and not path_hit:
+                if reads >= READ_BUDGET:
+                    continue
+                reads += 1
             title, cwd, branch = "", "", ""
             try:
                 with open(path, encoding="utf-8", errors="replace") as f:
@@ -957,8 +996,16 @@ def _claude_sessions(limit=15):
                 continue
             if not title:
                 continue
-            st = path.stat()
-            taken += 1
+            if q:
+                hay = (title + " " + (cwd or "") + " " + (branch or "")).lower()
+                if q not in hay and not path_hit:
+                    continue
+            else:
+                taken += 1
+            try:                                 # 索引最长 5s 旧，文件可能已被删
+                size = path.stat().st_size
+            except OSError:
+                continue
             out.append({
                 "tool": "claude",
                 "id": path.stem,
@@ -966,8 +1013,8 @@ def _claude_sessions(limit=15):
                 "cwd": cwd,
                 "project": Path(cwd).name if cwd else path.parent.name,
                 "branch": branch,
-                "mtime": st.st_mtime,
-                "size": st.st_size,
+                "mtime": mtime,
+                "size": size,
                 "account": src["label"],
                 "account_id": src["id"],
             })
@@ -1005,19 +1052,29 @@ def _codex_session_info(path):
     return sid, cwd, title
 
 
-def _codex_sessions(limit=15):
+def _codex_sessions(limit=15, query=None):
+    # query 非空：扩大扫描窗口、读首部做标题/cwd 匹配（Codex 文件名不含 cwd，须读）。
+    q = (query or "").lower()
+    SEARCH_CAP = 60
+    scan = 240 if q else 40
     out = []
     for src in codex_sources():
         taken = 0
-        for path in _iter_codex_files(40, base=src["path"]):
-            if taken >= limit:
+        for path in _iter_codex_files(scan, base=src["path"]):
+            if not q and taken >= limit:
+                break
+            if q and len(out) >= SEARCH_CAP:
                 break
             info = _codex_session_info(path)
             if not info:
                 continue
             sid, cwd, title = info
+            if q:
+                if q not in (title + " " + (cwd or "")).lower():
+                    continue
+            else:
+                taken += 1
             st = path.stat()
-            taken += 1
             out.append({
                 "tool": "codex",
                 "id": sid,
@@ -1068,24 +1125,28 @@ def api_pin(body):
     return {"ok": True, "pinned": bool(body.get("pinned"))}
 
 
-def api_sessions():
+def api_sessions(query=None):
+    q = (query or "").strip().lower()[:80]
     def build():
         limit = get_settings()["sessions_limit"]
-        merged = _claude_sessions(limit) + _codex_sessions(limit)
+        merged = _claude_sessions(limit, q or None) + _codex_sessions(limit, q or None)
         merged.sort(key=lambda s: s["mtime"], reverse=True)
         pins = _load_pins()
         seen = set()
         for s in merged:
             s["pinned"] = s["id"] in pins
             seen.add(s["id"])
-        # 已置顶但滚出最近列表的会话，从快照补回
-        for sid, snap in pins.items():
-            if sid not in seen and snap.get("tool"):
-                snap = dict(snap)
-                snap["pinned"] = True
-                merged.append(snap)
+        # 已置顶但滚出最近列表的会话，从快照补回（仅默认列表；搜索结果只回匹配项）
+        if not q:
+            for sid, snap in pins.items():
+                if sid not in seen and snap.get("tool"):
+                    snap = dict(snap)
+                    snap["pinned"] = True
+                    merged.append(snap)
         merged.sort(key=lambda s: (not s["pinned"], -float(s.get("mtime") or 0)))
-        return {"sessions": merged, "ts": time.time()}
+        return {"sessions": merged, "ts": time.time(), "query": q}
+    if q:                       # 查询各异，不走 20s 缓存
+        return build()
     return cached("sessions", 20, build)
 
 
@@ -2361,7 +2422,7 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     self._send(200, api_diag())
             elif path == "/api/sessions":
-                self._send(200, api_sessions())
+                self._send(200, api_sessions(query.get("q", [""])[0]))
             elif path == "/api/usage":
                 self._send(200, api_usage())
             elif path == "/api/active":
