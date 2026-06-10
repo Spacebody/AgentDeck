@@ -161,6 +161,17 @@ final class DragHandle: NSView {
     }
 }
 
+/// 全幅透明层：按住 ⌘ 时任意位置都能拖走小组件（解决顶部把手被遮挡/找不到时无法拖动）。
+/// 不按 ⌘ 时 hitTest 返回 nil → 事件穿透给底下的 webview，点击开面板 / 多账号 carousel 滑动照常。
+final class CmdDragView: NSView {
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        NSEvent.modifierFlags.contains(.command) ? self : nil
+    }
+    override func mouseDown(with event: NSEvent) {
+        window?.performDrag(with: event)
+    }
+}
+
 /// 顶亮底暗的渐变描边（rim light）：系统桌面小组件的边缘语言——
 /// 顶部受光更亮、向下渐隐，比均匀白边更有体积感。点击穿透，不挡交互
 final class RimView: NSView {
@@ -922,10 +933,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             effect.addSubview(widgetVC.view)
             addRim(to: effect, radius: 28)   // 顶亮底暗渐变描边
             addEdgeCursor(to: effect, allowTop: false)   // 顶部是拖动把手
-            // 顶部 22px 原生拖拽把手（盖在 webview 之上）
-            let handle = DragHandle(frame: NSRect(x: 0, y: H - 22, width: W, height: 22))
+            // 顶部 28px 原生拖拽把手（盖在 webview 之上）
+            let handle = DragHandle(frame: NSRect(x: 0, y: H - 28, width: W, height: 28))
             handle.autoresizingMask = [.width, .minYMargin]
             effect.addSubview(handle)
+            // 最上层：按住 ⌘ 任意位置可拖（顶部把手够不到时的兜底），平时事件穿透不挡交互
+            let cmdDrag = CmdDragView(frame: effect.bounds)
+            cmdDrag.autoresizingMask = [.width, .height]
+            effect.addSubview(cmdDrag)
             p.contentView = effect
             widgetPanel = p
 
@@ -938,6 +953,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 x = vis.maxX - W - 24
                 y = vis.maxY - H - 24
             }
+            // 夹回可视范围：保证顶部拖拽条始终在屏内、不被菜单栏/屏幕边缘盖住
+            // （历史保存的位置可能来自已断开的外接屏或贴边到把手够不着处）
+            x = min(max(x, vis.minX + 8), vis.maxX - W - 8)
+            y = min(max(y, vis.minY + 8), vis.maxY - H - 8)
             p.setFrame(NSRect(x: x, y: y, width: W, height: H), display: true)
             widgetVC.load()
             for delay in [0.3, 1.2] {
