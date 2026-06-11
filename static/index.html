@@ -420,7 +420,7 @@ body.wgt #today, body.wgt #done { display: none !important; }
   background: linear-gradient(90deg, var(--claude), var(--claude-deep)); width: 0;
   transition: width .5s cubic-bezier(.2,.7,.2,1); }
 .prow.codex .pbar i { background: linear-gradient(90deg, var(--codex), var(--codex-deep)); }
-#curvesvg { width: 100%; height: 144px; flex: 1; min-height: 144px; max-height: 300px; display: block; }
+#curvesvg { width: 100%; height: 144px; flex: 1; min-height: 44px; max-height: 300px; display: block; }
 .cv-line { fill: none; stroke-width: 1.8; stroke-linejoin: round; stroke-linecap: round; }
 .cv-grid { stroke: rgba(255,255,255,.12); stroke-width: 1; }
 .cv-grid.dash { stroke-dasharray: 2 4; }
@@ -444,7 +444,7 @@ body.wgt #today, body.wgt #done { display: none !important; }
   font-family: "SF Pro Rounded", ui-rounded, sans-serif;
   color: var(--ink); font-size: 11px;
 }
-#usagesvg { width: 100%; height: 144px; flex: 1; min-height: 144px; max-height: 300px; display: block; }
+#usagesvg { width: 100%; height: 144px; flex: 1; min-height: 44px; max-height: 300px; display: block; }
 #usagesvg .uday:hover rect { filter: brightness(1.3); }
 .uval { font-size: 6.5px; fill: rgba(255,255,255,.40);
   font-family: "SF Pro Rounded", ui-rounded, sans-serif; font-weight: 600; }
@@ -570,7 +570,7 @@ body.wgt #today, body.wgt #done { display: none !important; }
    由 JS 按滚动位置驱动 --fadeTop/--fadeBtm；@property 注册后可平滑过渡 */
 @property --fadeTop { syntax: '<length>'; initial-value: 0px; inherits: false; }
 @property --fadeBtm { syntax: '<length>'; initial-value: 0px; inherits: false; }
-#setbody, #slist {
+#setbody, #slist, #view-overview {
   transition: --fadeTop .25s, --fadeBtm .25s;
   -webkit-mask-image: linear-gradient(180deg,
     transparent 0, black var(--fadeTop),
@@ -902,6 +902,11 @@ const I18N = {
     'set.openData': '打开数据目录', 'set.exportCsv': '导出用量 CSV', 'set.clearEvents': '清空完成记录',
     'set.custom': '自定义', 'set.dataLocal': '数据仅存本机',
     'set.openedData': '已打开数据目录', 'set.csvExported': 'CSV 已导出到「下载」', 'set.eventsCleared': '完成记录已清空',
+    'set.secFeedback': '反馈',
+    'set.feedback': '问题反馈', 'set.feedbackHint': '版本号自动预填，不含任何账号 / 路径信息',
+    'set.feedbackGithub': 'GitHub Issue', 'set.feedbackEmail': '邮件反馈',
+    'feedback.subject': 'AgentDeck 反馈 v{v}',
+    'feedback.body': '请描述你遇到的问题或建议：\n\n\n\n---\nAgentDeck v{v} · macOS',
     'weekPrefix': '周',
   },
   'en': {
@@ -981,6 +986,11 @@ const I18N = {
     'set.openData': 'Open data folder', 'set.exportCsv': 'Export usage CSV', 'set.clearEvents': 'Clear done events',
     'set.custom': 'Custom', 'set.dataLocal': 'Data stays on this Mac',
     'set.openedData': 'Opened data folder', 'set.csvExported': 'CSV exported to Downloads', 'set.eventsCleared': 'Done events cleared',
+    'set.secFeedback': 'Feedback',
+    'set.feedback': 'Report an issue', 'set.feedbackHint': 'Version prefilled; no account or path info is sent',
+    'set.feedbackGithub': 'GitHub Issue', 'set.feedbackEmail': 'Email',
+    'feedback.subject': 'AgentDeck feedback v{v}',
+    'feedback.body': 'Describe the issue or suggestion:\n\n\n\n---\nAgentDeck v{v} · macOS',
     'weekPrefix': '',
   },
   'ja': {
@@ -1060,6 +1070,11 @@ const I18N = {
     'set.openData': 'データフォルダを開く', 'set.exportCsv': '使用量 CSV を書き出す', 'set.clearEvents': '完了記録を消去',
     'set.custom': 'カスタム', 'set.dataLocal': 'データはこの Mac のみ',
     'set.openedData': 'データフォルダを開きました', 'set.csvExported': 'CSV をダウンロードに書き出しました', 'set.eventsCleared': '完了記録を消去しました',
+    'set.secFeedback': 'フィードバック',
+    'set.feedback': '不具合報告', 'set.feedbackHint': 'バージョン番号のみ自動入力、アカウント / パス情報は送信しません',
+    'set.feedbackGithub': 'GitHub Issue', 'set.feedbackEmail': 'メール',
+    'feedback.subject': 'AgentDeck フィードバック v{v}',
+    'feedback.body': '問題または提案を記述してください：\n\n\n\n---\nAgentDeck v{v} · macOS',
     'weekPrefix': '',
   },
 };
@@ -1326,8 +1341,9 @@ async function loadUsage() {
     const pow = 10 ** Math.floor(Math.log10(maxRaw));
     const niceMax = [1, 2, 2.5, 5, 10].map(m => m * pow).find(v => v >= maxRaw);
     const usvg = $('#usagesvg');
-    const VBW = Math.max(364, Math.round(usvg.clientWidth) || 364);
-    const VBH = Math.max(144, Math.round(usvg.clientHeight) || 144);
+    const VBW = Math.max(280, Math.round(usvg.clientWidth) || 364);
+    // viewBox 跟随实际高度，文字 7px 在屏幕上仍是 7px，整图随面板高度有机收缩
+    const VBH = Math.max(60, Math.round(usvg.clientHeight) || 144);
     usvg.setAttribute('viewBox', `0 0 ${VBW} ${VBH}`);
     const X0 = 32, X1 = VBW - 6, Y0 = VBH - 26, Y1 = 8, BW = 16;   // 与 24h 曲线同画布规格
     const fmtAxis = n => fmtTokens(n).replace('.0', '');
@@ -1603,9 +1619,9 @@ async function loadCurve() {
       const h = byTs[ts] || {};
       buckets.push({ ts: ts + hourMs / 2, c: h.c || 0, x: h.x || 0 });
     }
-    // 按容器实际宽高铺满（面板可伸缩，图表弹性生长）
-    const VBW = Math.max(364, Math.round(svg.clientWidth) || 364);
-    const VBH = Math.max(144, Math.round(svg.clientHeight) || 144);
+    // 按容器实际宽高铺满（面板可伸缩，图表弹性生长）；viewBox 跟随实际高度，避免缩放变形
+    const VBW = Math.max(280, Math.round(svg.clientWidth) || 364);
+    const VBH = Math.max(60, Math.round(svg.clientHeight) || 144);
     svg.setAttribute('viewBox', `0 0 ${VBW} ${VBH}`);
     const X0 = 32, X1 = VBW - 6, Y0 = VBH - 24, Y1 = 8, BASE = Y0;
     const t0 = nowH - 23 * hourMs, t1 = nowH + hourMs;
@@ -1873,6 +1889,10 @@ const SET_SCHEMA = [
     {act: 'open', name: 'set.openData'},
     {act: 'export', name: 'set.exportCsv'},
     {act: 'clear_events', name: 'set.clearEvents'}]},
+  {sec: 'set.secFeedback'},
+  {label: 'set.feedback', hint: 'set.feedbackHint', type: 'btns', btns: [
+    {act: 'feedback_github', name: 'set.feedbackGithub'},
+    {act: 'feedback_email', name: 'set.feedbackEmail'}]},
 ];
 // 选项显示名：优先 i18n key（auto/copy 等），其次 API 设备名，最后原值
 const optName = (it, o) => (it.optKeys && it.optKeys[o]) ? t(it.optKeys[o]) : (it.names && it.names[o]) || o;
@@ -2097,6 +2117,16 @@ $('#setbody').addEventListener('click', e => {
       .finally(() => { act.disabled = false; });
     return;
   }
+  if (act && (act.dataset.act === 'feedback_github' || act.dataset.act === 'feedback_email')) {
+    // 仅预填版本号；不带任何账号/路径，用户自填正文。Swift 桥已放行 mailto:
+    const ver = _appVer || '?';
+    const subject = encodeURIComponent(t('feedback.subject', {v: ver}));
+    const body = encodeURIComponent(t('feedback.body', {v: ver}));
+    openExternal(act.dataset.act === 'feedback_github'
+      ? `https://github.com/Spacebody/AgentDeck/issues/new?title=${subject}&body=${body}`
+      : `mailto:jerry_zyl@hotmail.com?subject=${subject}&body=${body}`);
+    return;
+  }
   if (act) {
     fetch('/api/data', {method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({action: act.dataset.act})})
@@ -2212,7 +2242,7 @@ function updateFade(el) {
   el.style.setProperty('--fadeBtm',
     el.scrollTop + el.clientHeight < el.scrollHeight - 2 ? '22px' : '0px');
 }
-for (const sel of ['#setbody', '#slist']) {
+for (const sel of ['#setbody', '#slist', '#view-overview']) {
   const el = $(sel);
   el.addEventListener('scroll', () => updateFade(el), {passive: true});
   new ResizeObserver(() => updateFade(el)).observe(el);   // 内容/面板尺寸变化时复算

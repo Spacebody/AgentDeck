@@ -273,9 +273,9 @@ final class ControlBridge: NSObject, WKScriptMessageHandler {
                                didReceive message: WKScriptMessage) {
         let delegate = NSApp.delegate as? AppDelegate
         guard let body = message.body as? String else { return }
-        if body.hasPrefix("open:") {   // 打开外部链接（更新下载页等）→ 默认浏览器
+        if body.hasPrefix("open:") {   // 打开外部链接（更新下载页 / GitHub issue / mailto 反馈）
             if let url = URL(string: String(body.dropFirst(5))),
-               url.scheme == "https" || url.scheme == "http" {
+               url.scheme == "https" || url.scheme == "http" || url.scheme == "mailto" {
                 DispatchQueue.main.async { NSWorkspace.shared.open(url) }
             }
             return
