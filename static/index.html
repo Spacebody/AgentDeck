@@ -311,10 +311,18 @@ body.wgt #aurora { opacity: .14; }
 }
 .ring .pct small { font-size: 9px; font-weight: 700; color: var(--ink-2);
   align-self: center; margin-top: 4px; }
-.qmeta { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 7px; }
+.qmeta { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 9px; justify-content: center; }
 .wrow { display: flex; flex-direction: column; gap: 3px; }
-.wlabel { display: flex; justify-content: space-between; font-size: 10.5px; color: var(--ink-2); }
-.wlabel b { color: var(--ink); font-weight: 700; font-family: "SF Pro Rounded", ui-rounded, sans-serif; }
+.wlabel { display: flex; justify-content: space-between; align-items: flex-start;
+  font-size: 10.5px; color: var(--ink-2); gap: 6px; min-width: 0; }
+.wlabel > span { min-width: 0; display: flex; flex-direction: column; gap: 1px;
+  overflow: hidden; }
+.wlabel > span > i { font-style: normal; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wlabel em { display: block; font-style: normal; font-size: 10px; font-weight: 600; color: var(--ink-2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 百分比固定最小宽度 + 右对齐：消除「35%」「0%」宽度差造成的左侧标签栏伸缩 */
+.wlabel b { color: var(--ink); font-weight: 700; font-family: "SF Pro Rounded", ui-rounded, sans-serif;
+  flex: none; min-width: 30px; text-align: right; }
 .wbar { height: 4px; border-radius: 3px; background: rgba(255,255,255,.09); overflow: hidden; }
 .wbar i {
   display: block; height: 100%; border-radius: 3px; width: 0;
@@ -390,7 +398,7 @@ body.wgt #today, body.wgt #done { display: none !important; }
   text-overflow: ellipsis; white-space: nowrap; }
 /* 完整路径：从左截断（…/deep/dir），保住最有辨识度的尾部目录 */
 .arow .apath { flex: 1; min-width: 0; direction: rtl; text-align: left;
-  font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 9px; font-weight: 500; }
+  font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 10.5px; font-weight: 600; }
 .arow .apath bdi, .arow .apath { unicode-bidi: plaintext; }
 .arow .aruntime { flex: none; }
 .arow .ahost { flex: none; font-size: 9px; padding: 1px 5px; border-radius: 5px;
@@ -470,21 +478,21 @@ body.wgt #today, body.wgt #done { display: none !important; }
   flex: 1; min-height: 0; display: flex; flex-direction: column;
   padding: 12px 6px 6px 14px; animation-delay: .12s;
 }
-.shead { display: flex; align-items: center; gap: 6px; margin-bottom: 9px; padding-right: 8px; }
-.stitle { font-size: 12px; font-weight: 700; flex: none; }
-.chips { display: flex; gap: 4px; }
+.shead { display: flex; align-items: center; gap: 7px; margin-bottom: 9px; padding-right: 8px; }
+.stitle { font-size: 12.5px; font-weight: 700; flex: none; }
+.chips { display: flex; gap: 5px; }
 .chip {
-  font-size: 9px; padding: 3px 8px; border-radius: 99px; cursor: pointer;
+  font-size: 10.5px; padding: 4px 10px; border-radius: 99px; cursor: pointer;
   border: 1px solid var(--edge); background: transparent; color: var(--ink-3);
   transition: .15s; font-weight: 600; white-space: nowrap; flex: none;
 }
 .chip.on { background: rgba(255,255,255,.13); color: var(--ink); border-color: var(--edge-hi); }
 #search {
-  margin-left: auto; width: 86px; font-size: 9.5px; color: var(--ink);
+  margin-left: auto; width: 100px; font-size: 10.5px; color: var(--ink);
   background: rgba(255,255,255,.06); border: 1px solid var(--edge); border-radius: 99px;
-  padding: 3px 9px; outline: none; transition: .2s; font-family: inherit;
+  padding: 4px 11px; outline: none; transition: .2s; font-family: inherit;
 }
-#search:focus { width: 120px; border-color: var(--edge-hi); background: rgba(255,255,255,.09); }
+#search:focus { width: 140px; border-color: var(--edge-hi); background: rgba(255,255,255,.09); }
 #search::placeholder { color: var(--ink-3); }
 #slist { flex: 1; overflow-y: auto; overflow-x: hidden; padding-right: 6px; }
 #slist::-webkit-scrollbar { width: 3px; }
@@ -831,12 +839,12 @@ const I18N = {
     'header.settings': '设置', 'header.refresh': '刷新', 'header.quit': '退出 AgentDeck',
     'tab.overview': '概览', 'tab.sessions': '会话',
     'time.justNow': '刚刚', 'time.minAgo': '{n} 分钟前', 'time.hourAgo': '{n} 小时前', 'time.dayAgo': '{n} 天前',
-    'cd.reset': '已重置', 'cd.inDays': '{n} 天后重置', 'cd.inHM': '{h} 小时 {m} 分后重置', 'cd.inM': '{m} 分钟后重置',
+    'cd.reset': '已重置', 'cd.inDays': '{n} 天后重置', 'cd.inHM': '{h} 小时 {m} 分后重置', 'cd.inH': '{h} 小时后重置', 'cd.inM': '{m} 分钟后重置',
     'dur.dh': '{d} 天 {h} 小时', 'dur.hm': '{h} 小时 {m} 分', 'dur.m': '{m} 分钟',
     'quota.fetchFailed': '额度获取失败', 'quota.stale': '⚠︎ 接口限流中，显示最近一次成功数据',
     'quota.extra': '额外用量 <b>${used}</b> / ${limit}', 'quota.dataStale': '⚠ 数据已 {h} 小时未更新，额度可能不准',
     'quota.credits': 'Credits 余额 <b>{bal}</b>', 'quota.sampledAt': '采样于 {time}',
-    'quota.used': '已用', 'quota.noOther': '暂无其他窗口数据',
+    'quota.noOther': '暂无其他窗口数据',
     'quota.noQuota': '网关 / 未登录账号，无官方额度（仅按会话用量统计）',
     'quota.burnSafe': '✓ 当前速率安全，可撑到重置', 'quota.burnWarn': '⚠ 按当前速率约 {dur}后用尽，建议放缓',
     'quota.winMins': '{n} 分钟窗口',
@@ -915,12 +923,12 @@ const I18N = {
     'header.settings': 'Settings', 'header.refresh': 'Refresh', 'header.quit': 'Quit AgentDeck',
     'tab.overview': 'Overview', 'tab.sessions': 'Sessions',
     'time.justNow': 'just now', 'time.minAgo': '{n}m ago', 'time.hourAgo': '{n}h ago', 'time.dayAgo': '{n}d ago',
-    'cd.reset': 'reset', 'cd.inDays': 'resets in {n}d', 'cd.inHM': 'resets in {h}h {m}m', 'cd.inM': 'resets in {m}m',
+    'cd.reset': 'reset', 'cd.inDays': 'resets in {n}d', 'cd.inHM': 'resets in {h}h {m}m', 'cd.inH': 'resets in {h}h', 'cd.inM': 'resets in {m}m',
     'dur.dh': '{d}d {h}h', 'dur.hm': '{h}h {m}m', 'dur.m': '{m}m',
     'quota.fetchFailed': 'Failed to fetch quota', 'quota.stale': '⚠︎ Rate-limited; showing last successful data',
     'quota.extra': 'Extra usage <b>${used}</b> / ${limit}', 'quota.dataStale': '⚠ Data {h}h stale; quota may be off',
     'quota.credits': 'Credits <b>{bal}</b>', 'quota.sampledAt': 'sampled {time}',
-    'quota.used': 'used', 'quota.noOther': 'No other windows',
+    'quota.noOther': 'No other windows',
     'quota.noQuota': 'Gateway / signed-out account — no official quota (usage only)',
     'quota.burnSafe': '✓ Current rate is safe through reset', 'quota.burnWarn': '⚠ At this rate, ~{dur} until depleted — ease up',
     'quota.winMins': '{n}-min window',
@@ -999,12 +1007,12 @@ const I18N = {
     'header.settings': '設定', 'header.refresh': '更新', 'header.quit': 'AgentDeck を終了',
     'tab.overview': '概要', 'tab.sessions': 'セッション',
     'time.justNow': 'たった今', 'time.minAgo': '{n}分前', 'time.hourAgo': '{n}時間前', 'time.dayAgo': '{n}日前',
-    'cd.reset': 'リセット済み', 'cd.inDays': '{n}日後にリセット', 'cd.inHM': '{h}時間{m}分後にリセット', 'cd.inM': '{m}分後にリセット',
+    'cd.reset': 'リセット済み', 'cd.inDays': '{n}日後にリセット', 'cd.inHM': '{h}時間{m}分後にリセット', 'cd.inH': '{h}時間後にリセット', 'cd.inM': '{m}分後にリセット',
     'dur.dh': '{d}日 {h}時間', 'dur.hm': '{h}時間 {m}分', 'dur.m': '{m}分',
     'quota.fetchFailed': '残量の取得に失敗', 'quota.stale': '⚠︎ レート制限中。直近の成功データを表示',
     'quota.extra': '追加使用 <b>${used}</b> / ${limit}', 'quota.dataStale': '⚠ データが{h}時間未更新。残量がずれている可能性',
     'quota.credits': 'Credits 残高 <b>{bal}</b>', 'quota.sampledAt': '{time} に取得',
-    'quota.used': '使用', 'quota.noOther': '他の枠データなし',
+    'quota.noOther': '他の枠データなし',
     'quota.noQuota': 'ゲートウェイ / 未ログイン — 公式残量なし（使用量のみ）',
     'quota.burnSafe': '✓ 現在のペースならリセットまで安全', 'quota.burnWarn': '⚠ 現ペースで約{dur}で枯渇。ペースダウン推奨',
     'quota.winMins': '{n}分枠',
@@ -1131,12 +1139,14 @@ const rel = ts => {
   if (s < 86400) return t('time.hourAgo', {n: Math.floor(s/3600)});
   return t('time.dayAgo', {n: Math.floor(s/86400)});
 };
-const cd = iso => {            // 重置倒计时
+const cd = (iso, compact) => {            // 重置倒计时；compact=true 时丢弃分钟（副窗口空间小）
   if (!iso) return '';
   const ms = (typeof iso === 'number' ? iso*1000 : Date.parse(iso)) - Date.now();
   if (ms <= 0) return t('cd.reset');
   const h = Math.floor(ms/3.6e6), m = Math.floor(ms%3.6e6/6e4);
-  return h > 48 ? t('cd.inDays', {n: Math.floor(h/24)}) : h > 0 ? t('cd.inHM', {h, m}) : t('cd.inM', {m});
+  if (h > 48) return t('cd.inDays', {n: Math.floor(h/24)});
+  if (h > 0) return compact ? t('cd.inH', {h}) : t('cd.inHM', {h, m});
+  return t('cd.inM', {m});
 };
 const grade = p => p >= 95 ? 'danger' : p >= 80 ? 'warn' : '';
 const toast = msg => {
@@ -1229,15 +1239,18 @@ function quotaCardInner(name, data, gradId, accountLabel) {
   return `
     <div class="qhead"><span class="qbadge ${tool}">${icon}</span>
       <span class="qname">${name}</span>${acctTag}
-      <span class="qsub">${esc(winLabel(main))}${wgt ? '' : ' · ' + t('quota.used')}<br>${cd(main.resets_at)}${resetBar}</span></div>
+      <span class="qsub">${esc(winLabel(main))}<br>${cd(main.resets_at)}${resetBar}</span></div>
     <div class="qbody">
       ${ringSvg(main.used_percent, mainGrad)}
       <div class="qmeta">
-        ${rest.length ? rest.map(w => `
+        ${rest.length ? rest.map(w => {
+          const wcd = cd(w.resets_at, true);   // 副窗口空间小，cd 用紧凑版
+          return `
           <div class="wrow">
-            <div class="wlabel"><span>${esc(winLabel(w))}</span><b>${w.used_percent}%</b></div>
+            <div class="wlabel"><span><i>${esc(winLabel(w))}</i>${wcd ? `<em>${wcd}</em>` : ''}</span><b>${w.used_percent}%</b></div>
             <div class="wbar"><i class="${grade(w.used_percent)}" data-w="${Math.min(w.used_percent,100)}"></i></div>
-          </div>`).join('')
+          </div>`;
+        }).join('')
         : `<div class="wrow"><div class="wlabel"><span style="color:var(--ink-3)">${t('quota.noOther')}</span></div></div>`}
       </div>
     </div>

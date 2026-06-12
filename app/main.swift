@@ -266,6 +266,38 @@ func roundedMask(radius: CGFloat) -> NSImage {
     return img
 }
 
+// 反馈邮件：先探 mailto 处理器，缺失或 open 失败则把邮箱复制到剪贴板 + 弹框告知。
+// 默认 NSWorkspace.open 在没有默认邮件客户端时静默 no-op，用户点了按钮没反应不知道为啥。
+func openMailto(_ url: URL) {
+    let probe = URL(string: "mailto:test@example.com")!
+    let hasHandler = NSWorkspace.shared.urlForApplication(toOpen: probe) != nil
+    if hasHandler && NSWorkspace.shared.open(url) { return }
+    let raw = String(url.absoluteString.dropFirst("mailto:".count))
+    let email = raw.components(separatedBy: "?").first ?? raw
+    if !email.isEmpty {
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(email, forType: .string)
+    }
+    let alert = NSAlert()
+    alert.alertStyle = .informational
+    let lang = Locale.preferredLanguages.first ?? "en"
+    if lang.hasPrefix("zh") {
+        alert.messageText = "未检测到默认邮件客户端"
+        alert.informativeText = "已将反馈邮箱 \(email) 复制到剪贴板，可粘贴到任意邮件服务发送，或直接到 GitHub Issues 反馈。"
+        alert.addButton(withTitle: "好的")
+    } else if lang.hasPrefix("ja") {
+        alert.messageText = "メールクライアントが見つかりません"
+        alert.informativeText = "メールアドレス \(email) をクリップボードにコピーしました。任意のメールサービスに貼り付けるか、GitHub Issues からご報告ください。"
+        alert.addButton(withTitle: "OK")
+    } else {
+        alert.messageText = "No default mail client"
+        alert.informativeText = "Copied feedback email \(email) to clipboard. Paste it into any mail service, or report via GitHub Issues."
+        alert.addButton(withTitle: "OK")
+    }
+    alert.runModal()
+}
+
 // JS → 原生桥：面板内「退出」按钮经此通道终止 App
 final class ControlBridge: NSObject, WKScriptMessageHandler {
     static let shared = ControlBridge()
@@ -276,7 +308,13 @@ final class ControlBridge: NSObject, WKScriptMessageHandler {
         if body.hasPrefix("open:") {   // 打开外部链接（更新下载页 / GitHub issue / mailto 反馈）
             if let url = URL(string: String(body.dropFirst(5))),
                url.scheme == "https" || url.scheme == "http" || url.scheme == "mailto" {
-                DispatchQueue.main.async { NSWorkspace.shared.open(url) }
+                DispatchQueue.main.async {
+                    if url.scheme == "mailto" {
+                        openMailto(url)        // 无默认邮件客户端时静默失败，走兜底分支
+                    } else {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
             }
             return
         }
