@@ -298,6 +298,49 @@ func openMailto(_ url: URL) {
     alert.runModal()
 }
 
+// 自动粘贴：合成 ⌘V + 回车，让无 CLI 注入的终端（Warp / VS Code / Cursor…）一键直达会话。
+// 首次未授权时 kAXTrustedCheckOptionPrompt=true 会拉起系统授权框，我们再补一个引导 NSAlert
+// 兜底（提示用户去系统设置授权 + 当次仍可手动粘贴）。
+func autoPasteEnter() {
+    let opt = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
+    let trusted = AXIsProcessTrustedWithOptions([opt: true] as CFDictionary)
+    if !trusted {
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        let lang = Locale.preferredLanguages.first ?? "en"
+        if lang.hasPrefix("zh") {
+            alert.messageText = "需要「辅助功能」权限"
+            alert.informativeText = "AgentDeck 需要辅助功能权限才能自动粘贴并回车。请去 系统设置 → 隐私与安全性 → 辅助功能 勾选 AgentDeck，然后重新点击恢复按钮。本次命令已复制到剪贴板，可手动 ⌘V 回车。"
+            alert.addButton(withTitle: "好的")
+        } else if lang.hasPrefix("ja") {
+            alert.messageText = "アクセシビリティ権限が必要"
+            alert.informativeText = "自動ペースト+Enter には、システム設定 → プライバシーとセキュリティ → アクセシビリティ で AgentDeck を許可してください。コマンドはクリップボードにコピー済み、今回は手動で ⌘V + Enter を実行できます。"
+            alert.addButton(withTitle: "OK")
+        } else {
+            alert.messageText = "Accessibility permission required"
+            alert.informativeText = "Grant AgentDeck under System Settings → Privacy & Security → Accessibility to enable auto paste & return. The command is on the clipboard; you can ⌘V + Return manually this time."
+            alert.addButton(withTitle: "OK")
+        }
+        alert.runModal()
+        return
+    }
+    // 已授权：等 ~800ms 让目标终端拿到焦点（open -a 异步前台），再合成按键
+    DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.8) {
+        let src = CGEventSource(stateID: .hidSystemState)
+        let kV: CGKeyCode = 0x09, kReturn: CGKeyCode = 0x24
+        if let d = CGEvent(keyboardEventSource: src, virtualKey: kV, keyDown: true),
+           let u = CGEvent(keyboardEventSource: src, virtualKey: kV, keyDown: false) {
+            d.flags = .maskCommand; u.flags = .maskCommand
+            d.post(tap: .cghidEventTap); u.post(tap: .cghidEventTap)
+        }
+        Thread.sleep(forTimeInterval: 0.08)   // 让目标 App 消化完 paste 再发回车
+        if let d = CGEvent(keyboardEventSource: src, virtualKey: kReturn, keyDown: true),
+           let u = CGEvent(keyboardEventSource: src, virtualKey: kReturn, keyDown: false) {
+            d.post(tap: .cghidEventTap); u.post(tap: .cghidEventTap)
+        }
+    }
+}
+
 // JS → 原生桥：面板内「退出」按钮经此通道终止 App
 final class ControlBridge: NSObject, WKScriptMessageHandler {
     static let shared = ControlBridge()
@@ -331,6 +374,8 @@ final class ControlBridge: NSObject, WKScriptMessageHandler {
             DispatchQueue.main.async { delegate?.showPanel() }
         case "hide":    // 跳转会话成功 → 收起主面板，让目标终端独占前台
             DispatchQueue.main.async { delegate?.hidePanel() }
+        case "paste-enter":   // 「唤起后自动粘贴」开启时合成 ⌘V + 回车（需辅助功能授权）
+            DispatchQueue.main.async { autoPasteEnter() }
         case "sync":    // 设置变更 → 刷新菜单栏 + 桌面小组件（语言 / 外观跟随主面板）
             DispatchQueue.main.async {
                 delegate?.updateIconState()

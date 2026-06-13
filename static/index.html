@@ -906,6 +906,8 @@ const I18N = {
     'update.available': '新版本 {v} 可用', 'update.go': '前往下载',
     'set.language': '语言', 'set.langAuto': '跟随系统',
     'set.resumeMethod': '恢复方式', 'set.resumeMethodHint': '仅列已安装终端', 'set.termAuto': '自动（按优先级）', 'set.termCopy': '仅复制命令',
+    'set.autoPasteResume': '唤起后自动粘贴',
+    'set.autoPasteResumeHint': '对 Warp / VS Code / Cursor 等无 CLI 注入的终端，唤起后模拟 ⌘V + 回车直达会话；首次使用会弹「辅助功能」系统授权',
     'set.dataManage': '数据管理', 'set.dataManageHint': '数据仅存本机',
     'set.openData': '打开数据目录', 'set.exportCsv': '导出用量 CSV', 'set.clearEvents': '清空完成记录',
     'set.custom': '自定义', 'set.dataLocal': '数据仅存本机',
@@ -990,6 +992,8 @@ const I18N = {
     'update.available': 'Version {v} available', 'update.go': 'Download',
     'set.language': 'Language', 'set.langAuto': 'Follow system',
     'set.resumeMethod': 'Resume method', 'set.resumeMethodHint': 'Only installed terminals', 'set.termAuto': 'Auto (by priority)', 'set.termCopy': 'Copy command only',
+    'set.autoPasteResume': 'Auto paste & return',
+    'set.autoPasteResumeHint': 'For Warp / VS Code / Cursor and other terminals without CLI injection, simulate ⌘V + Return after focusing. First use prompts for Accessibility permission',
     'set.dataManage': 'Data management', 'set.dataManageHint': 'Data stays on this Mac',
     'set.openData': 'Open data folder', 'set.exportCsv': 'Export usage CSV', 'set.clearEvents': 'Clear done events',
     'set.custom': 'Custom', 'set.dataLocal': 'Data stays on this Mac',
@@ -1074,6 +1078,8 @@ const I18N = {
     'update.available': '新バージョン {v} が利用可能', 'update.go': 'ダウンロード',
     'set.language': '言語', 'set.langAuto': 'システムに従う',
     'set.resumeMethod': '再開方法', 'set.resumeMethodHint': 'インストール済みのみ表示', 'set.termAuto': '自動（優先度順）', 'set.termCopy': 'コマンドをコピーのみ',
+    'set.autoPasteResume': '起動後に自動ペースト',
+    'set.autoPasteResumeHint': 'Warp / VS Code / Cursor などコマンド注入できない端末で、起動後に ⌘V + Enter を自動入力。初回はアクセシビリティ許可が必要',
     'set.dataManage': 'データ管理', 'set.dataManageHint': 'データはこの Mac のみ',
     'set.openData': 'データフォルダを開く', 'set.exportCsv': '使用量 CSV を書き出す', 'set.clearEvents': '完了記録を消去',
     'set.custom': 'カスタム', 'set.dataLocal': 'データはこの Mac のみ',
@@ -1530,6 +1536,11 @@ $('#slist').addEventListener('click', async e => {
       try {
         await navigator.clipboard.writeText(r.command);
         toast(r.paste ? t('session.openedPaste', {app: r.app || ''}) : t('session.cmdCopied'));
+        // 用户开启「唤起后自动粘贴」+ 唤起式终端：让 Swift 收起面板 + 合成 ⌘V+回车
+        if (r.paste && r.auto_paste && bridge) {
+          bridge.postMessage('hide');
+          bridge.postMessage('paste-enter');
+        }
       } catch { toast(t('session.copyFailed')); }
     } else {
       toast(r.ok ? t('session.resumed') : t('session.resumeFailedReason', {err: r.error || ''}));
@@ -1892,6 +1903,7 @@ const SET_SCHEMA = [
   {sec: 'set.secResume'},
   {key: 'terminal', label: 'set.resumeMethod', hint: 'set.resumeMethodHint', type: 'select',
    opts: ['auto', 'copy'], optKeys: {auto: 'set.termAuto', copy: 'set.termCopy'}},
+  {key: 'auto_paste_resume', label: 'set.autoPasteResume', hint: 'set.autoPasteResumeHint', type: 'toggle'},
   {sec: 'set.secSystem'},
   {key: 'keep_awake', label: 'set.keepAwake', hint: 'set.keepAwakeHint', type: 'toggle'},
   {key: 'update_check', label: 'set.updateCheck', hint: 'set.updateCheckHint', type: 'toggle'},

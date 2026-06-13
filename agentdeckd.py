@@ -106,6 +106,7 @@ DEFAULT_SETTINGS = {
     "sample_interval": 180,    # 历史曲线采样间隔（秒）——只影响记录密度，不决定查询频率
     "quota_interval": 600,     # 额度查询间隔（秒）——Claude 直接决定外部 API 频率（调大可避限流），Codex 为本地读取节流
     "terminal": "auto",        # auto | iterm | terminal | copy
+    "auto_paste_resume": False,    # 唤起 Warp/VS Code 等无 CLI 注入终端后，自动模拟 ⌘V + 回车（需辅助功能授权）
     "font_scale": 100,         # 面板/小组件字体缩放 %（整体 zoom）
     "color_claude": "",        # 自定义 Claude 主色（#rrggbb）；空=内置橙
     "color_codex": "",         # 自定义 Codex 主色（#rrggbb）；空=内置青
@@ -2353,8 +2354,10 @@ def api_resume(body):
         if r.returncode != 0:    # 该 App 不接受目录参数时退化为仅打开
             subprocess.run(["open", "-a", app], capture_output=True, timeout=20)
         disp = next(d for m, _, d in _PASTE_TERMS if m == mode)
+        # 用户开启「唤起后自动粘贴」时由前端经 Swift 桥合成 ⌘V + 回车（需辅助功能授权）
+        auto_paste = bool(get_settings().get("auto_paste_resume"))
         return {"ok": True, "copy": True, "paste": True, "command": cmd,
-                "terminal": mode, "app": disp}
+                "terminal": mode, "app": disp, "auto_paste": auto_paste}
 
     if mode == "iterm":
         script = (
