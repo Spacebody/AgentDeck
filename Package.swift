@@ -20,6 +20,9 @@ let package = Package(
         .target(
             name: "AgentDeckKit",
             path: "Sources/AgentDeckKit",
+            resources: [
+                .copy("Brand"),   // 官方品牌字形（claude/codex tray 模板图），经 Bundle.module 取
+            ],
             swiftSettings: [
                 // 现有 AppKit 壳与迁移期代码沿用 Swift 5 语言模式，回避 Swift 6 严格并发。
                 .swiftLanguageMode(.v5),

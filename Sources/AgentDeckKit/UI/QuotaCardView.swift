@@ -37,18 +37,49 @@ struct RingView: View {
     }
 }
 
-// MARK: - 品牌徽章（里程碑期用 SF Symbol 兜底；接入时换官方品牌字形 PNG mask）
+// MARK: - 官方品牌字形（claude/codex tray 模板图，currentColor 上色）。
+// 复刻 index.html badge()：claude mask-size 141%（图内留白，放大填充）、codex contain。
+struct BrandGlyph: View {
+    let brand: Brand
+    /// 字形显示边长（v1：qbadge 20 内 glyph 12）
+    var glyph: CGFloat = 12
+
+    private static func image(_ brand: Brand) -> NSImage? {
+        guard let url = Bundle.module.url(forResource: brand.rawValue, withExtension: "png",
+                                          subdirectory: "Brand") else { return nil }
+        let img = NSImage(contentsOf: url)
+        img?.isTemplate = true
+        return img
+    }
+
+    var body: some View {
+        Group {
+            if let img = Self.image(brand) {
+                Image(nsImage: img).resizable().renderingMode(.template)
+                    .aspectRatio(contentMode: .fit)
+                    .scaleEffect(brand == .claude ? 1.41 : 1)   // claude 放大填充留白
+                    .foregroundStyle(brand.accent)
+            } else {   // 资源缺失兜底
+                Image(systemName: brand == .claude ? "sparkle" : "apple.terminal")
+                    .font(.system(size: glyph, weight: .medium))
+                    .foregroundStyle(brand.accent)
+            }
+        }
+        .frame(width: glyph, height: glyph)
+        .clipped()
+    }
+}
+
+// MARK: - 品牌徽章（.qbadge：品牌色底 + 描边 + 官方字形）
 struct BrandBadge: View {
     let brand: Brand
     var size: CGFloat = 20
     var body: some View {
         RoundedRectangle(cornerRadius: 7, style: .continuous)
-            .fill(brand.accent.opacity(0.15))
+            .fill(brand.accent.opacity(0.14))
             .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .strokeBorder(brand.accent.opacity(0.30)))
-            .overlay(Image(systemName: brand == .claude ? "sparkle" : "apple.terminal")
-                .font(.system(size: size * 0.58, weight: .medium))
-                .foregroundStyle(brand.accent))
+                .strokeBorder(brand.accent.opacity(0.28)))
+            .overlay(BrandGlyph(brand: brand, glyph: size * 0.6))
             .frame(width: size, height: size)
     }
 }
