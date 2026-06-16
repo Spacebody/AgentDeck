@@ -409,9 +409,14 @@ copyBtn.addEventListener('click', async () => {
 });
 
 // ── 版本号：与 App 共用同一份清单 ──
+// 下载按钮直链最新 DMG：清单显式给 dmg 则用之，否则按命名规律（tag=v{ver}、资产=AgentDeck-{ver}.dmg）
+// 从版本号推导；都拿不到时回退到 m.url（Releases 页）。
 fetch('version.json').then(r => r.json()).then(m => {
   if (m.version) document.getElementById('ver').textContent = 'v' + m.version;
-  if (m.url) document.getElementById('dl').href = m.url;
+  const dmg = m.dmg || (m.version
+    ? 'https://github.com/Spacebody/AgentDeck/releases/download/v' + m.version + '/AgentDeck-' + m.version + '.dmg'
+    : m.url);
+  if (dmg) document.getElementById('dl').href = dmg;
 }).catch(() => {});
 
 // ── 进场 / 滚动渐显 ──

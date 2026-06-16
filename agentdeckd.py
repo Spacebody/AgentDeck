@@ -51,6 +51,9 @@ CODEX_QUOTA_TTL = 30           # Codex 是本地 jsonl 解析，无外部限流�
 # 更新检测：向自托管的 Cloudflare Pages 清单查最新版本号（不带任何凭据；可在设置中关闭）。
 # 部署后把域名改成你的 Pages 项目地址即可。
 UPDATE_MANIFEST_URL = "https://agentdeck.yilin.dev/version.json"
+# GitHub Releases 基址：清单未显式给 dmg 直链时，按固定命名（tag=v{ver}、资产=AgentDeck-{ver}.dmg，
+# 由 build.sh 强制）从版本号推导最新 DMG 直链，发版无需额外维护字段。
+GITHUB_RELEASES = "https://github.com/Spacebody/AgentDeck/releases"
 
 # 模型单价 (USD / MTok): (input, output, cache_read, cache_write)
 MODEL_PRICES = {   # $/Mtok: input, output, cache_read, cache_write_5m, cache_write_1h
@@ -518,9 +521,14 @@ def api_update(force=False):
     except Exception:
         return {"current": VERSION, "available": False, "error": True}
     latest = str(m.get("version") or "")
+    # dmg 直链：清单显式给则用之，否则按命名规律从版本号推导（面板「下载新版」直接下 DMG，不跳页）
+    dmg = str(m.get("dmg") or "")
+    if not dmg and latest:
+        dmg = f"{GITHUB_RELEASES}/download/v{latest}/AgentDeck-{latest}.dmg"
     return {"current": VERSION, "latest": latest,
             "available": bool(latest) and _ver_key(latest) > _ver_key(VERSION),
             "url": str(m.get("url") or ""),
+            "dmg": dmg,
             "notes_url": str(m.get("notes_url") or "")}
 
 

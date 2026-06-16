@@ -2212,7 +2212,7 @@ function renderUpdateBar() {
   el.innerHTML = `<span>✨ ${t('update.available', {v: 'v' + esc(_update.latest)})}</span>
     <button type="button" class="ubgo">${t('update.go')}</button>
     <button type="button" class="ubclose" title="${t('common.close')}">✕</button>`;
-  el.querySelector('.ubgo').onclick = () => openExternal(_update.url || _update.notes_url);
+  el.querySelector('.ubgo').onclick = () => openExternal(_update.dmg || _update.url || _update.notes_url);
   el.querySelector('.ubclose').onclick = () => {
     el.dataset.dismissed = '1'; el.style.display = 'none';
   };

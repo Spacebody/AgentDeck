@@ -15,6 +15,57 @@ BUNDLE_ID="com.agentdeck.app"
 MIN_MACOS="13.0"   # 部署目标：不显式指定时 swiftc 会按构建机系统版本打 minos，
                    # 在更低系统上直接拒绝启动（实测 macOS 26 上构建会要求 26）。
 
+# ── 签名 / 公证（可选，仅 dmg 分发用）──────────────────────────────────────
+# SIGN_ID：Developer ID Application 证书名；不设则自动探测本机第一张。缺证书时
+#   回退 ad-hoc 签名（本机可跑，但他人下载会被 Gatekeeper 拦）。
+# NOTARY_PROFILE：notarytool 钥匙串凭证 profile 名，一次性配好后 dmg 目标自动公证：
+#   xcrun notarytool store-credentials AgentDeck \
+#     --apple-id <AppleID> --team-id <TeamID> --password <App专用密码>
+# 末尾 || true：无证书时 grep 不匹配会以 1 退出，叠加 set -euo pipefail 会让整脚本
+# 在此处静默夭折（实测 exit 1、零输出）。兜底为空串即可正常回退 ad-hoc。
+SIGN_ID="${SIGN_ID:-$(security find-identity -v -p codesigning 2>/dev/null \
+  | grep 'Developer ID Application' | head -1 | sed -E 's/.*"(.*)".*/\1/' || true)}"
+NOTARY_PROFILE="${NOTARY_PROFILE:-AgentDeck}"
+
+# 签名 .app：有 Developer ID 则带「硬化运行时 + 安全时间戳」（公证前置条件），
+# 否则回退 ad-hoc。无内嵌 framework/helper，故不需 --deep。
+sign_app() {
+  if [ -n "$SIGN_ID" ]; then
+    echo "▸ Developer ID 签名（硬化运行时）: $SIGN_ID"
+    codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$APP"
+  else
+    echo "  ⚠️ 未找到 Developer ID Application 证书 → ad-hoc 签名（不可公证分发）"
+    codesign --force --deep -s - "$APP" 2>/dev/null || true
+  fi
+}
+
+# 公证并装订票据（仅对已签名的 DMG 调用；Apple 公证 DMG 时会一并覆盖内部 .app）。
+# 缺证书或未配 profile 时跳过；--wait 因网络中断时不掐断构建（提交多半已在 Apple 端
+# 继续处理，DMG 已生成只是未装订），打印补救步骤后照常返回。
+notarize() {
+  local target="$1"
+  if [ -z "$SIGN_ID" ]; then
+    echo "  ⚠️ 无 Developer ID 证书，跳过公证: $(basename "$target")"; return 0
+  fi
+  if ! xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" >/dev/null 2>&1; then
+    echo "  ⚠️ 未配置 notarytool 凭证 profile「$NOTARY_PROFILE」，跳过公证"
+    echo "     一次性配置: xcrun notarytool store-credentials $NOTARY_PROFILE \\"
+    echo "                   --apple-id <AppleID> --team-id <TeamID> --password <App专用密码>"
+    return 0
+  fi
+  echo "▸ 提交公证（--wait，可能数分钟）: $(basename "$target")"
+  if ! xcrun notarytool submit "$target" --keychain-profile "$NOTARY_PROFILE" --wait; then
+    echo "  ⚠️ 公证未在本地等到结果（多为网络中断）。DMG 已签名生成但未装订。"
+    echo "     提交可能仍在 Apple 端处理；确认 Accepted 后手动装订即可，无需重新构建："
+    echo "       xcrun notarytool history --keychain-profile $NOTARY_PROFILE   # 查最近提交状态"
+    echo "       xcrun stapler staple \"$target\""
+    return 0
+  fi
+  echo "▸ 装订票据（stapler）: $(basename "$target")"
+  xcrun stapler staple "$target"
+  xcrun stapler validate "$target"
+}
+
 build() {
   echo "▸ 编译 AgentDeck.app ($VERSION) — 通用二进制 (arm64+x86_64)，最低 macOS ${MIN_MACOS}…"
   rm -rf "$APP"
@@ -63,7 +114,7 @@ build() {
 </dict>
 </plist>
 EOF
-  codesign --force --deep -s - "$APP" 2>/dev/null
+  sign_app
   echo "✓ 构建完成: $APP"
 }
 
@@ -132,6 +183,7 @@ EOF
     hdiutil convert "$RW" -format UDZO -o "$FINAL" >/dev/null
     rm -f "$RW"
     rm -rf "$STAGE"
+    notarize "$FINAL"   # 公证+装订 DMG，用户下载首次打开不再被 Gatekeeper 拦
     echo "✓ $FINAL"
     ;;
   uninstall)
