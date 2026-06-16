@@ -124,22 +124,26 @@ struct QuotaCardView: View {
     let node: QuotaNode?
     /// 多账号时显示的账号名（carousel 页）。
     var accountLabel: String? = nil
+    /// 小组件紧凑模式：圆角 16、去重置进度条、内距收紧（对应 body.wgt .qcard）。
+    var compact: Bool = false
 
     private var name: String { brand == .claude ? "Claude" : "Codex" }
+    private var radius: CGFloat { compact ? 16 : Theme.rLg }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             content
         }
-        .padding(EdgeInsets(top: 13, leading: 13, bottom: 11, trailing: 13))
+        .padding(compact ? EdgeInsets(top: 10, leading: 11, bottom: 8, trailing: 11)
+                         : EdgeInsets(top: 13, leading: 13, bottom: 11, trailing: 13))
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(alignment: .topTrailing) {   // qcard::before 品牌辉光（右上角径向）
             RadialGradient(colors: [brand.tint, .clear], center: .topTrailing,
                            startRadius: 0, endRadius: 170)
                 .allowsHitTesting(false)
         }
-        .glassCard()
-        .clipShape(RoundedRectangle(cornerRadius: Theme.rLg, style: .continuous))
+        .glassCard(radius: radius)
+        .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
     }
 
     @ViewBuilder private var content: some View {
@@ -190,7 +194,7 @@ struct QuotaCardView: View {
                     if !cd.isEmpty {
                         Text(cd).font(.system(size: 10.5)).foregroundStyle(Theme.ink3)
                     }
-                    if let elapsed = main.resetElapsed() {   // .qreset 重置进度微条
+                    if !compact, let elapsed = main.resetElapsed() {   // .qreset 重置进度微条（widget 隐藏）
                         ZStack(alignment: .leading) {
                             Capsule().fill(Color.white.opacity(0.10))
                             Capsule().fill(Color.white.opacity(0.32))

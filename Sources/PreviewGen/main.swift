@@ -5,7 +5,7 @@ import AgentDeckKit
 
 // 用法：PreviewGen [overview|charts|sessions] [outPath]
 var args = Array(CommandLine.arguments.dropFirst())
-let mode = ["charts", "sessions", "settings"].contains(args.first) ? args.removeFirst() : "overview"
+let mode = ["charts", "sessions", "settings", "widget"].contains(args.first) ? args.removeFirst() : "overview"
 let outPath = args.first ?? "/tmp/agentdeck-\(mode).png"
 
 let data = MainActor.assumeIsolated { () -> Data? in
@@ -13,6 +13,7 @@ let data = MainActor.assumeIsolated { () -> Data? in
     case "charts":   return PreviewRender.chartsPNG()
     case "sessions": return PreviewRender.sessionsPNG()
     case "settings": return PreviewRender.settingsPNG()
+    case "widget":   return PreviewRender.widgetPNG()
     default:         return PreviewRender.overviewPNG()
     }
 }

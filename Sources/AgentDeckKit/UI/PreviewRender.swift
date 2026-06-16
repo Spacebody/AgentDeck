@@ -40,6 +40,14 @@ public enum PreviewRender {
         }, scale: scale)
     }
 
+    /// 桌面小组件紧凑视图。
+    public static func widgetPNG(scale: CGFloat = 2) -> Data? {
+        png(WidgetChrome {
+            WidgetView(quota: PreviewSamples.response, today: PreviewSamples.today,
+                       active: PreviewSamples.active)
+        }, scale: scale)
+    }
+
     static func png<V: View>(_ view: V, scale: CGFloat) -> Data? {
         let renderer = ImageRenderer(content: view)
         renderer.scale = scale
