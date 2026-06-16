@@ -26,10 +26,9 @@ struct SettingsView: View {
 
     var body: some View {
         let content = VStack(alignment: .leading, spacing: 0) {
-            HStack { Text("设置").font(.rounded(17, weight: .heavy)); Spacer() }
-                .padding(.bottom, 6)
+            // 标题由外壳 .sethead 提供（设置浮层顶部），此处直接从首个分区开始。
             ForEach(Array(groups.enumerated()), id: \.offset) { _, g in
-                Text(g.title.uppercased())
+                Text(L(g.title).uppercased())
                     .font(.system(size: 12, weight: .heavy)).foregroundStyle(Theme.ink2)
                     .tracking(1.2).padding(.top, 14).padding(.bottom, 7).padding(.leading, 4)
                 VStack(spacing: 0) {
@@ -41,7 +40,7 @@ struct SettingsView: View {
                 .padding(.horizontal, 13)
                 .glassCard()
             }
-            Text("AgentDeck v\(version)")
+            Text("AgentDeck v\(version) · \(L("set.dataLocal"))")
                 .font(.rounded(9)).foregroundStyle(Theme.ink3)
                 .frame(maxWidth: .infinity).padding(.top, 10)
         }
@@ -64,7 +63,7 @@ struct SettingsView: View {
             setrow(label, hint) {
                 HStack(spacing: 4) {
                     ForEach(opts, id: \.0) { k, name in
-                        Chip(text: name, on: values[k]?.boolVal ?? false) { onSet(k, .bool(!(values[k]?.boolVal ?? false))) }
+                        Chip(text: L(name), on: values[k]?.boolVal ?? false) { onSet(k, .bool(!(values[k]?.boolVal ?? false))) }
                     }
                 }
             }
@@ -77,7 +76,7 @@ struct SettingsView: View {
                         }
                         .labelsHidden().frame(width: 22, height: 22)
                     }
-                    Button("恢复默认", action: onResetColors)
+                    Button(L("set.resetColors"), action: onResetColors)
                         .buttonStyle(.plain).font(.system(size: 9.5)).foregroundStyle(Theme.ink3)
                 }
             }
@@ -85,7 +84,7 @@ struct SettingsView: View {
             setrow(label, hint) {
                 HStack(spacing: 6) {
                     ForEach(btns, id: \.0) { act, name in
-                        Button(name) { onAction(act) }
+                        Button(L(name)) { onAction(act) }
                             .buttonStyle(.plain).font(.system(size: 9.5, weight: .semibold))
                             .foregroundStyle(Theme.ink)
                             .padding(.horizontal, 10).padding(.vertical, 5)
@@ -100,8 +99,8 @@ struct SettingsView: View {
     private func setrow<C: View>(_ label: String, _ hint: String?, @ViewBuilder control: () -> C) -> some View {
         HStack(alignment: .center, spacing: 10) {
             VStack(alignment: .leading, spacing: 3) {
-                Text(label).font(.system(size: 13)).foregroundStyle(Theme.ink)
-                if let hint { Text(hint).font(.system(size: 10.5)).foregroundStyle(Theme.ink3) }
+                Text(L(label)).font(.system(size: 13)).foregroundStyle(Theme.ink)
+                if let hint { Text(L(hint)).font(.system(size: 10.5)).foregroundStyle(Theme.ink3) }
             }
             Spacer(minLength: 8)
             control()
@@ -129,7 +128,7 @@ struct SettingsView: View {
                         .background(Capsule().fill(Color.white.opacity(0.10)))
                         .onSubmit { commitEdit(key, custom!) }
                 } else {
-                    Chip(text: "自定义", on: false) { startEdit(key, cur) }
+                    Chip(text: L("set.custom"), on: false) { startEdit(key, cur) }
                 }
             }
         }
@@ -138,10 +137,10 @@ struct SettingsView: View {
     private func selectMenu(key: String, opts: [(String, String)]) -> some View {
         let cur = values[key]?.stringVal ?? opts.first?.0 ?? ""
         return Menu {
-            ForEach(opts, id: \.0) { v, name in Button(name) { onSet(key, .string(v)) } }
+            ForEach(opts, id: \.0) { v, name in Button(L(name)) { onSet(key, .string(v)) } }
         } label: {
             HStack(spacing: 5) {
-                Text(opts.first { $0.0 == cur }?.1 ?? cur).font(.system(size: 10.5, weight: .semibold))
+                Text(L(opts.first { $0.0 == cur }?.1 ?? cur)).font(.system(size: 10.5, weight: .semibold))
                 Image(systemName: "chevron.down").font(.system(size: 7, weight: .bold))
             }
             .foregroundStyle(Theme.ink)

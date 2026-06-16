@@ -63,7 +63,7 @@ struct TodayBar: View {
     }
 
     private var text: some View {
-        var s = Text("今日 ").foregroundColor(Theme.ink2)
+        var s = Text(L("info.todayTerm") + " ").foregroundColor(Theme.ink2)
             + Text(Fmt.tokens(summary.totalTokens)).font(.rounded(11.5, weight: .bold)).foregroundColor(Theme.ink)
             + Text(" tok").foregroundColor(Theme.ink2)
             + Text("  ·  ").foregroundColor(Theme.ink3)
@@ -118,7 +118,7 @@ struct ActiveCard: View {
                 HStack(spacing: 6) {
                     Circle().fill(Theme.ok).frame(width: 6, height: 6)
                         .shadow(color: Theme.ok, radius: 3)
-                    Text("\(sessions.count) 个运行中")
+                    Text(L("active.running", ["n": "\(sessions.count)"]))
                         .font(.system(size: 11, weight: .bold)).foregroundStyle(Theme.ink2)
                 }
                 .padding(.bottom, 4)
@@ -129,7 +129,7 @@ struct ActiveCard: View {
                         monospaced: true,
                         trailing: AnyView(HStack(spacing: 6) {
                             if a.host == "app" { tag("App") }
-                            Text("已运行 " + runtime(a)).font(.system(size: 10.5)).foregroundStyle(Theme.ink2)
+                            Text(L("active.runningFor", ["dur": runtime(a)])).font(.system(size: 10.5)).foregroundStyle(Theme.ink2)
                             if let st = a.status, !st.isEmpty { statePill(st) }
                         }),
                         onTap: { onTap(a) })
@@ -144,7 +144,7 @@ struct ActiveCard: View {
     private func prettyPath(_ a: ActiveSession) -> String {
         let raw = a.cwd ?? a.project ?? ""
         let p = raw.replacingOccurrences(of: #"^/Users/[^/]+"#, with: "~", options: .regularExpression)
-        return p == "~" ? "主目录" : p
+        return p == "~" ? L("active.homeDir") : p
     }
     private func runtime(_ a: ActiveSession) -> String {
         if let s = a.runtimeSecs { return Fmt.duration(s) }
@@ -157,7 +157,7 @@ struct ActiveCard: View {
     }
     private func statePill(_ st: String) -> some View {
         let busy = st == "busy"
-        return Text(busy ? "忙碌" : "空闲")
+        return Text(busy ? L("active.busy") : L("active.idle"))
             .font(.system(size: 9, weight: .bold))
             .foregroundStyle(busy ? Theme.warn : Theme.ok)
             .padding(.horizontal, 7).padding(.vertical, 2)
@@ -173,13 +173,13 @@ struct DoneCard: View {
     var body: some View {
         if !events.isEmpty {
             VStack(alignment: .leading, spacing: 2) {
-                Text("最近完成")
+                Text(L("done.recent"))
                     .font(.system(size: 11, weight: .bold)).foregroundStyle(Theme.ink2)
                     .padding(.bottom, 4)
                 ForEach(Array(events.enumerated()), id: \.offset) { _, e in
                     SessionRow(
                         tool: e.tool,
-                        title: (e.title?.isEmpty == false ? e.title! : "任务完成"),
+                        title: (e.title?.isEmpty == false ? e.title! : L("done.taskDone")),
                         monospaced: false,
                         trailing: AnyView(HStack(spacing: 6) {
                             if let p = e.project, !p.isEmpty {

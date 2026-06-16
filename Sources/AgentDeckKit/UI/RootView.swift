@@ -184,12 +184,13 @@ public struct AgentDeckRootView: View {
     // MARK: 更新横幅
     private var updateBar: some View {
         HStack(spacing: 10) {
-            Text("✨ 新版本 v\(store.update?.latest ?? "") 可用").font(.system(size: 12)).foregroundStyle(Theme.ink)
+            Text("✨ " + L("update.available", ["v": "v\(store.update?.latest ?? "")"]))
+                .font(.system(size: 12)).foregroundStyle(Theme.ink)
             Spacer(minLength: 6)
             Button {
                 onOpenExternal(store.update?.dmg ?? store.update?.url ?? "")
             } label: {
-                Text("前往下载").font(.system(size: 11, weight: .bold)).foregroundStyle(Theme.ink)
+                Text(L("update.go")).font(.system(size: 11, weight: .bold)).foregroundStyle(Theme.ink)
                     .padding(.horizontal, 12).padding(.vertical, 4)
                     .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.10)))
                     .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Theme.edge))
@@ -211,8 +212,8 @@ public struct AgentDeckRootView: View {
     // MARK: Tab 栏
     private var tabbar: some View {
         HStack(spacing: 3) {
-            tabButton("overview", icon: "chart.bar.fill", label: "概览")
-            tabButton("sessions", icon: "bubble.left.fill", label: "会话")
+            tabButton("overview", icon: "chart.bar.fill", label: L("tab.overview"))
+            tabButton("sessions", icon: "bubble.left.fill", label: L("tab.sessions"))
         }
         .padding(3)
         .background {
@@ -273,14 +274,14 @@ public struct AgentDeckRootView: View {
             VStack(spacing: 10) {
                 HStack(spacing: 8) {
                     IconButton(system: "chevron.left", weight: .bold, fontSize: 15) { showSettings = false }
-                    Text("设置").font(.rounded(17, weight: .heavy)).foregroundStyle(Theme.ink)
+                    Text(L("header.settings")).font(.rounded(17, weight: .heavy)).foregroundStyle(Theme.ink)
                     Spacer()
                 }
                 SettingsView(
                     values: store.settings, scrollable: !previewMode,
                     onSet: { store.setSetting($0, $1) },
                     onAction: settingsAction,
-                    onResetColors: { store.resetColors(); showToast("已恢复默认配色") },
+                    onResetColors: { store.resetColors(); showToast(L("set.colorsReset")) },
                     version: version)
             }
             .padding(14)
@@ -295,7 +296,7 @@ public struct AgentDeckRootView: View {
                 .onTapGesture { info = nil }
             VStack(alignment: .leading, spacing: 0) {
                 HStack {
-                    Text("统计口径").font(.system(size: 13, weight: .bold)).foregroundStyle(Theme.ink)
+                    Text(L("info.title")).font(.system(size: 13, weight: .bold)).foregroundStyle(Theme.ink)
                     Spacer()
                     IconButton(system: "xmark", weight: .bold, fontSize: 11, size: 22) { info = nil }
                 }
@@ -325,29 +326,28 @@ public struct AgentDeckRootView: View {
         }
     }
 
-    private let infoNote = "订阅按窗口限额计费，等值金额仅供参考，不是实际账单。"
+    private var infoNote: String { L("info.note") }
 
     private func infoRows(_ kind: InfoKind) -> [(String, String)] {
         switch kind {
         case .today:
             var rows: [(String, String)] = [
-                ("今日", "本地自然日 0 点起的 token 总量（Claude + Codex）"),
-                ("等值", "按官方 API 单价折算的金额"),
-                ("环比", "近 24 小时 vs 再前 24 小时（滚动窗口，非自然日）"),
+                (L("info.todayTerm"), L("info.todayText")),
+                (L("info.eqTerm"), L("info.eqText")),
+                (L("info.momTerm"), L("info.momText")),
             ]
-            if let fams = todayFamsText { rows.append(("明细", fams)) }
+            if let fams = todayFamsText { rows.append((L("info.detailTerm"), fams)) }
             return rows
         case .usage(let mode):
             let first: (String, String) = {
                 switch mode {
-                case .curve: return ("曲线", "近 24 小时 token 用量，按整点聚合；Claude 已按消息去重，Codex 取会话累计值")
-                case .proj:  return ("项目", "近 7 天按会话所在目录聚合的 token 与等值金额")
-                case .usage: return ("柱状", "近 7 天 token 用量，本地自然日聚合，按模型分段着色")
+                case .curve: return (L("info.curveTerm"), L("info.curveText"))
+                case .proj:  return (L("info.projTerm"), L("info.projText"))
+                case .usage: return (L("info.barTerm"), L("info.barText"))
                 }
             }()
-            var rows = [first,
-                        ("单价", "Claude 按模型与缓存档位（Opus 4.5+ $5/$25，缓存读 $0.5/M，写入分 5m/1h 两档）；Codex 按 gpt-5.5（$5/$30，缓存读 -90%）")]
-            if let split = costSplitText { rows.append(("分项", split)) }
+            var rows = [first, (L("info.priceTerm"), L("info.priceText"))]
+            if let split = costSplitText { rows.append((L("info.splitTerm"), split)) }
             return rows
         }
     }
@@ -363,8 +363,9 @@ public struct AgentDeckRootView: View {
 
     private var costSplitText: String? {
         guard let u = store.usage else { return nil }
-        func r(_ v: Double?) -> Int { Int((v ?? 0).rounded()) }
-        return "Claude 7天 $\(r(u.claudeCost7d)) / 30天 $\(r(u.claudeCost30d)) · Codex 7天 $\(r(u.codexCost7d)) / 30天 $\(r(u.codexCost30d))"
+        func r(_ v: Double?) -> String { "\(Int((v ?? 0).rounded()))" }
+        return L("usage.costSplit", ["c7": r(u.claudeCost7d), "c30": r(u.claudeCost30d),
+                                     "x7": r(u.codexCost7d), "x30": r(u.codexCost30d)])
     }
 
     // MARK: toast
@@ -395,13 +396,13 @@ public struct AgentDeckRootView: View {
     private func focusActive(_ a: ActiveSession) {
         Task {
             let ok = await store.focus(tool: a.tool, id: a.id ?? "", cwd: a.cwd ?? "", pid: a.pid ?? 0)
-            if ok { onHidePanel() } else { showToast("未找到对应终端") }
+            if ok { onHidePanel() } else { showToast(L("active.termNotFound", ["err": ""])) }
         }
     }
     private func focusDone(_ e: DoneEvent) {
         Task {
             let ok = await store.focus(tool: e.tool, id: e.session ?? "", cwd: e.cwd ?? "", pid: 0)
-            if ok { onHidePanel() } else { showToast("未找到对应终端") }
+            if ok { onHidePanel() } else { showToast(L("active.termNotFound", ["err": ""])) }
         }
     }
     private func resume(_ s: SessionItem) {
@@ -409,17 +410,18 @@ public struct AgentDeckRootView: View {
             let r = await store.resume(s)
             if r?.ok == true, r?.copy == true {
                 copyText(r?.command ?? s.resumeCommand)
-                showToast(r?.paste == true ? "已唤起 \(r?.app ?? "")，命令已复制" : "命令已复制")
+                showToast(r?.paste == true ? L("session.openedPaste", ["app": r?.app ?? ""]) : L("session.cmdCopied"))
                 if r?.paste == true, r?.autoPaste == true { onHidePanel(); onPasteEnter() }
             } else {
-                showToast(r?.ok == true ? "已恢复会话" : "恢复失败\(r?.error.map { "：\($0)" } ?? "")")
+                showToast(r?.ok == true ? L("session.resumed")
+                          : L("session.resumeFailedReason", ["err": r?.error ?? ""]))
             }
         }
     }
-    private func copyCommand(_ s: SessionItem) { copyText(s.resumeCommand); showToast("命令已复制") }
+    private func copyCommand(_ s: SessionItem) { copyText(s.resumeCommand); showToast(L("session.cmdCopied")) }
     private func pin(_ s: SessionItem) {
         let wasPinned = s.pinned == true
-        Task { await store.pin(s); showToast(wasPinned ? "已取消置顶" : "已置顶") }
+        Task { await store.pin(s); showToast(L(wasPinned ? "session.unpinned" : "session.pinned")) }
     }
     private func copyText(_ s: String) {
         NSPasteboard.general.clearContents()
@@ -431,22 +433,27 @@ public struct AgentDeckRootView: View {
         case "check_update":
             Task {
                 await store.checkUpdate()
-                if store.updateAvailable { updateDismissed = false; showToast("新版本 v\(store.update?.latest ?? "") 可用") }
-                else { showToast(store.update?.available == nil ? "检查失败，请稍后再试" : "已是最新版本") }
+                if store.updateAvailable {
+                    updateDismissed = false
+                    showToast(L("update.available", ["v": "v\(store.update?.latest ?? "")"]))
+                } else {
+                    showToast(L(store.update?.available == nil ? "update.checkFail" : "update.latest"))
+                }
             }
-        case "feedback_github":
-            let v = version
-            let subject = "[AgentDeck v\(v)] ".addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
-            onOpenExternal("https://github.com/Spacebody/AgentDeck/issues/new?title=\(subject)")
-        case "feedback_email":
-            let v = version
-            let subject = "AgentDeck v\(v) 反馈".addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
-            onOpenExternal("mailto:jerry_zyl@hotmail.com?subject=\(subject)")
+        case "feedback_github", "feedback_email":
+            // 仅预填版本号；不带任何账号/路径，用户自填正文。
+            func enc(_ s: String) -> String { s.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "" }
+            let subject = enc(L("feedback.subject", ["v": version]))
+            let body = enc(L("feedback.body", ["v": version]))
+            onOpenExternal(act == "feedback_github"
+                ? "https://github.com/Spacebody/AgentDeck/issues/new?title=\(subject)&body=\(body)"
+                : "mailto:jerry_zyl@hotmail.com?subject=\(subject)&body=\(body)")
         default:   // open / export / clear_events → POST /api/data
             Task {
                 let (ok, err) = await store.dataAction(act)
-                let names = ["open": "已打开数据目录", "export": "已导出用量 CSV", "clear_events": "已清空完成记录"]
-                showToast(ok ? (names[act] ?? "完成") : "操作失败\(err.map { "：\($0)" } ?? "")")
+                let keys = ["open": "set.openedData", "export": "set.csvExported", "clear_events": "set.eventsCleared"]
+                showToast(ok ? L(keys[act] ?? "common.opFailed")
+                          : L("common.opFailed") + (err.map { "：\($0)" } ?? ""))
             }
         }
     }

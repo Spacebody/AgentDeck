@@ -45,7 +45,7 @@ struct SessionsView: View {
         VStack(alignment: .leading, spacing: 9) {
             header
             if filtered.isEmpty {
-                Text("没有匹配的会话").font(.system(size: 10.5)).foregroundStyle(Theme.ink3)
+                Text(L("session.noMatch")).font(.system(size: 10.5)).foregroundStyle(Theme.ink3)
                     .frame(maxWidth: .infinity, alignment: .center).padding(.top, 26)
             } else {
                 let rows = VStack(spacing: 2) {
@@ -73,9 +73,9 @@ struct SessionsView: View {
 
     private var header: some View {
         HStack(spacing: 7) {
-            Text("会话").font(.system(size: 12.5, weight: .bold))
+            Text(L("session.recent")).font(.system(size: 12.5, weight: .bold))
             ForEach(["all", "claude", "codex"], id: \.self) { f in
-                Chip(text: f == "all" ? "全部" : (f == "claude" ? "Claude" : "Codex"),
+                Chip(text: f == "all" ? L("session.all") : (f == "claude" ? "Claude" : "Codex"),
                      on: filter == f) { filter = f }
             }
             Spacer(minLength: 6)
@@ -86,7 +86,7 @@ struct SessionsView: View {
     private var searchField: some View {
         HStack(spacing: 5) {
             Image(systemName: "magnifyingglass").font(.system(size: 10)).foregroundStyle(Theme.ink3)
-            TextField("搜索", text: $query)
+            TextField(L("session.search"), text: $query)
                 .textFieldStyle(.plain).font(.system(size: 10.5)).foregroundStyle(Theme.ink)
                 .frame(width: 96)
                 .onChange(of: query) { onSearch($0) }
@@ -152,7 +152,7 @@ private struct SessionRow: View {
                     .foregroundStyle(session.pinned == true ? Color(hex: 0xffd479) : Theme.ink2)
             }.buttonStyle(.plain)
             Button(action: onResume) {
-                Text("恢复").font(.system(size: 9.5, weight: .bold)).foregroundStyle(Theme.ink)
+                Text(L("session.resume")).font(.system(size: 9.5, weight: .bold)).foregroundStyle(Theme.ink)
                     .padding(.horizontal, 11).frame(height: 25)
                     .background(Capsule().fill(Color.white.opacity(0.10)))
                     .overlay(Capsule().strokeBorder(Theme.edgeHi))
@@ -171,7 +171,7 @@ private struct SessionRow: View {
             VStack(alignment: .leading, spacing: 5) {
                 ForEach(msgs) { m in
                     HStack(alignment: .top, spacing: 7) {
-                        Text(m.role == "user" ? "你" : "AI")
+                        Text(m.role == "user" ? L("session.roleUser") : L("session.roleAI"))
                             .font(.system(size: 8.5, weight: .heavy))
                             .foregroundStyle(m.role == "user" ? Brand.codex.accent : Brand.claude.accent)
                             .frame(width: 18, alignment: .leading)
@@ -181,7 +181,7 @@ private struct SessionRow: View {
                 }
             }
         } else {
-            Text("无预览").font(.system(size: 9.5)).foregroundStyle(Theme.ink3)
+            Text(L("session.noPreview")).font(.system(size: 9.5)).foregroundStyle(Theme.ink3)
         }
     }
 }

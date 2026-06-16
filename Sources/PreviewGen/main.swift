@@ -10,6 +10,8 @@ let mode = ["charts", "sessions", "settings", "widget", "root", "widgetroot"].co
 let outPath = args.first ?? "/tmp/agentdeck-\(mode).png"
 
 let data = MainActor.assumeIsolated { () -> Data? in
+    // 可经 AD_LOCALE=en|ja 切换预览语言，验证三语布局。
+    if let loc = ProcessInfo.processInfo.environment["AD_LOCALE"] { PreviewRender.setLocale(loc) }
     switch mode {
     case "charts":     return PreviewRender.chartsPNG()
     case "sessions":   return PreviewRender.sessionsPNG()

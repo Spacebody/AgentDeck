@@ -156,7 +156,7 @@ struct QuotaCardView: View {
                 RingView(percent: main?.usedPercent ?? 0, brand: brand)
                 VStack(alignment: .leading, spacing: 9) {   // .qmeta
                     if rest.isEmpty {
-                        Text("无其他窗口").font(.system(size: 10.5)).foregroundStyle(Theme.ink3)
+                        Text(L("quota.noOther")).font(.system(size: 10.5)).foregroundStyle(Theme.ink3)
                     } else {
                         ForEach(rest) { WindowRow(window: $0, brand: brand) }
                     }
@@ -167,7 +167,7 @@ struct QuotaCardView: View {
         } else {
             // 错误/无额度态
             head(main: nil)
-            Text(node?.noQuota == true ? "暂无额度信息" : "额度获取失败")
+            Text(node?.noQuota == true ? L("quota.noQuota") : L("quota.fetchFailed"))
                 .font(.system(size: 10.5)).foregroundStyle(Theme.ink3)
                 .padding(.vertical, 6)
         }

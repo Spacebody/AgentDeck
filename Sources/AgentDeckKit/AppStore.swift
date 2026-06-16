@@ -85,11 +85,13 @@ public final class AppStore: ObservableObject {
         }
         settings = out
         applyCustomColors()
+        I18N.locale = I18N.resolve(settings["language"]?.stringVal ?? "auto")
     }
 
     func setSetting(_ key: String, _ value: SettingValue) {
         settings[key] = value
         applyCustomColors()
+        if key == "language" { I18N.locale = I18N.resolve(value.stringVal) }
         onSettingsChanged?()   // 即时刷新菜单栏（语言/常显用量/告警阈值等）
         Task {
             var body: [String: Any] = [:]

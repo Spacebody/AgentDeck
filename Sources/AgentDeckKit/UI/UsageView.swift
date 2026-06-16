@@ -35,7 +35,11 @@ struct UsageView: View {
     }
 
     private func label(_ m: UsageMode) -> String {
-        switch m { case .curve: return "24小时"; case .usage: return "近 7 天"; case .proj: return "项目 Top" }
+        switch m {
+        case .curve: return L("usage.tabCurve")
+        case .usage: return L("usage.tabUsage")
+        case .proj:  return L("usage.tabProj")
+        }
     }
 
     private var header: some View {
@@ -47,12 +51,20 @@ struct UsageView: View {
             }
             Spacer(minLength: 6)
             if let u = usage {
-                Text("近7天 ≈ $\(Int((u.cost7d ?? 0).rounded())) · 30天 ≈ $\(Int((u.cost30d ?? 0).rounded()))")
+                Text(L("usage.costEq", ["c7": "\(Int((u.cost7d ?? 0).rounded()))",
+                                        "c30": "\(Int((u.cost30d ?? 0).rounded()))"]).strippingBold)
                     .font(.system(size: 10.5)).foregroundStyle(Theme.ink3)
                     .lineLimit(1).truncationMode(.tail)
             }
             InfoButton { showInfo(.usage(mode)) }
         }
+    }
+}
+
+extension String {
+    /// 去掉文案里的 <b></b> 富文本标签（SwiftUI Text 用纯文本）。
+    var strippingBold: String {
+        replacingOccurrences(of: "<b>", with: "").replacingOccurrences(of: "</b>", with: "")
     }
 }
 
@@ -164,8 +176,8 @@ struct Curve24h: View {
     private func legend(_ buckets: [(ts: Double, c: Double, x: Double)]) -> some View {
         let cTot = buckets.reduce(0) { $0 + $1.c }, xTot = buckets.reduce(0) { $0 + $1.x }
         return HStack(spacing: 12) {
-            legendItem(Brand.claude.accent, "Claude 24h", cTot)
-            legendItem(Brand.codex.accent, "Codex 24h", xTot)
+            legendItem(Brand.claude.accent, L("usage.legend24h", ["name": "Claude"]), cTot)
+            legendItem(Brand.codex.accent, L("usage.legend24h", ["name": "Codex"]), xTot)
             Spacer()
         }
         .font(.system(size: 9.5)).foregroundStyle(Theme.ink3)
@@ -273,10 +285,11 @@ struct Week7Bars: View {
     }
 
     private func weekdayLabel(_ day: String, isToday: Bool) -> String {
-        if isToday { return "今天" }
-        let wds = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"]
+        if isToday { return L("usage.today") }
+        let wds = I18N.weekdays[I18N.locale] ?? I18N.weekdays["en"]!
         guard let d = DateFormatter.localDay.date(from: day) else { return "" }
-        return wds[Calendar.current.component(.weekday, from: d) - 1]
+        let name = wds[Calendar.current.component(.weekday, from: d) - 1]
+        return L("weekPrefix") + name   // zh 前缀「周」，en/ja 为空（对应 v1）
     }
 }
 
@@ -286,7 +299,7 @@ struct ProjectTop: View {
     var body: some View {
         let list = usage?.projects7d ?? []
         if list.isEmpty {
-            Text("近 7 天暂无项目用量").font(.system(size: 10.5)).foregroundStyle(Theme.ink3)
+            Text(L("proj.none7d")).font(.system(size: 10.5)).foregroundStyle(Theme.ink3)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             let maxTok = max(list.map { $0.tokens }.max() ?? 1, 1)
