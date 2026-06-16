@@ -119,6 +119,22 @@ enum PreviewSamples {
         DoneEvent(tool: "codex", title: "修复登录回调超时", project: "api-service",
                   ts: Date().timeIntervalSince1970 - 5400, session: "y", cwd: "/Users/jerry/work/api-service"),
     ]
+
+    static let sessions: [SessionItem] = [
+        SessionItem(tool: "claude", id: "a1", title: "重构额度卡为原生 SwiftUI", cwd: "/Users/jerry/Downloads/agentdeck",
+                    project: "agentdeck", branch: "v2-native", mtime: Date().timeIntervalSince1970 - 30,
+                    account: nil, accountId: nil, pinned: true),
+        SessionItem(tool: "codex", id: "b2", title: "修复登录回调超时", cwd: "/Users/jerry/work/api-service",
+                    project: "api-service", branch: "main", mtime: Date().timeIntervalSince1970 - 3600,
+                    account: nil, accountId: nil, pinned: false),
+        SessionItem(tool: "claude", id: "c3", title: "撰写 v1.26 发布说明", cwd: "/Users/jerry/Downloads/agentdeck",
+                    project: "agentdeck", branch: "HEAD", mtime: Date().timeIntervalSince1970 - 86400,
+                    account: nil, accountId: nil, pinned: false),
+    ]
+    static let previewMsgs: [PreviewMsg] = [
+        PreviewMsg(role: "user", text: "把额度卡的进度环改成原生 SwiftUI，要和网页版一模一样"),
+        PreviewMsg(role: "assistant", text: "好的，用 Circle().trim 实现进度环，阈值 ≥80 橙、≥95 红，中心显示百分比，渐变跟随品牌色。"),
+    ]
 }
 
 #Preview("概览 · 额度卡") {

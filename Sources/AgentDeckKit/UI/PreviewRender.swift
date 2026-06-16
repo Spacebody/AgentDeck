@@ -24,6 +24,15 @@ public enum PreviewRender {
         }, scale: scale)
     }
 
+    /// 会话页（含一行展开预览 + 操作可见）。
+    public static func sessionsPNG(scale: CGFloat = 2) -> Data? {
+        let firstKey = PreviewSamples.sessions.first!.rowKey
+        return png(PanelChrome(height: 560) {
+            SessionsView(sessions: PreviewSamples.sessions, scrollable: false,
+                         initialExpanded: firstKey, seededPreviews: [firstKey: PreviewSamples.previewMsgs])
+        }, scale: scale)
+    }
+
     static func png<V: View>(_ view: V, scale: CGFloat) -> Data? {
         let renderer = ImageRenderer(content: view)
         renderer.scale = scale

@@ -3,13 +3,18 @@
 import Foundation
 import AgentDeckKit
 
-// 用法：PreviewGen [outPath] | PreviewGen charts [outPath]
+// 用法：PreviewGen [overview|charts|sessions] [outPath]
 var args = Array(CommandLine.arguments.dropFirst())
-let charts = args.first == "charts"
-if charts { args.removeFirst() }
-let outPath = args.first ?? (charts ? "/tmp/agentdeck-charts.png" : "/tmp/agentdeck-preview.png")
+let mode = ["charts", "sessions"].contains(args.first) ? args.removeFirst() : "overview"
+let outPath = args.first ?? "/tmp/agentdeck-\(mode).png"
 
-let data = MainActor.assumeIsolated { charts ? PreviewRender.chartsPNG() : PreviewRender.overviewPNG() }
+let data = MainActor.assumeIsolated { () -> Data? in
+    switch mode {
+    case "charts":   return PreviewRender.chartsPNG()
+    case "sessions": return PreviewRender.sessionsPNG()
+    default:         return PreviewRender.overviewPNG()
+    }
+}
 guard let data else {
     FileHandle.standardError.write(Data("render failed\n".utf8))
     exit(1)
