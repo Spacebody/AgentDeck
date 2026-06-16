@@ -34,7 +34,12 @@ enum Brand: String, CaseIterable {
     case claude, codex
 
     // 默认主色（--claude #ff9d7a / --codex #8be9e2）
-    var accent: Color { self == .claude ? Color(hex: 0xff9d7a) : Color(hex: 0x8be9e2) }
+    /// 用户自定义主色覆盖（设置 color_claude/color_codex；AppStore.applyCustomColors 写入）。
+    static var customAccents: [Brand: Color?] = [:]
+    var accent: Color {
+        if let c = Brand.customAccents[self] ?? nil { return c }
+        return self == .claude ? Color(hex: 0xff9d7a) : Color(hex: 0x8be9e2)
+    }
     // 渐变深端（--claude-deep #e8744f / --codex-deep #4fd1c5）
     var deep: Color   { self == .claude ? Color(hex: 0xe8744f) : Color(hex: 0x4fd1c5) }
     // 卡片右上角辉光（qcard::before：claude .22 / codex .18 透明度）

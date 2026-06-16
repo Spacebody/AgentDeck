@@ -65,6 +65,29 @@ actor APIClient {
         return try decoder.decode(T.self, from: data)
     }
 
+    /// 原始 JSON 取数（设置值混合类型，绕 Codable）。
+    func getJSON(_ path: String, query: [String: String] = [:]) async throws -> [String: Any] {
+        var comps = URLComponents(string: APIClient.base + path)
+        if !query.isEmpty { comps?.queryItems = query.map { URLQueryItem(name: $0.key, value: $0.value) } }
+        guard let url = comps?.url else { throw APIError.badURL }
+        let (data, resp) = try await session.data(for: URLRequest(url: url))
+        try Self.check(resp)
+        return (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+    }
+
+    /// POST 原始字典 body，返回原始 JSON（设置保存等）。
+    @discardableResult
+    func postJSON(_ path: String, body: [String: Any]) async throws -> [String: Any] {
+        guard let url = URL(string: APIClient.base + path) else { throw APIError.badURL }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let (data, resp) = try await session.data(for: req)
+        try Self.check(resp)
+        return (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+    }
+
     private static func check(_ resp: URLResponse) throws {
         guard let http = resp as? HTTPURLResponse else { return }
         guard (200..<300).contains(http.statusCode) else { throw APIError.http(http.statusCode) }

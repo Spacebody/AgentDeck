@@ -35,7 +35,25 @@ enum SetRow {
     case btns(label: String, hint: String?, btns: [(String, String)])                   // (act, 名)
 }
 
+enum SettingValueKind { case bool, int, string }
+
 enum SettingsSchema {
+    /// 键 → 值类型（解析 /api/settings 时按此映射，避开 JSON Bool/Int 歧义）。
+    static var valueKinds: [String: SettingValueKind] {
+        var m: [String: SettingValueKind] = [:]
+        for r in rows {
+            switch r {
+            case let .toggle(key, _, _): m[key] = .bool
+            case let .chips(key, _, _, _, _, _): m[key] = .int
+            case let .select(key, _, _, _): m[key] = .string
+            case let .multi(_, _, opts): for o in opts { m[o.0] = .bool }
+            case let .colors(_, _, opts): for o in opts { m[o.0] = .string }
+            default: break
+            }
+        }
+        return m
+    }
+
     static let rows: [SetRow] = [
         .section("面板"),
         .select(key: "language", label: "语言", hint: nil,
