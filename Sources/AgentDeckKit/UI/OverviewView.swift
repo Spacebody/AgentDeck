@@ -26,9 +26,12 @@ struct OverviewView: View {
         let codex = quota?.codex
         let showClaude = !(claude?.hidden ?? false)
         let showCodex = !(codex?.hidden ?? false)
+        // accounts 列表（多账号）→ carousel；缺失则回退顶层单账号节点。
+        let claudeAccts = quota?.accounts?.claude ?? (claude.map { [$0] } ?? [])
+        let codexAccts = quota?.accounts?.codex ?? (codex.map { [$0] } ?? [])
         HStack(alignment: .top, spacing: 10) {
-            if showClaude { QuotaCardView(brand: .claude, node: claude) }
-            if showCodex { QuotaCardView(brand: .codex, node: codex) }
+            if showClaude { QuotaCarousel(brand: .claude, accounts: claudeAccts) }
+            if showCodex { QuotaCarousel(brand: .codex, accounts: codexAccts) }
         }
     }
 }

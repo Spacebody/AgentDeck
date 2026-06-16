@@ -10,13 +10,15 @@ struct WidgetView: View {
     var onFocusActive: (ActiveSession) -> Void = { _ in }
 
     var body: some View {
-        VStack(spacing: 7) {
+        let claudeAccts = quota?.accounts?.claude ?? (quota?.claude.map { [$0] } ?? [])
+        let codexAccts = quota?.accounts?.codex ?? (quota?.codex.map { [$0] } ?? [])
+        return VStack(spacing: 7) {
             HStack(alignment: .top, spacing: 7) {
                 if !(quota?.claude?.hidden ?? false) {
-                    QuotaCardView(brand: .claude, node: quota?.claude, compact: true)
+                    QuotaCarousel(brand: .claude, accounts: claudeAccts, compact: true)
                 }
                 if !(quota?.codex?.hidden ?? false) {
-                    QuotaCardView(brand: .codex, node: quota?.codex, compact: true)
+                    QuotaCarousel(brand: .codex, accounts: codexAccts, compact: true)
                 }
             }
             if let today { TodayBar(summary: today) }

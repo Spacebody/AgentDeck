@@ -118,6 +118,70 @@ struct WindowRow: View {
     }
 }
 
+// MARK: - 多账号 carousel（对应 renderQuotaTool）：单账号→单卡；多账号→横向翻页 + 圆点。
+// macOS 13 无 scrollTargetBehavior，手写 offset + 拖拽翻页（宽度经 PreferenceKey 量取）。
+private struct CarouselWidthKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+}
+
+struct QuotaCarousel: View {
+    let brand: Brand
+    let accounts: [QuotaNode]
+    var compact: Bool = false
+
+    @State private var page = 0
+    @State private var width: CGFloat = 0
+    @GestureState private var dragX: CGFloat = 0
+
+    var body: some View {
+        if accounts.count <= 1 {
+            QuotaCardView(brand: brand, node: accounts.first, compact: compact)
+        } else {
+            VStack(spacing: 8) {
+                HStack(spacing: 0) {
+                    ForEach(Array(accounts.enumerated()), id: \.offset) { _, node in
+                        QuotaCardView(brand: brand, node: node, accountLabel: node.account, compact: compact)
+                            .frame(width: width > 0 ? width : nil)
+                    }
+                }
+                .frame(width: width > 0 ? width : nil, alignment: .leading)
+                .offset(x: -CGFloat(page) * width + dragX)
+                .clipped()
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture()
+                        .updating($dragX) { v, s, _ in s = v.translation.width }
+                        .onEnded { v in
+                            let t = max(40, width * 0.2)
+                            if v.translation.width < -t, page < accounts.count - 1 { page += 1 }
+                            else if v.translation.width > t, page > 0 { page -= 1 }
+                        })
+                .animation(.spring(response: 0.35, dampingFraction: 0.86), value: page)
+                .animation(.interactiveSpring(), value: dragX)
+                dots
+            }
+            .background(GeometryReader { p in
+                Color.clear.preference(key: CarouselWidthKey.self, value: p.size.width)
+            })
+            .onPreferenceChange(CarouselWidthKey.self) { width = $0 }
+        }
+    }
+
+    private var dots: some View {
+        HStack(spacing: 5) {
+            ForEach(accounts.indices, id: \.self) { i in
+                Button { page = i } label: {
+                    Capsule()
+                        .fill(i == page ? brand.accent : Color.white.opacity(0.22))
+                        .frame(width: i == page ? 15 : 6, height: 6)
+                }.buttonStyle(.plain)
+            }
+        }
+        .animation(.spring(response: 0.3, dampingFraction: 0.85), value: page)
+    }
+}
+
 // MARK: - 额度卡
 struct QuotaCardView: View {
     let brand: Brand
@@ -188,11 +252,14 @@ struct QuotaCardView: View {
             }
             Spacer(minLength: 6)
             if let main {
+                // 小组件窄卡：副信息缩到 8.5px 防截断（对应 body.wgt .qsub）。
+                let subSize: CGFloat = compact ? 8.5 : 10.5
                 VStack(alignment: .trailing, spacing: 2) {
-                    Text(main.displayLabel).font(.system(size: 10.5)).foregroundStyle(Theme.ink3)
-                    let cd = Fmt.countdown(main.resetsAt?.date)
+                    Text(main.displayLabel).font(.system(size: subSize)).foregroundStyle(Theme.ink3)
+                        .lineLimit(1)
+                    let cd = Fmt.countdown(main.resetsAt?.date, compact: compact)
                     if !cd.isEmpty {
-                        Text(cd).font(.system(size: 10.5)).foregroundStyle(Theme.ink3)
+                        Text(cd).font(.system(size: subSize)).foregroundStyle(Theme.ink3).lineLimit(1)
                     }
                     if !compact, let elapsed = main.resetElapsed() {   // .qreset 重置进度微条（widget 隐藏）
                         ZStack(alignment: .leading) {

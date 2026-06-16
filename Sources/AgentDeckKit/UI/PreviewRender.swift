@@ -64,6 +64,21 @@ public enum PreviewRender {
         }, scale: scale)
     }
 
+    /// 多账号 carousel（两个 Claude 账号翻页 + 圆点）。
+    public static func carouselPNG(scale: CGFloat = 2) -> Data? {
+        let acct2 = QuotaNode(
+            ok: true, hidden: false, accountId: "acct2", account: "work@co", isDefault: false, kind: "oauth",
+            windows: [PreviewSamples.win("five_hour", "5 小时窗口", 71, resetIn: 1.1 * 3600),
+                      PreviewSamples.win("seven_day", "周限额", 44, resetIn: 6 * 86400)],
+            error: nil, noQuota: nil, sampledAt: nil)
+        return png(PanelChrome(height: 320) {
+            HStack(alignment: .top, spacing: 10) {
+                QuotaCarousel(brand: .claude, accounts: [PreviewSamples.claude, acct2])
+                QuotaCardView(brand: .codex, node: PreviewSamples.codex)
+            }
+        }, scale: scale)
+    }
+
     /// 预览用 mock store（同模块可直接塞 @Published）。
     static func mockStore() -> AppStore {
         let s = AppStore()
