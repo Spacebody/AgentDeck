@@ -1,6 +1,7 @@
 AgentDeck.app/
 dist/
 .build/
+.swiftpm/
 data/
 __pycache__/
 *.pyc

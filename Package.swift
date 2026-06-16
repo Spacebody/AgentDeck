@@ -1,6 +1,6 @@
 // swift-tools-version: 6.0
 // AgentDeck v2 工程定义。Swift 工具链自带，非第三方依赖 → 不破「零依赖」红线。
-// 用 Xcode 打开本 package 即得 SwiftUI Preview；命令行 `swift build` 亦可构建。
+// 用 Xcode 打开本 package，AgentDeckKit 库目标的 SwiftUI Preview 即可工作。
 // .app bundle 仍由 build.sh 组装（拷 daemon / UI / 图标 + Info.plist + 签名/公证）。
 import PackageDescription
 
@@ -8,13 +8,20 @@ let package = Package(
     name: "AgentDeck",
     platforms: [.macOS(.v13)],   // 部署目标与 v1 一致（旧系统仍可启动）
     targets: [
+        // 可执行壳：AppKit 入口（main.swift）。依赖 AgentDeckKit 取 SwiftUI/数据层。
+        // SwiftUI 视图放库目标而非此处——可执行目标受 ENABLE_DEBUG_DYLIB 限制无法预览。
         .executableTarget(
             name: "AgentDeck",
+            dependencies: ["AgentDeckKit"],
             path: "Sources/AgentDeck",
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
+        // 库目标：SwiftUI 视图 + API 客户端 + 数据模型。Preview 在此可正常渲染。
+        .target(
+            name: "AgentDeckKit",
+            path: "Sources/AgentDeckKit",
             swiftSettings: [
-                // 沿用 Swift 5 语言模式：现有 AppKit 壳（NSObject 委托 / 全局可变状态 /
-                // 大量主线程闭包）不适配 Swift 6 严格并发检查，迁移期先稳住编译，
-                // 后续按视图逐步收敛到 @MainActor 再考虑切 6。
+                // 现有 AppKit 壳与迁移期代码沿用 Swift 5 语言模式，回避 Swift 6 严格并发。
                 .swiftLanguageMode(.v5),
             ]
         ),
