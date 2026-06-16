@@ -4,11 +4,18 @@ import SwiftUI
 
 struct OverviewView: View {
     let quota: QuotaResponse?
+    var today: TodaySummary? = nil
+    var active: [ActiveSession] = []
+    var done: [DoneEvent] = []
+    var onFocusActive: (ActiveSession) -> Void = { _ in }
+    var onFocusDone: (DoneEvent) -> Void = { _ in }
 
     var body: some View {
         VStack(spacing: 10) {
             quotaSection
-            // TODO #5: 今日摘要条 · 活跃会话 · 最近完成
+            if let today { TodayBar(summary: today) }
+            ActiveCard(sessions: active, onTap: onFocusActive)
+            DoneCard(events: done, onTap: onFocusDone)
             // TODO #6: 用量趋势（24h / 近7天 / 项目 Top）
         }
     }
@@ -71,10 +78,37 @@ enum PreviewSamples {
         claude: claude, codex: codex,
         accounts: QuotaAccounts(claude: [claude], codex: [codex]),
         menubar: nil, ts: nil)
+
+    static let usage = UsageResponse(
+        days: ["2026-06-16", "2026-06-17"],
+        claudeDaily: ["2026-06-17": ["claude-opus-4-8": [1_200_000, 300_000],
+                                     "claude-sonnet-4-6": [820_000]]],
+        codexDaily: ["2026-06-17": 460_000],
+        costDaily: ["2026-06-17": 37],
+        hourly: (0..<48).map { HourBucket(ts: Date().timeIntervalSince1970 - Double($0) * 3600,
+                                          c: Double(max(0, 40000 - $0 * 300)), x: 8000) },
+        projects7d: nil)
+    static var today: TodaySummary? { TodaySummary(from: usage) }
+
+    static let active: [ActiveSession] = [
+        ActiveSession(tool: "claude", cwd: "/Users/jerry/Downloads/agentdeck", project: "agentdeck",
+                      host: "app", runtimeSecs: 4520, runtime: nil, status: "busy", id: "s1", pid: 123),
+        ActiveSession(tool: "codex", cwd: "/Users/jerry/work/api-service/backend", project: "api-service",
+                      host: nil, runtimeSecs: 1200, runtime: nil, status: "idle", id: "s2", pid: 124),
+    ]
+    static let done: [DoneEvent] = [
+        DoneEvent(tool: "claude", title: "重构额度卡为 SwiftUI", project: "agentdeck",
+                  ts: Date().timeIntervalSince1970 - 600, session: "x", cwd: "/Users/jerry/Downloads/agentdeck"),
+        DoneEvent(tool: "codex", title: "修复登录回调超时", project: "api-service",
+                  ts: Date().timeIntervalSince1970 - 5400, session: "y", cwd: "/Users/jerry/work/api-service"),
+    ]
 }
 
 #Preview("概览 · 额度卡") {
-    PanelChrome { OverviewView(quota: PreviewSamples.response) }
+    PanelChrome {
+        OverviewView(quota: PreviewSamples.response, today: PreviewSamples.today,
+                     active: PreviewSamples.active, done: PreviewSamples.done)
+    }
 }
 
 #Preview("单卡 · Claude") {

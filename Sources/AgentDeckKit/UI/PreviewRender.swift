@@ -7,7 +7,10 @@ import AppKit
 public enum PreviewRender {
     /// 渲染概览页（额度卡）到 PNG 数据。scale=2 出 @2x 清晰图。
     public static func overviewPNG(scale: CGFloat = 2) -> Data? {
-        png(PanelChrome { OverviewView(quota: PreviewSamples.response) }, scale: scale)
+        png(PanelChrome {
+            OverviewView(quota: PreviewSamples.response, today: PreviewSamples.today,
+                         active: PreviewSamples.active, done: PreviewSamples.done)
+        }, scale: scale)
     }
 
     static func png<V: View>(_ view: V, scale: CGFloat) -> Data? {
