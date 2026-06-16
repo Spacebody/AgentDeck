@@ -10,6 +10,13 @@ struct UsageResponse: Decodable {
     let costDaily: [String: Double]               // cost_daily: 日 → 等值美元
     let hourly: [HourBucket]                       // 覆盖 48h，每小时 c=claude x=codex
     let projects7d: [ProjectUsage]?               // projects_7d
+    // 成本汇总（用量卡头部 + 口径弹层拆分）
+    let cost7d: Double?
+    let cost30d: Double?
+    let claudeCost7d: Double?
+    let claudeCost30d: Double?
+    let codexCost7d: Double?
+    let codexCost30d: Double?
 }
 
 struct HourBucket: Decodable { let ts: Double; let c: Double; let x: Double }

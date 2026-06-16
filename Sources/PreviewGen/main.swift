@@ -3,10 +3,13 @@
 import Foundation
 import AgentDeckKit
 
-let outPath = CommandLine.arguments.count > 1
-    ? CommandLine.arguments[1] : "/tmp/agentdeck-preview.png"
+// 用法：PreviewGen [outPath] | PreviewGen charts [outPath]
+var args = Array(CommandLine.arguments.dropFirst())
+let charts = args.first == "charts"
+if charts { args.removeFirst() }
+let outPath = args.first ?? (charts ? "/tmp/agentdeck-charts.png" : "/tmp/agentdeck-preview.png")
 
-let data = MainActor.assumeIsolated { PreviewRender.overviewPNG() }
+let data = MainActor.assumeIsolated { charts ? PreviewRender.chartsPNG() : PreviewRender.overviewPNG() }
 guard let data else {
     FileHandle.standardError.write(Data("render failed\n".utf8))
     exit(1)

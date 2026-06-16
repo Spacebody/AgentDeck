@@ -7,9 +7,20 @@ import AppKit
 public enum PreviewRender {
     /// 渲染概览页（额度卡）到 PNG 数据。scale=2 出 @2x 清晰图。
     public static func overviewPNG(scale: CGFloat = 2) -> Data? {
-        png(PanelChrome {
-            OverviewView(quota: PreviewSamples.response, today: PreviewSamples.today,
-                         active: PreviewSamples.active, done: PreviewSamples.done)
+        png(PanelChrome(height: 1080) {
+            OverviewView(quota: PreviewSamples.response, usage: PreviewSamples.usage,
+                         today: PreviewSamples.today, active: PreviewSamples.active, done: PreviewSamples.done)
+        }, scale: scale)
+    }
+
+    /// 三种用量图各自渲染（验证 tab 切换后的视图，静态渲染拿不到 @State）。
+    public static func chartsPNG(scale: CGFloat = 2) -> Data? {
+        png(PanelChrome(height: 620) {
+            VStack(spacing: 10) {
+                Curve24h(usage: PreviewSamples.usage).frame(height: 160).padding(12).glassCard()
+                Week7Bars(usage: PreviewSamples.usage).frame(height: 160).padding(12).glassCard()
+                ProjectTop(usage: PreviewSamples.usage).frame(height: 140).padding(12).glassCard()
+            }
         }, scale: scale)
     }
 

@@ -4,6 +4,7 @@ import SwiftUI
 
 struct OverviewView: View {
     let quota: QuotaResponse?
+    var usage: UsageResponse? = nil
     var today: TodaySummary? = nil
     var active: [ActiveSession] = []
     var done: [DoneEvent] = []
@@ -16,7 +17,7 @@ struct OverviewView: View {
             if let today { TodayBar(summary: today) }
             ActiveCard(sessions: active, onTap: onFocusActive)
             DoneCard(events: done, onTap: onFocusDone)
-            // TODO #6: 用量趋势（24h / 近7天 / 项目 Top）
+            UsageView(usage: usage)   // 用量趋势（24h / 近7天 / 项目 Top）
         }
     }
 
@@ -34,6 +35,7 @@ struct OverviewView: View {
 
 // MARK: - 面板外壳预览容器（bg + aurora + 玻璃，模拟 420 宽主面板）
 struct PanelChrome<Content: View>: View {
+    var height: CGFloat = 780
     @ViewBuilder var content: Content
     var body: some View {
         ZStack(alignment: .top) {
@@ -45,7 +47,7 @@ struct PanelChrome<Content: View>: View {
                 Spacer(minLength: 0)
             }
         }
-        .frame(width: 420, height: 780)
+        .frame(width: 420, height: height)
         .preferredColorScheme(.dark)
     }
 }
@@ -79,15 +81,30 @@ enum PreviewSamples {
         accounts: QuotaAccounts(claude: [claude], codex: [codex]),
         menubar: nil, ts: nil)
 
-    static let usage = UsageResponse(
-        days: ["2026-06-16", "2026-06-17"],
-        claudeDaily: ["2026-06-17": ["claude-opus-4-8": [1_200_000, 300_000],
-                                     "claude-sonnet-4-6": [820_000]]],
-        codexDaily: ["2026-06-17": 460_000],
-        costDaily: ["2026-06-17": 37],
-        hourly: (0..<48).map { HourBucket(ts: Date().timeIntervalSince1970 - Double($0) * 3600,
-                                          c: Double(max(0, 40000 - $0 * 300)), x: 8000) },
-        projects7d: nil)
+    static let usageDays: [String] = (0..<7).reversed().map {
+        DateFormatter.localDay.string(from: Date().addingTimeInterval(-Double($0) * 86400))
+    }
+    static var usage: UsageResponse {
+        var cd: [String: [String: [Double]]] = [:], xd: [String: Double] = [:], costd: [String: Double] = [:]
+        for (i, day) in usageDays.enumerated() {
+            let s = Double(i + 1) / 7   // 由少到多，今日最高
+            cd[day] = ["claude-opus-4-8": [1_200_000 * s, 300_000 * s], "claude-sonnet-4-6": [820_000 * s]]
+            xd[day] = 460_000 * s
+            costd[day] = 37 * s
+        }
+        let nowH = floor(Date().timeIntervalSince1970 / 3600) * 3600   // 整点对齐（同 daemon）
+        let hourly = (0..<48).map { HourBucket(ts: nowH - Double($0) * 3600,
+                                               c: Double(max(0, 40000 - $0 * 300)), x: 8000) }
+        return UsageResponse(
+            days: usageDays, claudeDaily: cd, codexDaily: xd, costDaily: costd, hourly: hourly,
+            projects7d: [
+                ProjectUsage(name: "agentdeck", cwd: "/Users/jerry/Downloads/agentdeck", tokens: 5_200_000, cost: 42),
+                ProjectUsage(name: "api-service", cwd: "/Users/jerry/work/api-service", tokens: 2_100_000, cost: 18),
+                ProjectUsage(name: "Codex/cli", cwd: "/Users/jerry/Codex/cli", tokens: 900_000, cost: 6),
+            ],
+            cost7d: 66, cost30d: 210,
+            claudeCost7d: 54, claudeCost30d: 170, codexCost7d: 12, codexCost30d: 40)
+    }
     static var today: TodaySummary? { TodaySummary(from: usage) }
 
     static let active: [ActiveSession] = [
@@ -106,8 +123,8 @@ enum PreviewSamples {
 
 #Preview("概览 · 额度卡") {
     PanelChrome {
-        OverviewView(quota: PreviewSamples.response, today: PreviewSamples.today,
-                     active: PreviewSamples.active, done: PreviewSamples.done)
+        OverviewView(quota: PreviewSamples.response, usage: PreviewSamples.usage,
+                     today: PreviewSamples.today, active: PreviewSamples.active, done: PreviewSamples.done)
     }
 }
 
