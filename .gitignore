@@ -1,5 +1,6 @@
 AgentDeck.app/
 dist/
+.build/
 data/
 __pycache__/
 *.pyc
