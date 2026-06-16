@@ -198,7 +198,27 @@ struct Week7Bars: View {
 
     var body: some View {
         let bars = makeBars()
-        Canvas { ctx, size in draw(ctx, size, bars) }
+        VStack(spacing: 8) {
+            Canvas { ctx, size in draw(ctx, size, bars) }
+            legend
+        }
+    }
+
+    // 模型分段图例（对应 #usageview .legend：Opus/Sonnet/Haiku/Codex）
+    private var legend: some View {
+        HStack(spacing: 9) {
+            ForEach([(TodaySummary.Family.opus, "Opus"), (.sonnet, "Sonnet"),
+                     (.haiku, "Haiku"), (.codex, "Codex")], id: \.1) { fam, name in
+                HStack(spacing: 3) {
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(LinearGradient(colors: grad(fam), startPoint: .top, endPoint: .bottom))
+                        .frame(width: 7, height: 7)
+                    Text(name)
+                }
+            }
+            Spacer()
+        }
+        .font(.system(size: 9.5)).foregroundStyle(Theme.ink3)
     }
 
     private func makeBars() -> [DayBar] {
