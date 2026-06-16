@@ -77,6 +77,7 @@ struct OKResponse: Decodable { let ok: Bool }
 /// resets_at 等时间字段可能是 epoch 秒（Codex）或 ISO 串（Claude usage API）——两者皆容。
 struct FlexibleDate: Decodable, Hashable {
     let date: Date?
+    init(_ date: Date?) { self.date = date }
     init(from decoder: Decoder) throws {
         let c = try decoder.singleValueContainer()
         if c.decodeNil() { date = nil; return }

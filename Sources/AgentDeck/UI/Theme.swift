@@ -46,6 +46,23 @@ enum Brand: String, CaseIterable {
     }
 }
 
+// MARK: - 告警/危险渐变（对应 SVG grad-warn / grad-danger 与 .wbar i.warn/.danger）
+extension Theme {
+    static let warnGradient = LinearGradient(
+        colors: [Color(hex: 0xffd28a), Color(hex: 0xe8a04f)], startPoint: .topLeading, endPoint: .bottomTrailing)
+    static let dangerGradient = LinearGradient(
+        colors: [Color(hex: 0xff9aa8), Color(hex: 0xe84f68)], startPoint: .topLeading, endPoint: .bottomTrailing)
+
+    /// 按窗口阈值挑渐变：危险 → danger，告警 → warn，否则品牌色。
+    static func gradient(for level: QuotaWindow.Level, brand: Brand) -> LinearGradient {
+        switch level {
+        case .danger: return dangerGradient
+        case .warn:   return warnGradient
+        case .normal: return brand.gradient
+        }
+    }
+}
+
 // MARK: - 玻璃卡（对应 .card：白渐变高光 + 模糊背板 + 描边 + 投影 + 内嵌镜面线）
 struct GlassCard: ViewModifier {
     var radius: CGFloat = Theme.rLg
