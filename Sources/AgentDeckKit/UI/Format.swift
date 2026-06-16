@@ -33,6 +33,25 @@ enum Fmt {
         return L("time.dayAgo", ["n": "\(Int(s / 86400))"])
     }
 
+    /// 按 5h 窗口消耗速率预测耗尽（对应 burnHint）。仅 8%~100% 间给提示。
+    static func burnHint(_ w: QuotaWindow?, now: Date = Date()) -> String {
+        guard let w, let reset = w.resetsAt?.date, w.usedPercent >= 8, w.usedPercent < 100 else { return "" }
+        let winSec = 5.0 * 3600
+        let el = now.timeIntervalSince(reset.addingTimeInterval(-winSec))
+        guard el > 0 else { return "" }
+        let burnSec = el / w.usedPercent * 100 - el   // 距 100% 还能跑多久
+        if burnSec > reset.timeIntervalSince(now) { return L("quota.burnSafe") }
+        return L("quota.burnWarn", ["dur": duration(burnSec)])
+    }
+
+    /// 解析 ISO8601 时间串（含/不含小数秒），用于 Codex sampled_at。
+    static func parseISO(_ s: String) -> Date? {
+        let f1 = ISO8601DateFormatter()
+        if let d = f1.date(from: s) { return d }
+        let f2 = ISO8601DateFormatter(); f2.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f2.date(from: s)
+    }
+
     /// token 数缩写（对应 fmtTokens）。
     static func tokens(_ n: Double) -> String {
         if n >= 1e9 { return String(format: "%.1fB", n / 1e9) }

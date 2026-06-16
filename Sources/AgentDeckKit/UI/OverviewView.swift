@@ -69,7 +69,7 @@ enum PreviewSamples {
             win("seven_day", "周限额", 62, resetIn: 3.5 * 86400),
             win("seven_day_opus", "周限额 · Opus", 88, resetIn: 3.5 * 86400),
         ],
-        error: nil, noQuota: nil, sampledAt: nil)
+        error: nil, noQuota: nil, sampledAt: nil, stale: nil, credits: nil, raw: nil)
 
     static let codex = QuotaNode(
         ok: true, hidden: false, accountId: nil, account: nil, isDefault: true, kind: nil,
@@ -77,7 +77,7 @@ enum PreviewSamples {
             win("five_hour", "5 小时窗口", 12, resetIn: 1.2 * 3600),
             win("seven_day", "周限额", 96, resetIn: 5 * 86400),
         ],
-        error: nil, noQuota: nil, sampledAt: nil)
+        error: nil, noQuota: nil, sampledAt: nil, stale: nil, credits: nil, raw: nil)
 
     static let response = QuotaResponse(
         claude: claude, codex: codex,

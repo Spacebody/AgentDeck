@@ -70,7 +70,7 @@ public enum PreviewRender {
             ok: true, hidden: false, accountId: "acct2", account: "work@co", isDefault: false, kind: "oauth",
             windows: [PreviewSamples.win("five_hour", "5 小时窗口", 71, resetIn: 1.1 * 3600),
                       PreviewSamples.win("seven_day", "周限额", 44, resetIn: 6 * 86400)],
-            error: nil, noQuota: nil, sampledAt: nil)
+            error: nil, noQuota: nil, sampledAt: nil, stale: nil, credits: nil, raw: nil)
         return png(PanelChrome(height: 320) {
             HStack(alignment: .top, spacing: 10) {
                 QuotaCarousel(brand: .claude, accounts: [PreviewSamples.claude, acct2])

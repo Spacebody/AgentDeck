@@ -228,6 +228,14 @@ struct QuotaCardView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             .padding(.top, 9)   // .qhead margin-bottom:9
+            if !compact, let foot = footer(node) {   // .qfoot：限流警示 / 烧录速率 / 额外用量 / Credits / 新鲜度
+                Divider().overlay(Color.white.opacity(0.07)).padding(.top, 9)
+                Text(foot.text).font(.system(size: 9.5))
+                    .foregroundStyle(foot.stale ? Color(hex: 0xffb38a) : Theme.ink3)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, 8)
+            }
         } else {
             // 错误/无额度态
             head(main: nil)
@@ -235,6 +243,44 @@ struct QuotaCardView: View {
                 .font(.system(size: 10.5)).foregroundStyle(Theme.ink3)
                 .padding(.vertical, 6)
         }
+    }
+
+    /// 卡片脚注（对应 quotaCardInner 的 .qfoot）：限流警示优先；
+    /// Claude → 烧录速率 / 额外用量；Codex → 数据新鲜度 / Credits 余额 / 采样时间。
+    private func footer(_ node: QuotaNode) -> (text: String, stale: Bool)? {
+        if node.stale == true { return (L("quota.stale"), true) }
+        if brand == .claude {
+            let burn = Fmt.burnHint(node.displayWindows.first { $0.id == "five_hour" })
+            if !burn.isEmpty { return (burn, false) }
+            if let ex = node.raw?.extraUsage, ex.isEnabled == true {
+                func cents(_ c: Double?) -> String {
+                    let d = (c ?? 0) / 100
+                    return d == d.rounded() ? "\(Int(d))" : String(format: "%.2f", d)
+                }
+                return (L("quota.extra", ["used": cents(ex.usedCredits), "limit": cents(ex.monthlyLimit)]).strippingBold, false)
+            }
+            return nil
+        } else {
+            // 新鲜度警示优先：数据不可信时其他信息没意义
+            if let s = node.sampledAt, let d = Fmt.parseISO(s) {
+                let age = Date().timeIntervalSince(d)
+                if age > 2 * 3600 {
+                    return (L("quota.dataStale", ["h": "\(Int((age / 3600).rounded()))"]), true)
+                }
+            }
+            if let cr = node.credits, cr.hasCredits == true {
+                let bal = cr.unlimited == true ? "∞" : "$\(creditFmt(cr.balance))"
+                return (L("quota.credits", ["bal": bal]).strippingBold, false)
+            }
+            if let s = node.sampledAt, let d = Fmt.parseISO(s) {
+                return (L("quota.sampledAt", ["time": Fmt.relative(d)]), false)
+            }
+            return nil
+        }
+    }
+    private func creditFmt(_ b: Double?) -> String {
+        let v = b ?? 0
+        return v == v.rounded() ? "\(Int(v))" : String(format: "%.2f", v)
     }
 
     // .qhead：徽章 + 名称 + 账号 tag + 右侧副信息（主窗口名 + 倒计时 + 重置进度条）

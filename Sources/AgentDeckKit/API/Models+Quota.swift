@@ -29,9 +29,29 @@ struct QuotaNode: Decodable, Identifiable {
     let error: String?
     let noQuota: Bool?          // no_quota（Codex 无额度信息）
     let sampledAt: String?      // sampled_at（Codex 采样时间戳）
+    let stale: Bool?            // 接口限流 → 显示上次成功数据
+    let credits: CreditsInfo?   // Codex Credits 余额
+    let raw: RawUsage?          // Claude 原始响应（取 extra_usage）
 
     var id: String { accountId ?? account ?? kind ?? "primary" }
     var displayWindows: [QuotaWindow] { windows ?? [] }
+}
+
+/// Codex Credits 余额（credits 透传自上游）。
+struct CreditsInfo: Decodable {
+    let hasCredits: Bool?
+    let unlimited: Bool?
+    let balance: Double?
+}
+
+/// Claude 原始用量响应里只取 extra_usage（其余键忽略）。
+struct RawUsage: Decodable {
+    let extraUsage: ExtraUsage?
+}
+struct ExtraUsage: Decodable {
+    let isEnabled: Bool?
+    let usedCredits: Double?    // 单位：美分
+    let monthlyLimit: Double?   // 单位：美分
 }
 
 /// 单个限额窗口（5h / 周限额 / Sonnet / Opus …）。
