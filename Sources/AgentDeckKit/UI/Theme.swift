@@ -68,11 +68,21 @@ extension Theme {
     }
 }
 
+// MARK: - 精简模式环境键（body.minimal）。在根视图按设置注入，玻璃卡/控件据此降噪。
+private struct MinimalModeKey: EnvironmentKey { static let defaultValue = false }
+extension EnvironmentValues {
+    var minimalMode: Bool {
+        get { self[MinimalModeKey.self] }
+        set { self[MinimalModeKey.self] = newValue }
+    }
+}
+
 // MARK: - 玻璃卡（对应 .card：白渐变高光 + 模糊背板 + 描边 + 投影 + 内嵌镜面线）
 struct GlassCard: ViewModifier {
     var radius: CGFloat = Theme.rLg
-    /// 精简模式：去渐变高光与内嵌镜面线，降视觉噪声（body.minimal .card）
-    var minimal: Bool = false
+    /// 精简模式：去渐变高光与内嵌镜面线，降视觉噪声（body.minimal .card）。
+    /// 默认跟随环境 minimalMode（根视图按设置注入），整树一致切换。
+    @Environment(\.minimalMode) private var minimal
 
     func body(content: Content) -> some View {
         content
@@ -99,9 +109,9 @@ struct GlassCard: ViewModifier {
 }
 
 extension View {
-    /// 玻璃卡样式（.card）。radius 默认 24；minimal 对应精简模式降噪。
-    func glassCard(radius: CGFloat = Theme.rLg, minimal: Bool = false) -> some View {
-        modifier(GlassCard(radius: radius, minimal: minimal))
+    /// 玻璃卡样式（.card）。radius 默认 24；精简模式由环境 minimalMode 驱动。
+    func glassCard(radius: CGFloat = Theme.rLg) -> some View {
+        modifier(GlassCard(radius: radius))
     }
 }
 

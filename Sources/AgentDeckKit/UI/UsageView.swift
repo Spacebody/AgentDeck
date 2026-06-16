@@ -15,6 +15,7 @@ enum UsageMode: String, CaseIterable { case curve, usage, proj }
 struct UsageView: View {
     let usage: UsageResponse?
     @State private var mode: UsageMode = .curve
+    @Environment(\.adShowInfo) private var showInfo
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -50,7 +51,7 @@ struct UsageView: View {
                     .font(.system(size: 10.5)).foregroundStyle(Theme.ink3)
                     .lineLimit(1).truncationMode(.tail)
             }
-            InfoButton()
+            InfoButton { showInfo(.usage(mode)) }
         }
     }
 }

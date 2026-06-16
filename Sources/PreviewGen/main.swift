@@ -3,18 +3,21 @@
 import Foundation
 import AgentDeckKit
 
-// 用法：PreviewGen [overview|charts|sessions] [outPath]
+// 用法：PreviewGen [overview|charts|sessions|settings|widget|root|widgetroot] [outPath]
 var args = Array(CommandLine.arguments.dropFirst())
-let mode = ["charts", "sessions", "settings", "widget"].contains(args.first) ? args.removeFirst() : "overview"
+let mode = ["charts", "sessions", "settings", "widget", "root", "widgetroot"].contains(args.first)
+    ? args.removeFirst() : "overview"
 let outPath = args.first ?? "/tmp/agentdeck-\(mode).png"
 
 let data = MainActor.assumeIsolated { () -> Data? in
     switch mode {
-    case "charts":   return PreviewRender.chartsPNG()
-    case "sessions": return PreviewRender.sessionsPNG()
-    case "settings": return PreviewRender.settingsPNG()
-    case "widget":   return PreviewRender.widgetPNG()
-    default:         return PreviewRender.overviewPNG()
+    case "charts":     return PreviewRender.chartsPNG()
+    case "sessions":   return PreviewRender.sessionsPNG()
+    case "settings":   return PreviewRender.settingsPNG()
+    case "widget":     return PreviewRender.widgetPNG()
+    case "root":       return PreviewRender.rootPNG()
+    case "widgetroot": return PreviewRender.widgetRootPNG()
+    default:           return PreviewRender.overviewPNG()
     }
 }
 guard let data else {

@@ -45,7 +45,7 @@ struct InfoButton: View {
 // MARK: - 今日摘要条（#today）
 struct TodayBar: View {
     let summary: TodaySummary
-    var onInfo: () -> Void = {}
+    @Environment(\.adShowInfo) private var showInfo
 
     var body: some View {
         HStack(spacing: 10) {
@@ -55,7 +55,7 @@ struct TodayBar: View {
             })
             text
             Spacer(minLength: 6)
-            InfoButton(action: onInfo)
+            InfoButton { showInfo(.today) }
         }
         .padding(.horizontal, 14).padding(.vertical, 8)
         .frame(maxWidth: .infinity, alignment: .leading)

@@ -48,6 +48,34 @@ public enum PreviewRender {
         }, scale: scale)
     }
 
+    /// 整壳（顶栏 + 更新横幅 + 双 tab + 概览）。验证 #4+#10 组装。
+    public static func rootPNG(scale: CGFloat = 2) -> Data? {
+        png(AgentDeckRootView(previewStore: mockStore(), version: "1.26.0")
+            .frame(width: 420, height: 1040), scale: scale)
+    }
+
+    /// 小组件整壳（store 驱动）。
+    public static func widgetRootPNG(scale: CGFloat = 2) -> Data? {
+        png(WidgetChrome {
+            AgentDeckWidgetRootView(store: mockStore())
+        }, scale: scale)
+    }
+
+    /// 预览用 mock store（同模块可直接塞 @Published）。
+    static func mockStore() -> AppStore {
+        let s = AppStore()
+        s.quota = PreviewSamples.response
+        s.usage = PreviewSamples.usage
+        s.active = PreviewSamples.active
+        s.done = PreviewSamples.done
+        s.sessions = PreviewSamples.sessions
+        s.settings = PreviewSamples.settingsValues
+        s.update = UpdateInfo(current: "1.25.17", latest: "1.26.0", available: true,
+                              url: "https://github.com/Spacebody/AgentDeck/releases",
+                              dmg: nil, notesUrl: nil)
+        return s
+    }
+
     static func png<V: View>(_ view: V, scale: CGFloat) -> Data? {
         let renderer = ImageRenderer(content: view)
         renderer.scale = scale

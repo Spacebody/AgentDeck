@@ -86,6 +86,14 @@ build() {
   local BIN; BIN="$(swift build -c release "${PROD[@]}" "${ARCHS[@]}" --show-bin-path)"
   cp "$BIN/AgentDeck" "$APP/Contents/MacOS/AgentDeck"
 
+  # AgentDeckKit 资源包（Claude/Codex 官方品牌字形）：Bundle.module 需在 .app 内找到它，
+  # 否则额度卡/徽章会回退到 SF Symbol 占位图。放进 Resources（= 主包 resourceURL，可被解析）。
+  if [ -d "$BIN/AgentDeck_AgentDeckKit.bundle" ]; then
+    cp -R "$BIN/AgentDeck_AgentDeckKit.bundle" "$APP/Contents/Resources/"
+  else
+    echo "  ⚠️ 未找到 AgentDeck_AgentDeckKit.bundle（品牌字形将回退占位图）"
+  fi
+
   # 自包含：后端 + UI + 图标全部入包
   cp "$ROOT/agentdeckd.py" "$APP/Contents/Resources/"
   cp "$ROOT/VERSION" "$APP/Contents/Resources/"

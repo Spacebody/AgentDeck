@@ -8,7 +8,10 @@ struct SessionsView: View {
     var onResume: (SessionItem) -> Void = { _ in }
     var onCopy: (SessionItem) -> Void = { _ in }
     var onPin: (SessionItem) -> Void = { _ in }
-    var loadPreview: (SessionItem) -> [PreviewMsg] = { _ in [] }
+    /// 加载某会话预览（接 store.preview，异步）。
+    var loadPreview: (SessionItem) async -> [PreviewMsg] = { _ in [] }
+    /// 搜索词变化（驱动 store.search，服务端全量匹配；sessions 已是结果）。
+    var onSearch: (String) -> Void = { _ in }
     /// 预览期可注入：默认展开某行 + 预置预览内容（静态渲染验证用）。
     var initialExpanded: String? = nil
     var seededPreviews: [String: [PreviewMsg]] = [:]
@@ -22,23 +25,20 @@ struct SessionsView: View {
          onResume: @escaping (SessionItem) -> Void = { _ in },
          onCopy: @escaping (SessionItem) -> Void = { _ in },
          onPin: @escaping (SessionItem) -> Void = { _ in },
-         loadPreview: @escaping (SessionItem) -> [PreviewMsg] = { _ in [] },
+         loadPreview: @escaping (SessionItem) async -> [PreviewMsg] = { _ in [] },
+         onSearch: @escaping (String) -> Void = { _ in },
          initialExpanded: String? = nil, seededPreviews: [String: [PreviewMsg]] = [:]) {
         self.sessions = sessions; self.scrollable = scrollable
         self.onResume = onResume; self.onCopy = onCopy; self.onPin = onPin; self.loadPreview = loadPreview
+        self.onSearch = onSearch
         self.initialExpanded = initialExpanded; self.seededPreviews = seededPreviews
         _expandedKey = State(initialValue: initialExpanded)
         _previews = State(initialValue: seededPreviews)
     }
 
+    // 仅做工具筛选；搜索词由服务端匹配（sessions 已是结果），不再客户端二次过滤。
     private var filtered: [SessionItem] {
-        sessions.filter { s in
-            (filter == "all" || s.tool == filter) && {
-                guard !query.isEmpty else { return true }
-                let hay = ((s.title ?? "") + (s.project ?? "") + (s.branch ?? "")).lowercased()
-                return hay.contains(query.lowercased())
-            }()
-        }
+        sessions.filter { filter == "all" || $0.tool == filter }
     }
 
     var body: some View {
@@ -66,7 +66,9 @@ struct SessionsView: View {
     private func toggle(_ s: SessionItem) {
         if expandedKey == s.rowKey { expandedKey = nil; return }
         expandedKey = s.rowKey
-        if previews[s.rowKey] == nil { previews[s.rowKey] = loadPreview(s) }
+        if previews[s.rowKey] == nil {
+            Task { previews[s.rowKey] = await loadPreview(s) }
+        }
     }
 
     private var header: some View {
@@ -87,6 +89,7 @@ struct SessionsView: View {
             TextField("搜索", text: $query)
                 .textFieldStyle(.plain).font(.system(size: 10.5)).foregroundStyle(Theme.ink)
                 .frame(width: 96)
+                .onChange(of: query) { onSearch($0) }
         }
         .padding(.horizontal, 11).padding(.vertical, 4)
         .background(Capsule().fill(Color.white.opacity(0.06)))

@@ -1,11 +1,11 @@
-// AgentDeck — 菜单栏壳：状态栏 icon + 自定义 HUD 玻璃面板(WKWebView) + 后端守护
+// AgentDeck — 菜单栏壳：状态栏 icon + 自定义 HUD 玻璃面板(原生 SwiftUI) + 后端守护
 import Cocoa
 import ServiceManagement
-import WebKit
+import SwiftUI
+import AgentDeckKit
 
 let kPort = 7777
-let kBase = "http://127.0.0.1:\(kPort)"          // Swift 原生请求 / 浏览器打开用
-let kWebBase = "agentdeck://app"                 // WebView 经自定义 scheme 走，绕系统代理
+let kBase = "http://127.0.0.1:\(kPort)"          // 原生请求 / 浏览器打开用
 
 // App→自身 daemon 的连接必须绕过系统代理：某些企业安全软件装的是系统级 PAC，会把
 // 127.0.0.1 也改道到 SOCKS（代理到不了回环）→ WebView/URLSession 连不上本机后端。
@@ -23,97 +23,6 @@ let kDirectSession: URLSession = {
     return URLSession(configuration: cfg)
 }()
 
-/// WKWebView 自定义 scheme handler：页面与 /api 全走 agentdeck://，由本 handler 经
-/// 禁代理 session 转发到 http://127.0.0.1:kPort。WebView 自身不再直发 HTTP 到回环，
-/// 从根上绕开系统 PAC 把回环改道到 SOCKS 的问题。
-final class LocalSchemeHandler: NSObject, WKURLSchemeHandler {
-    static let shared = LocalSchemeHandler()
-    private var active = Set<ObjectIdentifier>()
-    private let lock = NSLock()
-
-    private func isActive(_ t: WKURLSchemeTask) -> Bool {
-        lock.lock(); defer { lock.unlock() }
-        return active.contains(ObjectIdentifier(t))
-    }
-    private func drop(_ t: WKURLSchemeTask) {
-        lock.lock(); active.remove(ObjectIdentifier(t)); lock.unlock()
-    }
-
-    func webView(_ webView: WKWebView, start task: WKURLSchemeTask) {
-        lock.lock(); active.insert(ObjectIdentifier(task)); lock.unlock()
-        let req = task.request
-        guard let u = req.url,
-              let comps = URLComponents(url: u, resolvingAgainstBaseURL: false),
-              comps.host == "app" else {   // 只服务自身 origin，拒绝 agentdeck://其他host
-            fail(task, URLError(.badURL)); return
-        }
-        var dst = URLComponents()
-        dst.scheme = "http"; dst.host = "127.0.0.1"; dst.port = kPort
-        let p = comps.percentEncodedPath
-        dst.percentEncodedPath = p.isEmpty ? "/" : p
-        dst.percentEncodedQuery = comps.percentEncodedQuery
-        guard let durl = dst.url else { fail(task, URLError(.badURL)); return }
-
-        var out = URLRequest(url: durl)
-        out.httpMethod = req.httpMethod ?? "GET"
-        var headers = req.allHTTPHeaderFields ?? [:]
-        // WKURLSchemeTask 的 POST httpBody 常为空 → 前端 fetch 已把 body 经 X-AD-Body(base64) 头透传
-        if let b64 = headers.removeValue(forKey: "X-AD-Body"),
-           let d = Data(base64Encoded: b64) {
-            out.httpBody = d
-        } else if let b = req.httpBody {
-            out.httpBody = b
-        }
-        // Origin=agentdeck://app 会被 daemon CSRF 拒；Host 让 URLSession 自设为 127.0.0.1
-        headers.removeValue(forKey: "Origin")
-        headers.removeValue(forKey: "Host")
-        for (k, v) in headers { out.setValue(v, forHTTPHeaderField: k) }
-
-        kDirectSession.dataTask(with: out) { [weak self] data, resp, err in
-            guard let self else { return }
-            DispatchQueue.main.async {
-                guard self.isActive(task) else { return }   // 已 stop（页面切走）→ 禁止回调，防崩
-                if let err = err { self.fail(task, err); return }
-                let http = resp as? HTTPURLResponse
-                let r = HTTPURLResponse(url: u, statusCode: http?.statusCode ?? 200,
-                                        httpVersion: "HTTP/1.1",
-                                        headerFields: http?.allHeaderFields as? [String: String])
-                    ?? URLResponse(url: u, mimeType: http?.mimeType,
-                                   expectedContentLength: data?.count ?? -1, textEncodingName: nil)
-                task.didReceive(r)
-                if let data { task.didReceive(data) }
-                task.didFinish()
-                self.drop(task)
-            }
-        }.resume()
-    }
-
-    func webView(_ webView: WKWebView, stop task: WKURLSchemeTask) { drop(task) }
-
-    private func fail(_ task: WKURLSchemeTask, _ error: Error) {
-        guard isActive(task) else { return }
-        task.didFailWithError(error); drop(task)
-    }
-}
-
-/// 注入到 WebView 的 fetch 包装：把字符串 body 经 X-AD-Body(base64) 头透传，
-/// 规避 WKURLSchemeTask 拿不到 POST httpBody 的限制。
-let kBodyWrapJS = """
-(function(){
-  if (window.__adWrap) return; window.__adWrap = 1;
-  const _f = window.fetch.bind(window);
-  window.fetch = function(input, init){
-    try {
-      if (init && typeof init.body === 'string') {
-        const h = Object.assign({}, init.headers);
-        h['X-AD-Body'] = btoa(unescape(encodeURIComponent(init.body)));
-        init = Object.assign({}, init, {headers: h});
-      }
-    } catch (e) {}
-    return _f(input, init);
-  };
-})();
-"""
 // 默认高取概览页全显 + 设置页大半的折中值，展示时钳制到屏幕可视高度
 let kPanelW: CGFloat = 420, kPanelH: CGFloat = 780
 
@@ -153,7 +62,7 @@ final class KeyPanel: NSPanel {
     override var canBecomeKey: Bool { true }
 }
 
-/// 小组件顶部拖拽把手：WKWebView 吞掉鼠标事件，isMovableByWindowBackground 失效，
+/// 小组件顶部拖拽把手：NSHostingView 吞掉鼠标事件，isMovableByWindowBackground 失效，
 /// 用原生透明条 + performDrag 实现拖动
 final class DragHandle: NSView {
     override func mouseDown(with event: NSEvent) {
@@ -215,7 +124,7 @@ final class EdgeCursorView: NSView {
         let m: CGFloat = 7
         let l = p.x < m, r = p.x > bounds.width - m
         let b = p.y < m, t = allowTop && p.y > bounds.height - m
-        guard l || r || b || t else { return }   // 非边带不干预，光标交还 WKWebView
+        guard l || r || b || t else { return }   // 非边带不干预，光标交还内容视图
         // NSCursor.FrameResizePosition 是 macOS 15+ 类型，整段引用须收进可用性守卫内，
         // 否则部署目标 13.0 编译报错（14.4.1 等旧系统支持的前提）
         if #available(macOS 15.0, *) {
@@ -341,80 +250,17 @@ func autoPasteEnter() {
     }
 }
 
-// JS → 原生桥：面板内「退出」按钮经此通道终止 App
-final class ControlBridge: NSObject, WKScriptMessageHandler {
-    static let shared = ControlBridge()
-    func userContentController(_ controller: WKUserContentController,
-                               didReceive message: WKScriptMessage) {
-        let delegate = NSApp.delegate as? AppDelegate
-        guard let body = message.body as? String else { return }
-        if body.hasPrefix("open:") {   // 打开外部链接（更新下载页 / GitHub issue / mailto 反馈）
-            if let url = URL(string: String(body.dropFirst(5))),
-               url.scheme == "https" || url.scheme == "http" || url.scheme == "mailto" {
-                DispatchQueue.main.async {
-                    if url.scheme == "mailto" {
-                        openMailto(url)        // 无默认邮件客户端时静默失败，走兜底分支
-                    } else {
-                        NSWorkspace.shared.open(url)
-                    }
-                }
-            }
-            return
-        }
-        if body.hasPrefix("scale:") {   // 字体缩放 → 面板/小组件窗口同步放大，保持布局有效宽度
-            if let z = Double(body.dropFirst(6)) {
-                DispatchQueue.main.async { delegate?.applyUIScale(CGFloat(z)) }
-            }
-            return
-        }
-        switch body {
-        case "quit":
-            DispatchQueue.main.async { NSApp.terminate(nil) }
-        case "panel":   // 桌面小组件点击 → 打开主面板
-            DispatchQueue.main.async { delegate?.showPanel() }
-        case "hide":    // 跳转会话成功 → 收起主面板，让目标终端独占前台
-            DispatchQueue.main.async { delegate?.hidePanel() }
-        case "paste-enter":   // 「唤起后自动粘贴」开启时合成 ⌘V + 回车（需辅助功能授权）
-            DispatchQueue.main.async { autoPasteEnter() }
-        case "sync":    // 设置变更 → 刷新菜单栏 + 桌面小组件（语言 / 外观跟随主面板）
-            DispatchQueue.main.async {
-                delegate?.updateIconState()
-                delegate?.widgetVC.refresh()
-            }
-        default:
-            break
-        }
+/// SwiftUI 承载层：把 AgentDeckKit 的根视图装进 NSHostingView，背景透明以透出系统玻璃。
+final class HostController: NSViewController {
+    private let host: NSView
+    init(_ root: some View) {
+        let h = NSHostingView(rootView: root)
+        h.layer?.backgroundColor = .clear
+        host = h
+        super.init(nibName: nil, bundle: nil)
     }
-}
-
-final class WebViewController: NSViewController {
-    var webView: WKWebView!
-    var path = "/"
-
-    override func loadView() {
-        let conf = WKWebViewConfiguration()
-        conf.userContentController.add(ControlBridge.shared, name: "control")
-        // 自定义 scheme + fetch body 包装：所有页面/接口请求绕系统代理直连 daemon
-        conf.setURLSchemeHandler(LocalSchemeHandler.shared, forURLScheme: "agentdeck")
-        conf.userContentController.addUserScript(
-            WKUserScript(source: kBodyWrapJS, injectionTime: .atDocumentStart,
-                         forMainFrameOnly: false))
-        webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 420, height: 640),
-                            configuration: conf)
-        webView.setValue(false, forKey: "drawsBackground") // 透明背景与玻璃 UI 融合
-        webView.underPageBackgroundColor = .clear          // 让系统液态玻璃材质透出
-        view = webView
-    }
-
-    func load() {
-        _ = view   // 确保 loadView 已执行（无 NSPopover 提前触发后必须显式拉起）
-        webView.load(URLRequest(url: URL(string: "\(kWebBase)\(path)")!))
-    }
-
-    func refresh() {
-        guard isViewLoaded else { return }
-        webView.evaluateJavaScript("window.refresh && window.refresh()", completionHandler: nil)
-    }
+    @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
+    override func loadView() { view = host }
 }
 
 // MARK: - 灵动岛式完成提醒
@@ -562,39 +408,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard abs(s - uiScale) > 0.001 else { return }
         uiScale = s
         UserDefaults.standard.set(Double(s), forKey: "fontScale")
-        // 尺寸切换用交叉淡变：WKWebView 渲染异步，任何「边框动画 + 内容追赶」的同步
-        // 方案都可能出现玻璃先到、内容后到的脱节。淡出 → 不可见时一步切到新尺寸并等
-        // 内容绘制提交（双 rAF）→ 淡入，中间状态不可见，绝无撕裂。
+        // 尺寸切换交叉淡变：原生 SwiftUI 内容随 fontScale 同步整体缩放（见 ScaledContainer），
+        // 这里只负责把承载窗口按同一系数放大/缩小，并用淡出→换尺寸→淡入掩盖布局突变。
         let animate: (NSWindow, NSRect) -> Void = { w, target in
             guard w.frame.size != target.size else { w.setFrame(target, display: true); return }
-            func findWeb(_ v: NSView) -> WKWebView? {
-                if let wk = v as? WKWebView { return wk }
-                for sub in v.subviews { if let hit = findWeb(sub) { return hit } }
-                return nil
-            }
-            let wk = w.contentView.flatMap(findWeb)
             NSAnimationContext.runAnimationGroup({ ctx in
                 ctx.duration = 0.12
                 ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
                 w.animator().alphaValue = 0
-            }, completionHandler: { [weak w, weak wk] in
+            }, completionHandler: { [weak w] in
                 guard let w else { return }
                 w.setFrame(target, display: true)
                 w.invalidateShadow()
-                let fadeIn = { [weak w] in
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) { [weak w] in
                     guard let w else { return }
                     NSAnimationContext.runAnimationGroup({ ctx in
                         ctx.duration = 0.18
                         ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
                         w.animator().alphaValue = 1
                     }, completionHandler: { [weak w] in w?.invalidateShadow() })
-                }
-                if let wk {   // 等新布局绘制提交后再淡入
-                    wk.callAsyncJavaScript(
-                        "await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(r, 16))))",
-                        arguments: [:], in: nil, in: .page) { _ in fadeIn() }
-                } else {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { fadeIn() }
                 }
             })
         }
@@ -634,7 +466,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var panel: KeyPanel?
     var clickMonitor: Any?
     var keyMonitor: Any?
-    let webVC = WebViewController()
+    // 单一数据 store：面板与桌面小组件共用一份轮询（@MainActor）。
+    let store = AppStore()
+    var panelHost: HostController?
+    var widgetHost: HostController?
     var backend: Process?
     var pollTimer: Timer?
     var eventTimer: Timer?
@@ -642,6 +477,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var eventsPrimed = false
     var loaded = false
     var appearanceObs: NSKeyValueObservation?   // 菜单栏明暗变化 → 重绘混色图标
+
+    var appVersion: String { Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev" }
+
+    /// 主面板根视图（接 store + 动作闭包）。
+    func makeRootView() -> AgentDeckRootView {
+        AgentDeckRootView(
+            store: store, version: appVersion,
+            onQuit: { NSApp.terminate(nil) },
+            onOpenExternal: { [weak self] in self?.openExternal($0) },
+            onPasteEnter: { autoPasteEnter() },
+            onHidePanel: { [weak self] in self?.hidePanel() },
+            onScale: { [weak self] z in self?.applyUIScale(z) })
+    }
+
+    /// 桌面小组件根视图（点击开主面板）。
+    func makeWidgetView() -> AgentDeckWidgetRootView {
+        AgentDeckWidgetRootView(store: store, onTapPanel: { [weak self] in self?.showPanel() })
+    }
+
+    /// 打开外部链接（更新下载 / GitHub issue / mailto 反馈）；mailto 走兜底。
+    func openExternal(_ s: String) {
+        guard let url = URL(string: s), let scheme = url.scheme,
+              ["http", "https", "mailto"].contains(scheme) else { return }
+        if scheme == "mailto" { openMailto(url) } else { NSWorkspace.shared.open(url) }
+    }
     // 多账号菜单栏轮转
     typealias MBItem = (tool: String, text: String, alert: NSColor?)
     var rotateTimer: Timer?
@@ -667,9 +527,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
         }
 
+        // 设置变更 → 即时重绘菜单栏（语言/常显用量/告警阈值等，等价 v1 "sync" 桥消息）
+        store.onSettingsChanged = { [weak self] in self?.updateIconState() }
+
         ensureBackend { [weak self] in
             DispatchQueue.main.async {
-                self?.webVC.load()
+                self?.store.start()   // 后端就绪后开始轮询（面板/小组件共用）
                 self?.loaded = true
                 if self?.widgetEnabled == true { self?.showWidget() }
             }
@@ -903,9 +766,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         effect.layer?.masksToBounds = true
         effect.autoresizingMask = [.width, .height]
 
-        webVC.view.frame = effect.bounds
-        webVC.view.autoresizingMask = [.width, .height]
-        effect.addSubview(webVC.view)
+        if panelHost == nil { panelHost = HostController(makeRootView()) }
+        let hv = panelHost!.view
+        hv.frame = effect.bounds
+        hv.autoresizingMask = [.width, .height]
+        effect.addSubview(hv)
         addRim(to: effect, radius: 28)   // 顶亮底暗渐变描边
         addEdgeCursor(to: effect)        // 边缘缩放光标提示
         p.contentView = effect
@@ -920,7 +785,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if panel == nil { panel = makePanel() }
         guard let p = panel, let button = statusItem.button,
               let bw = button.window else { return }
-        if !loaded { webVC.load(); loaded = true } else { webVC.refresh() }
+        loaded = true
+        Task { await store.refresh() }   // 开面板即刻拉一次最新数据
 
         // 尺寸：恢复用户上次拖拽的大小（不小于默认），高度不超过屏幕可视范围
         let d = UserDefaults.standard
@@ -963,7 +829,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     // MARK: - 桌面小组件（驻留桌面层的玻璃小窗）
     var widgetPanel: NSPanel?
-    let widgetVC = WebViewController()
 
     var widgetEnabled: Bool {
         get { UserDefaults.standard.bool(forKey: "widgetEnabled") }
@@ -1010,13 +875,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             effect.layer?.masksToBounds = true
             effect.autoresizingMask = [.width, .height]
 
-            widgetVC.path = "/?widget=1"
-            widgetVC.view.frame = effect.bounds
-            widgetVC.view.autoresizingMask = [.width, .height]
-            effect.addSubview(widgetVC.view)
+            if widgetHost == nil { widgetHost = HostController(makeWidgetView()) }
+            let wv = widgetHost!.view
+            wv.frame = effect.bounds
+            wv.autoresizingMask = [.width, .height]
+            effect.addSubview(wv)
             addRim(to: effect, radius: 28)   // 顶亮底暗渐变描边
             addEdgeCursor(to: effect, allowTop: false)   // 顶部是拖动把手
-            // 顶部 28px 原生拖拽把手（盖在 webview 之上）
+            // 顶部 28px 原生拖拽把手（盖在内容之上）
             let handle = DragHandle(frame: NSRect(x: 0, y: H - 28, width: W, height: 28))
             handle.autoresizingMask = [.width, .minYMargin]
             effect.addSubview(handle)
@@ -1041,7 +907,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             x = min(max(x, vis.minX + 8), vis.maxX - W - 8)
             y = min(max(y, vis.minY + 8), vis.maxY - H - 8)
             p.setFrame(NSRect(x: x, y: y, width: W, height: H), display: true)
-            widgetVC.load()
             for delay in [0.3, 1.2] {
                 DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak p] in
                     p?.invalidateShadow()

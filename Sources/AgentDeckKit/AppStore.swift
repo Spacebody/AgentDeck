@@ -11,8 +11,12 @@ struct UpdateInfo: Decodable {
 }
 
 @MainActor
-final class AppStore: ObservableObject {
-    init() {}
+public final class AppStore: ObservableObject {
+    // 仅初始化默认值，无需主线程隔离 → nonisolated，便于主壳在属性声明处直接构造。
+    public nonisolated init() {}
+
+    /// 设置变更后回调（主壳据此即时重绘菜单栏图标，等价 v1 的 "sync" 桥消息）。
+    public var onSettingsChanged: (() -> Void)?
 
     @Published var quota: QuotaResponse?
     @Published var usage: UsageResponse?
@@ -22,6 +26,7 @@ final class AppStore: ObservableObject {
     @Published var settings: [String: SettingValue] = [:]
     @Published var update: UpdateInfo?
     @Published var searchResults: [SessionItem]?   // 搜索态（nil=用周期列表）
+    @Published var online = true                   // 后端健康（驱动顶栏 live 点）
 
     var today: TodaySummary? { usage.flatMap { TodaySummary(from: $0) } }
     var sessionsShown: [SessionItem] { searchResults ?? sessions }
@@ -34,7 +39,7 @@ final class AppStore: ObservableObject {
     private var refreshInterval: Double { Double(max(5, settings["refresh_interval"]?.intVal ?? 30)) }
 
     // MARK: 轮询
-    func start() {
+    public func start() {
         Task { await loadSettings() }
         pollTask?.cancel()
         pollTask = Task { [weak self] in
@@ -45,10 +50,11 @@ final class AppStore: ObservableObject {
             }
         }
     }
-    func stop() { pollTask?.cancel(); pollTask = nil }
+    public func stop() { pollTask?.cancel(); pollTask = nil }
 
-    func refresh() async {
-        if let q: QuotaResponse = try? await api.get("/api/quota") { quota = q }
+    public func refresh() async {
+        if let q: QuotaResponse = try? await api.get("/api/quota") { quota = q; online = true }
+        else { online = false }
         if let u: UsageResponse = try? await api.get("/api/usage") { usage = u }
         if let a: ActiveResponse = try? await api.get("/api/active") { active = a.active }
         if let e: EventsResponse = try? await api.get("/api/events", query: ["recent": "4"]) {
@@ -84,6 +90,7 @@ final class AppStore: ObservableObject {
     func setSetting(_ key: String, _ value: SettingValue) {
         settings[key] = value
         applyCustomColors()
+        onSettingsChanged?()   // 即时刷新菜单栏（语言/常显用量/告警阈值等）
         Task {
             var body: [String: Any] = [:]
             switch value {
@@ -96,9 +103,22 @@ final class AppStore: ObservableObject {
         }
     }
 
+    /// 恢复默认配色：单请求清两色（避免两次 setSetting 竞态），后端回填空串=用默认。
     func resetColors() {
-        setSetting("color_claude", .string("#ff9d7a"))
-        setSetting("color_codex", .string("#4fd1c5"))
+        settings["color_claude"] = .string("")
+        settings["color_codex"] = .string("")
+        applyCustomColors()
+        Task {
+            _ = try? await api.postJSON("/api/settings", body: ["color_claude": "", "color_codex": ""])
+            await loadSettings()
+        }
+    }
+
+    /// 数据管理动作（打开目录 / 导出 CSV / 清空完成记录），对应 POST /api/data。
+    @discardableResult
+    func dataAction(_ action: String) async -> (ok: Bool, error: String?) {
+        let r = try? await api.postJSON("/api/data", body: ["action": action])
+        return ((r?["ok"] as? Bool) ?? false, r?["error"] as? String)
     }
 
     /// 自定义主色 → Brand 全局覆盖（额度环/进度条/用量图同步）。
