@@ -159,7 +159,7 @@ struct QuotaCardView: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .padding(.top, 2)
+            .padding(.top, 9)   // .qhead margin-bottom:9
         } else {
             // 错误/无额度态
             head(main: nil)
@@ -170,8 +170,9 @@ struct QuotaCardView: View {
     }
 
     // .qhead：徽章 + 名称 + 账号 tag + 右侧副信息（主窗口名 + 倒计时 + 重置进度条）
+    // v1 align-items:center → 徽章与名称垂直居中对齐。
     @ViewBuilder private func head(main: QuotaWindow?) -> some View {
-        HStack(alignment: .top, spacing: 6) {
+        HStack(alignment: .center, spacing: 6) {
             BrandBadge(brand: brand)
             Text(name).font(.system(size: 12.5, weight: .bold))
                 .lineLimit(1).fixedSize(horizontal: true, vertical: false)   // 名称不被右侧挤换行
