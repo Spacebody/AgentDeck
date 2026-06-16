@@ -33,6 +33,13 @@ public enum PreviewRender {
         }, scale: scale)
     }
 
+    /// 设置页（全展开，不滚动以便整图自检）。
+    public static func settingsPNG(scale: CGFloat = 2) -> Data? {
+        png(PanelChrome(height: 1480) {
+            SettingsView(values: PreviewSamples.settingsValues, scrollable: false, version: "1.26.0")
+        }, scale: scale)
+    }
+
     static func png<V: View>(_ view: V, scale: CGFloat) -> Data? {
         let renderer = ImageRenderer(content: view)
         renderer.scale = scale

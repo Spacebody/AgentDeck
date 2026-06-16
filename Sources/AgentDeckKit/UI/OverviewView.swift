@@ -135,6 +135,23 @@ enum PreviewSamples {
         PreviewMsg(role: "user", text: "把额度卡的进度环改成原生 SwiftUI，要和网页版一模一样"),
         PreviewMsg(role: "assistant", text: "好的，用 Circle().trim 实现进度环，阈值 ≥80 橙、≥95 红，中心显示百分比，渐变跟随品牌色。"),
     ]
+
+    static let settingsValues: [String: SettingValue] = [
+        "language": .string("auto"), "font_scale": .int(120), "glass_dim": .int(68),
+        "color_claude": .string("#ff9d7a"), "color_codex": .string("#4fd1c5"),
+        "minimal_mode": .bool(false), "show_active": .bool(true),
+        "show_claude": .bool(true), "show_codex": .bool(true),
+        "sessions_limit": .int(20), "refresh_interval": .int(30),
+        "sample_interval": .int(180), "quota_interval": .int(600),
+        "menubar_claude": .bool(true), "menubar_codex": .bool(false),
+        "menubar_value_dim": .string("shortest"), "menubar_alert_color": .bool(true),
+        "menubar_color_dim": .string("shortest"), "menubar_rotate_secs": .int(0),
+        "notify_enabled": .bool(true), "notify_warn": .int(80), "notify_crit": .int(95),
+        "notify_reset": .bool(true), "notify_session_done": .bool(true), "notify_done_min_secs": .int(30),
+        "island_dwell_secs": .int(5), "notify_sound": .bool(false),
+        "terminal": .string("auto"), "auto_paste_resume": .bool(false),
+        "keep_awake": .bool(true), "update_check": .bool(true),
+    ]
 }
 
 #Preview("概览 · 额度卡") {
