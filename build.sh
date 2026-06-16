@@ -73,15 +73,17 @@ build() {
   # SPM 同时构两架构产出通用二进制；部署目标由 Package.swift 的 platforms 决定（无需 -target）。
   # 系统框架（Cocoa/WebKit/ServiceManagement）随 import 自动链接，无需 -framework。
   # 产物路径用 --show-bin-path 解析，免去硬编码 .build 布局。
+  # 只构 AgentDeck 壳产物（不带开发用 PreviewGen）。
   local ARCHS=(--arch arm64 --arch x86_64)
-  if ! swift build -c release "${ARCHS[@]}" 2>"$DIST/.swiftbuild.err"; then
+  local PROD=(--product AgentDeck)
+  if ! swift build -c release "${PROD[@]}" "${ARCHS[@]}" 2>"$DIST/.swiftbuild.err"; then
     echo "  ⚠️ x86_64 交叉构建失败，回退 arm64-only（仍适配 ${MIN_MACOS}+ 的 Apple Silicon）"
     cat "$DIST/.swiftbuild.err" | tail -5
     ARCHS=(--arch arm64)
-    swift build -c release "${ARCHS[@]}"
+    swift build -c release "${PROD[@]}" "${ARCHS[@]}"
   fi
   rm -f "$DIST/.swiftbuild.err"
-  local BIN; BIN="$(swift build -c release "${ARCHS[@]}" --show-bin-path)"
+  local BIN; BIN="$(swift build -c release "${PROD[@]}" "${ARCHS[@]}" --show-bin-path)"
   cp "$BIN/AgentDeck" "$APP/Contents/MacOS/AgentDeck"
 
   # 自包含：后端 + UI + 图标全部入包

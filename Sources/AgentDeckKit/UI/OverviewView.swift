@@ -29,10 +29,14 @@ struct OverviewView: View {
 struct PanelChrome<Content: View>: View {
     @ViewBuilder var content: Content
     var body: some View {
-        ZStack {
+        ZStack(alignment: .top) {
             Theme.bg
             AuroraBackground(opacity: 0.72)
-            ScrollView { content.padding(14) }
+            // 不用 ScrollView：ImageRenderer 渲染不了其内容；定高 VStack 顶对齐即可。
+            VStack(spacing: 0) {
+                content.padding(14)
+                Spacer(minLength: 0)
+            }
         }
         .frame(width: 420, height: 780)
         .preferredColorScheme(.dark)

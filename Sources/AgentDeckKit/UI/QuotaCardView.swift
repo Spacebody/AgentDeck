@@ -143,6 +143,7 @@ struct QuotaCardView: View {
         HStack(alignment: .top, spacing: 6) {
             BrandBadge(brand: brand)
             Text(name).font(.system(size: 12.5, weight: .bold))
+                .lineLimit(1).fixedSize(horizontal: true, vertical: false)   // 名称不被右侧挤换行
             if let acct = accountLabel, !acct.isEmpty {
                 Text(acct).font(.system(size: 9.5, weight: .semibold))
                     .foregroundStyle(Theme.ink2)

@@ -25,5 +25,13 @@ let package = Package(
                 .swiftLanguageMode(.v5),
             ]
         ),
+        // 开发用无头预览生成器：`swift run PreviewGen` 把视图渲染成 PNG 看效果。
+        // 不进 .app（build.sh 用 --product AgentDeck 只打包壳）。
+        .executableTarget(
+            name: "PreviewGen",
+            dependencies: ["AgentDeckKit"],
+            path: "Sources/PreviewGen",
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
     ]
 )
