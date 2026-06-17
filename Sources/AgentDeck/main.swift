@@ -256,6 +256,10 @@ final class HostController: NSViewController {
     init(_ root: some View) {
         let h = NSHostingView(rootView: root)
         h.layer?.backgroundColor = .clear
+        // 关键：不让 NSHostingView 用 SwiftUI 内容尺寸去驱动/约束窗口大小，
+        // 否则用户手动拉伸会被内容尺寸顶回（表现为「重开仍是原始大小」）。
+        // 窗口尺寸完全由 AppDelegate（保存/恢复 panelW/H）说了算，内容随窗口自适应。
+        h.sizingOptions = []
         host = h
         super.init(nibName: nil, bundle: nil)
     }
