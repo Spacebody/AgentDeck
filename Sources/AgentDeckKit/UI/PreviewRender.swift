@@ -8,6 +8,9 @@ public enum PreviewRender {
     /// 开发期切换预览语言（zh-CN / en / ja），验证三语布局。
     public static func setLocale(_ l: String) { I18N.locale = l }
 
+    /// 无头渲染前调用：玻璃回退 SwiftUI 材质（ImageRenderer 渲不出 NSVisualEffectView）。
+    public static func useMaterialGlass() { GlassRender.useNativeEffect = false }
+
     /// 渲染概览页（额度卡）到 PNG 数据。scale=2 出 @2x 清晰图。
     public static func overviewPNG(scale: CGFloat = 2) -> Data? {
         png(PanelChrome(height: 1080) {

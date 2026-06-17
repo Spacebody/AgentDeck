@@ -30,10 +30,12 @@ struct OverviewView: View {
         // accounts 列表（多账号）→ carousel；缺失则回退顶层单账号节点。
         let claudeAccts = quota?.accounts?.claude ?? (claude.map { [$0] } ?? [])
         let codexAccts = quota?.accounts?.codex ?? (codex.map { [$0] } ?? [])
+        // fillHeight + fixedSize(vertical)：两卡撑到同高（对应 v1 grid stretch）。
         HStack(alignment: .top, spacing: 10) {
-            if showClaude { QuotaCarousel(brand: .claude, accounts: claudeAccts) }
-            if showCodex { QuotaCarousel(brand: .codex, accounts: codexAccts) }
+            if showClaude { QuotaCarousel(brand: .claude, accounts: claudeAccts, fillHeight: true) }
+            if showCodex { QuotaCarousel(brand: .codex, accounts: codexAccts, fillHeight: true) }
         }
+        .fixedSize(horizontal: false, vertical: true)
     }
 }
 

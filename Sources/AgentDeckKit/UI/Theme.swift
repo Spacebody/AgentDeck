@@ -3,6 +3,10 @@
 import SwiftUI
 import AppKit
 
+// 玻璃渲染开关：真机用原生 NSVisualEffectView；无头 PreviewGen（ImageRenderer 渲不出 NSView，
+// 会出红色禁止符占位）切到 SwiftUI 材质，保留 PNG 自检能力。
+enum GlassRender { static var useNativeEffect = true }
+
 // MARK: - 原生玻璃背板（NSVisualEffectView）。SwiftUI 的 .ultraThin/.thinMaterial 只近似，
 // 要复刻 v1 的 backdrop-filter blur(36) saturate(190) 真磨砂，得用 AppKit 的视觉效果视图。
 // withinWindow 混合：采样卡片在窗内身后的内容（面板玻璃 + scrim + aurora），= v1 卡片观感。
@@ -115,19 +119,31 @@ struct GlassCard: ViewModifier {
                         .fill(Color.white.opacity(0.055))
                 } else {
                     ZStack {
-                        // 真磨砂：NSVisualEffectView（withinWindow）采样身后玻璃+scrim+aurora（≈ v1 backdrop-filter）
-                        VisualEffectBackground()
+                        // 真磨砂：NSVisualEffectView（withinWindow）采样身后玻璃+scrim+aurora（≈ v1 backdrop-filter）。
+                        // 无头预览回退 thinMaterial（ImageRenderer 渲不出 NSView）。
+                        if GlassRender.useNativeEffect {
+                            VisualEffectBackground()
+                        } else {
+                            Rectangle().fill(.thinMaterial)
+                        }
                         // 顶亮底暗白渐变（linear-gradient(180deg, .085 → .04)），给文字一层可读性底
-                        // （ImageRenderer 渲不出上面的 NSVisualEffectView，预览里卡片只剩这层淡渐变，属正常）
                         LinearGradient(colors: [Color.white.opacity(0.085), Color.white.opacity(0.04)],
                                        startPoint: .top, endPoint: .bottom)
                     }
                     .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
                 }
             }
-            .overlay {   // 描边（rgba(255,255,255,.13) / minimal .09）
+            .overlay {
+                // 描边：顶亮→底暗的渐变环，复刻 v1 .card 的 inset 0 1px rgba(255,255,255,.22) 镜面高光，
+                // 给玻璃「液态」质感（精简模式收敛为近匀色）。
                 RoundedRectangle(cornerRadius: radius, style: .continuous)
-                    .strokeBorder(Color.white.opacity(minimal ? 0.09 : 0.13), lineWidth: 1)
+                    .strokeBorder(
+                        LinearGradient(
+                            colors: minimal
+                                ? [Color.white.opacity(0.12), Color.white.opacity(0.06)]
+                                : [Color.white.opacity(0.30), Color.white.opacity(0.12), Color.black.opacity(0.10)],
+                            startPoint: .top, endPoint: .bottom),
+                        lineWidth: 1)
             }
             .shadow(color: .black.opacity(minimal ? 0.28 : 0.35),
                     radius: minimal ? 11 : 16, x: 0, y: minimal ? 8 : 12)
@@ -171,8 +187,13 @@ struct AuroraBackground: View {
                 ForEach(blobs) { b in
                     let d = max(geo.size.width, geo.size.height) * b.size
                     Circle()
-                        .fill(RadialGradient(colors: [b.color, b.color.opacity(0)],
-                                             center: .center, startRadius: 0, endRadius: d * 0.5))
+                        // v1 每团 opacity .72（容器再 .18），核心实色到 ~55% 再淡出（透明 65%）。
+                        // 之前用满透明度 → aurora 比 v1 浓约 40%，背景发糊压低文字对比。对齐 v1。
+                        .fill(RadialGradient(
+                            stops: [.init(color: b.color.opacity(0.72), location: 0),
+                                    .init(color: b.color.opacity(0.72), location: 0.5),
+                                    .init(color: b.color.opacity(0), location: 1)],
+                            center: .center, startRadius: 0, endRadius: d * 0.5))
                         .frame(width: d, height: d)
                         .position(x: geo.size.width * b.x + (drift ? minSide * b.dx : 0),
                                   y: geo.size.height * b.y + (drift ? minSide * b.dy : 0))

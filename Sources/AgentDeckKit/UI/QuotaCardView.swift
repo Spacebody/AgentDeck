@@ -129,6 +129,7 @@ struct QuotaCarousel: View {
     let brand: Brand
     let accounts: [QuotaNode]
     var compact: Bool = false
+    var fillHeight: Bool = false
 
     @State private var page = 0
     @State private var width: CGFloat = 0
@@ -136,12 +137,13 @@ struct QuotaCarousel: View {
 
     var body: some View {
         if accounts.count <= 1 {
-            QuotaCardView(brand: brand, node: accounts.first, compact: compact)
+            QuotaCardView(brand: brand, node: accounts.first, compact: compact, fillHeight: fillHeight)
         } else {
             VStack(spacing: 8) {
                 HStack(spacing: 0) {
                     ForEach(Array(accounts.enumerated()), id: \.offset) { _, node in
-                        QuotaCardView(brand: brand, node: node, accountLabel: node.account, compact: compact)
+                        QuotaCardView(brand: brand, node: node, accountLabel: node.account,
+                                      compact: compact, fillHeight: fillHeight)
                             .frame(width: width > 0 ? width : nil)
                     }
                 }
@@ -190,6 +192,8 @@ struct QuotaCardView: View {
     var accountLabel: String? = nil
     /// 小组件紧凑模式：圆角 16、去重置进度条、内距收紧（对应 body.wgt .qcard）。
     var compact: Bool = false
+    /// 等高拉伸：两张额度卡并排时撑到同高（对应 v1 CSS grid stretch）。
+    var fillHeight: Bool = false
 
     private var name: String { brand == .claude ? "Claude" : "Codex" }
     private var radius: CGFloat { compact ? 16 : Theme.rLg }
@@ -200,7 +204,7 @@ struct QuotaCardView: View {
         }
         .padding(compact ? EdgeInsets(top: 10, leading: 11, bottom: 8, trailing: 11)
                          : EdgeInsets(top: 13, leading: 13, bottom: 11, trailing: 13))
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, maxHeight: fillHeight ? .infinity : nil, alignment: .topLeading)
         .background(alignment: .topTrailing) {   // qcard::before 品牌辉光（右上角径向）
             RadialGradient(colors: [brand.tint, .clear], center: .topTrailing,
                            startRadius: 0, endRadius: 170)

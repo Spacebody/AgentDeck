@@ -76,14 +76,10 @@ struct SettingsView: View {
         case let .colors(label, hint, opts):
             setrow(label, hint) {
                 HStack(spacing: 8) {
-                    ForEach(opts, id: \.0) { k, name, def in
-                        ColorPicker(selection: colorBinding(k, def: def), supportsOpacity: false) {
-                            Text(name).font(.system(size: 11)).foregroundStyle(Theme.ink2)
-                        }
-                        .labelsHidden().frame(width: 22, height: 22)
-                    }
+                    ForEach(opts, id: \.0) { k, _, def in colorSwatch(k, def: def) }
                     Button(L("set.resetColors"), action: onResetColors)
                         .buttonStyle(.plain).font(.system(size: 9.5)).foregroundStyle(Theme.ink3)
+                        .fixedSize()
                 }
             }
         case let .btns(label, hint, btns):
@@ -161,6 +157,28 @@ struct SettingsView: View {
     private func bool(_ key: String) -> Binding<Bool> {
         Binding(get: { values[key]?.boolVal ?? false }, set: { onSet(key, .bool($0)) })
     }
+    /// 22×22 圆角色块（对应 v1 .colordot 22px swatch）。系统 ColorPicker 色井在 macOS 上
+    /// 尺寸固定且偏大，硬塞 frame 会溢出挤掉「恢复默认」；改为自绘色块 + 顶一层近透明 ColorPicker
+    /// 接管点击（裁到 22×22），既受控又能弹系统取色盘。
+    private func colorSwatch(_ key: String, def: String) -> some View {
+        let binding = colorBinding(key, def: def)
+        return RoundedRectangle(cornerRadius: 7, style: .continuous)
+            .fill(binding.wrappedValue)
+            .frame(width: 22, height: 22)
+            .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).strokeBorder(Theme.edgeHi))
+            .overlay(
+                SwiftUI.Group {
+                    if GlassRender.useNativeEffect {   // 无头预览不放 NSView 色井（会出禁止符占位）
+                        ColorPicker("", selection: binding, supportsOpacity: false)
+                            .labelsHidden()
+                            .opacity(0.02)            // 隐形但可点
+                    }
+                }
+            )
+            .frame(width: 22, height: 22)
+            .clipped()                        // 裁掉溢出的系统色井，布局只占 22pt
+    }
+
     private func colorBinding(_ key: String, def: String) -> Binding<Color> {
         Binding(get: { Color(hexString: values[key]?.stringVal ?? def) ?? Color(hexString: def)! },
                 set: { onSet(key, .string($0.hexString)) })
