@@ -88,7 +88,9 @@ struct GlassCard: ViewModifier {
         content
             .background {
                 RoundedRectangle(cornerRadius: radius, style: .continuous)
-                    .fill(.ultraThinMaterial)   // 模糊背板（≈ backdrop-filter blur）
+                    // v1 卡是 backdrop-filter blur(36) saturate(190) 的厚磨砂；ultraThin 太薄会让
+                    // aurora 透出、文字对比下降。用 thinMaterial（精简模式更薄）更接近 v1 的清晰度。
+                    .fill(minimal ? AnyShapeStyle(.ultraThinMaterial) : AnyShapeStyle(.thinMaterial))
                     .overlay {
                         if !minimal {
                             // 顶亮底暗白渐变（linear-gradient(180deg, .085 → .04)）
@@ -156,6 +158,7 @@ struct AuroraBackground: View {
             .frame(width: geo.size.width, height: geo.size.height)
             .blur(radius: 70)
             .saturation(1.5)
+            .drawingGroup()   // Metal 离屏合成：blur/saturation 走 GPU，drift 不再每帧 CPU 重算（消抖）
             .opacity(opacity)
         }
         .ignoresSafeArea()
