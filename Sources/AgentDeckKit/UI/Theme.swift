@@ -1,6 +1,28 @@
 // AgentDeck v2 — 设计系统。把 static/index.html 的 :root CSS 变量与玻璃/aurora
 // 视觉语言译成原生 SwiftUI。颜色/圆角/字体 token 与 v1 对齐，便于逐屏比对。
 import SwiftUI
+import AppKit
+
+// MARK: - 原生玻璃背板（NSVisualEffectView）。SwiftUI 的 .ultraThin/.thinMaterial 只近似，
+// 要复刻 v1 的 backdrop-filter blur(36) saturate(190) 真磨砂，得用 AppKit 的视觉效果视图。
+// withinWindow 混合：采样卡片在窗内身后的内容（面板玻璃 + scrim + aurora），= v1 卡片观感。
+struct VisualEffectBackground: NSViewRepresentable {
+    var material: NSVisualEffectView.Material = .hudWindow
+    var blending: NSVisualEffectView.BlendingMode = .withinWindow
+
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let v = NSVisualEffectView()
+        v.material = material
+        v.blendingMode = blending
+        v.state = .active
+        v.isEmphasized = false
+        return v
+    }
+    func updateNSView(_ v: NSVisualEffectView, context: Context) {
+        v.material = material
+        v.blendingMode = blending
+    }
+}
 
 // MARK: - 颜色 token（对应 index.html :root，白底叠加用 opacity 表达 rgba(255,255,255,a)）
 enum Theme {
@@ -87,23 +109,25 @@ struct GlassCard: ViewModifier {
     func body(content: Content) -> some View {
         content
             .background {
+                if minimal {
+                    // 精简模式：平面浅白底，无磨砂（对应 body.minimal .card）
+                    RoundedRectangle(cornerRadius: radius, style: .continuous)
+                        .fill(Color.white.opacity(0.055))
+                } else {
+                    ZStack {
+                        // 真磨砂：NSVisualEffectView（withinWindow）采样身后玻璃+scrim+aurora（≈ v1 backdrop-filter）
+                        VisualEffectBackground()
+                        // 顶亮底暗白渐变（linear-gradient(180deg, .085 → .04)），给文字一层可读性底
+                        // （ImageRenderer 渲不出上面的 NSVisualEffectView，预览里卡片只剩这层淡渐变，属正常）
+                        LinearGradient(colors: [Color.white.opacity(0.085), Color.white.opacity(0.04)],
+                                       startPoint: .top, endPoint: .bottom)
+                    }
+                    .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
+                }
+            }
+            .overlay {   // 描边（rgba(255,255,255,.13) / minimal .09）
                 RoundedRectangle(cornerRadius: radius, style: .continuous)
-                    // v1 卡是 backdrop-filter blur(36) saturate(190) 的厚磨砂；ultraThin 太薄会让
-                    // aurora 透出、文字对比下降。用 thinMaterial（精简模式更薄）更接近 v1 的清晰度。
-                    .fill(minimal ? AnyShapeStyle(.ultraThinMaterial) : AnyShapeStyle(.thinMaterial))
-                    .overlay {
-                        if !minimal {
-                            // 顶亮底暗白渐变（linear-gradient(180deg, .085 → .04)）
-                            RoundedRectangle(cornerRadius: radius, style: .continuous)
-                                .fill(LinearGradient(
-                                    colors: [Color.white.opacity(0.085), Color.white.opacity(0.04)],
-                                    startPoint: .top, endPoint: .bottom))
-                        }
-                    }
-                    .overlay {   // 描边（rgba(255,255,255,.13) / minimal .09）
-                        RoundedRectangle(cornerRadius: radius, style: .continuous)
-                            .strokeBorder(Color.white.opacity(minimal ? 0.09 : 0.13), lineWidth: 1)
-                    }
+                    .strokeBorder(Color.white.opacity(minimal ? 0.09 : 0.13), lineWidth: 1)
             }
             .shadow(color: .black.opacity(minimal ? 0.28 : 0.35),
                     radius: minimal ? 11 : 16, x: 0, y: minimal ? 8 : 12)
