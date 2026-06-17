@@ -169,6 +169,8 @@ public struct AgentDeckRootView: View {
             Spacer()
             IconButton(system: "gearshape", fontSize: 16) { showSettings = true }
             IconButton(system: "arrow.clockwise", weight: .bold, fontSize: 15, spinning: spinning) { manualRefresh() }
+            // 原生壳里显示退出按钮（对应 v1：bridge 存在时 #quit 显示）。
+            IconButton(system: "power", weight: .bold, fontSize: 15, danger: true) { onQuit() }
         }
     }
 
