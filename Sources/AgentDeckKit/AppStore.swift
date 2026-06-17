@@ -28,9 +28,19 @@ public final class AppStore: ObservableObject {
     @Published var searchResults: [SessionItem]?   // 搜索态（nil=用周期列表）
     @Published var online = true                   // 后端健康（驱动顶栏 live 点）
 
+    @Published var terminals: [TerminalOption] = []   // /api/terminals 已安装终端（恢复方式选项）
+
     var today: TodaySummary? { usage.flatMap { TodaySummary(from: $0) } }
-    var sessionsShown: [SessionItem] { searchResults ?? sessions }
     var updateAvailable: Bool { update?.available == true }
+
+    /// 该 agent 是否展示（设置 show_claude/show_codex；默认 true，对应 v1 agentOn）。
+    func agentOn(_ tool: String) -> Bool { settings["show_\(tool)"]?.boolVal ?? true }
+    var showActive: Bool { settings["show_active"]?.boolVal ?? true }
+
+    // 列表按 show_claude/show_codex 过滤（daemon 不过滤这几个，对齐 v1 客户端 agentOn）。
+    var sessionsShown: [SessionItem] { (searchResults ?? sessions).filter { agentOn($0.tool) } }
+    var activeShown: [ActiveSession] { active.filter { agentOn($0.tool) } }
+    var doneShown: [DoneEvent] { done.filter { agentOn($0.tool) } }
 
     private let api = APIClient.shared
     private var pollTask: Task<Void, Never>?
@@ -41,6 +51,7 @@ public final class AppStore: ObservableObject {
     // MARK: 轮询
     public func start() {
         Task { await loadSettings() }
+        Task { await loadTerminals() }
         pollTask?.cancel()
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
@@ -86,6 +97,10 @@ public final class AppStore: ObservableObject {
         settings = out
         applyCustomColors()
         I18N.locale = I18N.resolve(settings["language"]?.stringVal ?? "auto")
+    }
+
+    func loadTerminals() async {
+        if let r: TerminalsResponse = try? await api.get("/api/terminals") { terminals = r.terminals }
     }
 
     func setSetting(_ key: String, _ value: SettingValue) {

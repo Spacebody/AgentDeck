@@ -43,6 +43,10 @@ struct PreviewMsg: Decodable, Identifiable {
     var id: String { role + text.prefix(24) }
 }
 
+// /api/terminals → {terminals:[{mode, name}]}（已安装终端，恢复方式选项）
+struct TerminalsResponse: Decodable { let terminals: [TerminalOption] }
+struct TerminalOption: Decodable { let mode: String; let name: String }
+
 // /api/resume 应答（仅复制 / 唤起粘贴模式）
 struct ResumeResult: Decodable {
     let ok: Bool

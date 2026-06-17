@@ -167,21 +167,25 @@ private struct SessionRow: View {
     }
 
     @ViewBuilder private var previewBox: some View {
-        if let msgs = preview, !msgs.isEmpty {
-            VStack(alignment: .leading, spacing: 5) {
-                ForEach(msgs) { m in
-                    HStack(alignment: .top, spacing: 7) {
-                        Text(m.role == "user" ? L("session.roleUser") : L("session.roleAI"))
-                            .font(.system(size: 8.5, weight: .heavy))
-                            .foregroundStyle(m.role == "user" ? Brand.codex.accent : Brand.claude.accent)
-                            .frame(width: 18, alignment: .leading)
-                        Text(m.text).font(.system(size: 10.5)).foregroundStyle(Theme.ink2)
-                            .lineLimit(2).lineSpacing(2)
+        if let msgs = preview {   // 已加载：有内容→渲染；空→无预览
+            if msgs.isEmpty {
+                Text(L("session.noPreview")).font(.system(size: 9.5)).foregroundStyle(Theme.ink3)
+            } else {
+                VStack(alignment: .leading, spacing: 5) {
+                    ForEach(msgs) { m in
+                        HStack(alignment: .top, spacing: 7) {
+                            Text(m.role == "user" ? L("session.roleUser") : L("session.roleAI"))
+                                .font(.system(size: 8.5, weight: .heavy))
+                                .foregroundStyle(m.role == "user" ? Brand.codex.accent : Brand.claude.accent)
+                                .frame(width: 18, alignment: .leading)
+                            Text(m.text).font(.system(size: 10.5)).foregroundStyle(Theme.ink2)
+                                .lineLimit(2).lineSpacing(2)
+                        }
                     }
                 }
             }
-        } else {
-            Text(L("session.noPreview")).font(.system(size: 9.5)).foregroundStyle(Theme.ink3)
+        } else {   // 仍在加载（preview 尚为 nil）
+            Text(L("session.loadingPreview")).font(.system(size: 9.5)).foregroundStyle(Theme.ink3)
         }
     }
 }

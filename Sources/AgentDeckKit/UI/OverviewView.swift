@@ -8,6 +8,7 @@ struct OverviewView: View {
     var today: TodaySummary? = nil
     var active: [ActiveSession] = []
     var done: [DoneEvent] = []
+    var showActive: Bool = true
     var onFocusActive: (ActiveSession) -> Void = { _ in }
     var onFocusDone: (DoneEvent) -> Void = { _ in }
 
@@ -15,7 +16,7 @@ struct OverviewView: View {
         VStack(spacing: 10) {
             quotaSection
             if let today { TodayBar(summary: today) }
-            ActiveCard(sessions: active, onTap: onFocusActive)
+            if showActive { ActiveCard(sessions: active, onTap: onFocusActive) }
             DoneCard(events: done, onTap: onFocusDone)
             UsageView(usage: usage)   // 用量趋势（24h / 近7天 / 项目 Top）
         }

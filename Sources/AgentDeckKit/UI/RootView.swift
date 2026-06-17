@@ -239,6 +239,7 @@ public struct AgentDeckRootView: View {
                         .shadow(color: .black.opacity(0.25), radius: 4, y: 2)
                 }
             }
+            .contentShape(Rectangle())   // 整块可点：off tab 背景透明，否则只有图标/文字命中 → 切不回去
         }.buttonStyle(.plain)
     }
 
@@ -247,7 +248,7 @@ public struct AgentDeckRootView: View {
         if tab == "overview" {
             let overview = OverviewView(
                 quota: store.quota, usage: store.usage, today: store.today,
-                active: store.active, done: store.done,
+                active: store.activeShown, done: store.doneShown, showActive: store.showActive,
                 onFocusActive: focusActive, onFocusDone: focusDone)
             if previewMode { overview } else { ScrollView { overview }.scrollIndicators(.hidden) }
         } else {
@@ -281,6 +282,7 @@ public struct AgentDeckRootView: View {
                 }
                 SettingsView(
                     values: store.settings, scrollable: !previewMode,
+                    terminals: store.terminals.map { ($0.mode, $0.name) },
                     onSet: { store.setSetting($0, $1) },
                     onAction: settingsAction,
                     onResetColors: { store.resetColors(); showToast(L("set.colorsReset")) },
@@ -484,7 +486,8 @@ public struct AgentDeckWidgetRootView: View {
                 Capsule().fill(Color.white.opacity(0.28)).frame(width: 36, height: 4)
                     .padding(.top, 7).frame(maxWidth: .infinity, alignment: .center)
                 WidgetView(
-                    quota: store.quota, today: store.today, active: store.active,
+                    quota: store.quota, today: store.today, active: store.activeShown,
+                    showActive: store.showActive,
                     onTapPanel: onTapPanel,
                     onFocusActive: { a in
                         // 小组件常驻桌面：跳转成功不收起自身

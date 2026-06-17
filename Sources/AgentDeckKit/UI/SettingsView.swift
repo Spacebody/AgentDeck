@@ -5,6 +5,8 @@ import SwiftUI
 struct SettingsView: View {
     var values: [String: SettingValue] = [:]
     var scrollable: Bool = true
+    /// 已安装终端（mode, name）；用于「恢复方式」动态选项（对应 v1 /api/terminals）。
+    var terminals: [(String, String)] = []
     var onSet: (String, SettingValue) -> Void = { _, _ in }
     var onAction: (String) -> Void = { _ in }
     var onResetColors: () -> Void = {}
@@ -58,7 +60,11 @@ struct SettingsView: View {
         case let .chips(key, label, hint, opts, fmt, custom):
             setrow(label, hint) { chips(key: key, opts: opts, fmt: fmt, custom: custom) }
         case let .select(key, label, hint, opts):
-            setrow(label, hint) { selectMenu(key: key, opts: opts) }
+            // 恢复方式：auto + 已安装终端 + copy（对应 v1 /api/terminals 动态注入）。
+            let effective = key == "terminal" && !terminals.isEmpty
+                ? [("auto", "set.termAuto")] + terminals + [("copy", "set.termCopy")]
+                : opts
+            setrow(label, hint) { selectMenu(key: key, opts: effective) }
         case let .multi(label, hint, opts):
             setrow(label, hint) {
                 HStack(spacing: 4) {

@@ -6,6 +6,7 @@ struct WidgetView: View {
     let quota: QuotaResponse?
     var today: TodaySummary? = nil
     var active: [ActiveSession] = []
+    var showActive: Bool = true
     var onTapPanel: () -> Void = {}
     var onFocusActive: (ActiveSession) -> Void = { _ in }
 
@@ -22,7 +23,7 @@ struct WidgetView: View {
                 }
             }
             if let today { TodayBar(summary: today) }
-            ActiveCard(sessions: active, onTap: onFocusActive)
+            if showActive { ActiveCard(sessions: active, onTap: onFocusActive) }
         }
         .contentShape(Rectangle())
         .onTapGesture(perform: onTapPanel)   // 点击小组件 → 打开主面板（body.wgt #quota/#active cursor:pointer）
