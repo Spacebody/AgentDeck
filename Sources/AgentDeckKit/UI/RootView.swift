@@ -43,6 +43,7 @@ struct IconButton: View {
     var spinning = false
     let action: () -> Void
     @State private var hover = false
+    @State private var spinAngle: Double = 0
 
     // 颜色/底/描边随 hover 计算（对应 v1 .iconbtn:hover 与 #quit:hover 的三处变化）
     private var fg: Color { danger && hover ? Theme.danger : (hover ? Theme.ink : Theme.ink2) }
@@ -55,7 +56,7 @@ struct IconButton: View {
                 .font(.system(size: fontSize, weight: weight))
                 .foregroundStyle(fg)
                 .frame(width: size, height: size)          // 先定方框，再绕方框中心旋转 → 同心转，不晃
-                .rotationEffect(.degrees(spinning ? 360 : 0), anchor: .center)
+                .rotationEffect(.degrees(spinAngle), anchor: .center)
                 .background(Circle().fill(bg))
                 .overlay(Circle().strokeBorder(border))
                 .offset(y: hover ? -1 : 0)                 // :hover translateY(-1px)
@@ -64,10 +65,21 @@ struct IconButton: View {
         .onHover { hover = $0 }
         // v1 transition:.18s 作用于 background/color/transform/border 全属性，CSS 默认 ease ≈ easeInOut。
         .animation(.easeInOut(duration: 0.18), value: hover)
-        // 刷新自旋：顺时针连续（对应 v1 @keyframes rot → rotate(360deg)）。
-        // 停止时用 0 时长瞬切归零，绝不让 360→0 倒着逆时针回弹（那才是「方向不对」的观感）。
-        .animation(spinning ? .linear(duration: 0.7).repeatForever(autoreverses: false)
-                            : .linear(duration: 0), value: spinning)
+        // 自旋用显式 withAnimation 驱动 @State 角度（不走 .animation(.repeatForever,value:)——
+        // 轮询每次刷新会重绘整树、把那种隐式 repeatForever 取消掉，表现为「点了不转」）。
+        .onChange(of: spinning) { spin($0) }
+        .onAppear { if spinning { spin(true) } }
+    }
+
+    /// 顺时针连续自旋（对应 v1 @keyframes rot → rotate(360deg)）；停止时瞬切归零、不逆转回弹。
+    private func spin(_ on: Bool) {
+        if on {
+            spinAngle = 0
+            withAnimation(.linear(duration: 0.7).repeatForever(autoreverses: false)) { spinAngle = 360 }
+        } else {
+            var t = Transaction(); t.disablesAnimations = true
+            withTransaction(t) { spinAngle = 0 }
+        }
     }
 }
 

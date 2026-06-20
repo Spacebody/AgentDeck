@@ -64,18 +64,26 @@ public final class AppStore: ObservableObject {
     public func stop() { pollTask?.cancel(); pollTask = nil }
 
     public func refresh() async {
-        if let q: QuotaResponse = try? await api.get("/api/quota") { quota = q; online = true }
-        else { online = false }
-        if let u: UsageResponse = try? await api.get("/api/usage") { usage = u }
-        if let a: ActiveResponse = try? await api.get("/api/active") { active = a.active }
-        if let e: EventsResponse = try? await api.get("/api/events", query: ["recent": "4"]) {
+        // 6 个接口并发拉取（旧实现串行 → 启动/手动刷新要等全部之和；quota 还出站打 Anthropic 最慢，
+        // 串行时它把整屏都拖住）。APIClient 是 actor，并发 get 在各自 await 网络处挂起、互不阻塞。
+        let needSessions = searchResults == nil
+        async let quotaR:    QuotaResponse?    = try? await api.get("/api/quota")
+        async let usageR:    UsageResponse?    = try? await api.get("/api/usage")
+        async let activeR:   ActiveResponse?   = try? await api.get("/api/active")
+        async let eventsR:   EventsResponse?   = try? await api.get("/api/events", query: ["recent": "4"])
+        async let sessionsR: SessionsResponse? = needSessions ? (try? await api.get("/api/sessions")) : nil
+        async let updateR:   UpdateInfo?       = try? await api.get("/api/update")
+
+        // 本地快接口先落地渲染（概览卡/会话即时出来），出站慢接口(quota/update)随后补上。
+        if let u = await usageR { usage = u }
+        if let a = await activeR { active = a.active }
+        if let e = await eventsR {
             let cutoff = Date().timeIntervalSince1970 - 86400
             done = e.events.filter { $0.ts > cutoff }
         }
-        if searchResults == nil, let s: SessionsResponse = try? await api.get("/api/sessions") {
-            sessions = s.sessions
-        }
-        update = try? await api.get("/api/update")
+        if needSessions, let s = await sessionsR { sessions = s.sessions }
+        if let q = await quotaR { quota = q; online = true } else { online = false }
+        if let up = await updateR { update = up }
     }
 
     // MARK: 设置
