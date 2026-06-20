@@ -226,10 +226,11 @@ struct Reveal: ViewModifier {
 
     func body(content: Content) -> some View {
         content
-            .opacity(skip || shown ? 1 : 0)
+            .opacity(skip || shown ? 1 : 0)        // skip 时即显（含无头 PreviewGen，onAppear 不触发）
             .offset(y: skip || shown ? 0 : distance)
             .onAppear {
-                guard !skip else { return }
+                // 精简：直接把 shown 置真（不能只 return——否则之后关掉精简模式时 skip=false 且 shown=false → opacity(0) 整页空白）。
+                if skip { shown = true; return }
                 withAnimation(.timingCurve(0.2, 0.7, 0.2, 1, duration: duration).delay(delay)) { shown = true }
             }
     }

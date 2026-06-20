@@ -33,6 +33,23 @@ struct ScaledContainer<Content: View>: View {
     }
 }
 
+// MARK: - 刷新图标（照搬 v1 Feather refresh-cw 的两段 SVG path，24×24 viewBox）
+// path1 箭头角 M23 4 v6 h-6；path2 大圆弧 M20.49 15 a9 9 …→(18.37,5.64) L23 10
+// SVG 椭圆弧换算：圆心(12,12) r9，起点角 19.45°、绕大弧(顺时针/增角)到 315°。
+struct RefreshCWShape: Shape {
+    func path(in rect: CGRect) -> Path {
+        let s = min(rect.width, rect.height) / 24
+        func P(_ x: CGFloat, _ y: CGFloat) -> CGPoint { CGPoint(x: rect.minX + x * s, y: rect.minY + y * s) }
+        var p = Path()
+        p.move(to: P(23, 4)); p.addLine(to: P(23, 10)); p.addLine(to: P(17, 10))   // 箭头角
+        p.move(to: P(20.49, 15))                                                    // 大圆弧 + 尾线
+        p.addArc(center: P(12, 12), radius: 9 * s,
+                 startAngle: .degrees(19.45), endAngle: .degrees(315), clockwise: false)
+        p.addLine(to: P(23, 10))
+        return p
+    }
+}
+
 // MARK: - 圆形玻璃图标按钮（.iconbtn）
 struct IconButton: View {
     let system: String
@@ -41,6 +58,8 @@ struct IconButton: View {
     var size: CGFloat = 32
     var danger = false
     var spinning = false
+    /// 用 v1 原样刷新字形（RefreshCWShape）替代 SF Symbol。
+    var customRefresh = false
     let action: () -> Void
     @State private var hover = false
 
@@ -69,10 +88,18 @@ struct IconButton: View {
         .animation(.easeInOut(duration: 0.18), value: hover)
     }
 
-    private func glyph(angle: Double) -> some View {
-        Image(systemName: system)
-            .font(.system(size: fontSize, weight: weight))
-            .foregroundStyle(fg)
+    @ViewBuilder private func glyph(angle: Double) -> some View {
+        Group {
+            if customRefresh {
+                RefreshCWShape()
+                    .stroke(fg, style: StrokeStyle(lineWidth: 2.2 * 16 / 24, lineCap: .round, lineJoin: .round))
+                    .frame(width: 16, height: 16)          // 同 v1 svg 16px
+            } else {
+                Image(systemName: system)
+                    .font(.system(size: fontSize, weight: weight))
+                    .foregroundStyle(fg)
+            }
+        }
             .frame(width: size, height: size)              // 先定方框，再绕方框中心旋转 → 同心转，不晃
             .rotationEffect(.degrees(angle), anchor: .center)
             .background(Circle().fill(bg))
@@ -188,7 +215,7 @@ public struct AgentDeckRootView: View {
                 .shadow(color: store.online ? Theme.ok : Theme.danger, radius: 4)
             Spacer()
             IconButton(system: "gearshape", fontSize: 16) { showSettings = true }
-            IconButton(system: "arrow.clockwise", weight: .bold, fontSize: 15, spinning: spinning) { manualRefresh() }
+            IconButton(system: "arrow.clockwise", weight: .bold, fontSize: 15, spinning: spinning, customRefresh: true) { manualRefresh() }
             // 原生壳里显示退出按钮（对应 v1：bridge 存在时 #quit 显示）。
             IconButton(system: "power", weight: .bold, fontSize: 15, danger: true) { onQuit() }
         }
