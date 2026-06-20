@@ -80,8 +80,10 @@ public final class AppStore: ObservableObject {
 
     // MARK: 设置
     func loadSettings() async {
-        guard let raw = try? await api.getJSON("/api/settings"),
-              let dict = raw["settings"] as? [String: Any] else { return }
+        // GET /api/settings 直接返回扁平设置字典（无 settings 包裹，与 v1 一致）；
+        // POST 的应答才是 {ok, settings:{…}}。兼容两种形态，否则设置永远读不回 → 看似「开关不保存」。
+        guard let raw = try? await api.getJSON("/api/settings") else { return }
+        let dict = (raw["settings"] as? [String: Any]) ?? raw
         let kinds = SettingsSchema.valueKinds
         var out: [String: SettingValue] = [:]
         for (k, v) in dict {

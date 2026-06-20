@@ -44,22 +44,28 @@ struct IconButton: View {
     let action: () -> Void
     @State private var hover = false
 
+    // 颜色/底/描边随 hover 计算（对应 v1 .iconbtn:hover 与 #quit:hover 的三处变化）
+    private var fg: Color { danger && hover ? Theme.danger : (hover ? Theme.ink : Theme.ink2) }
+    private var bg: Color { hover ? (danger ? Theme.danger.opacity(0.10) : Theme.glassHi) : Theme.glass }
+    private var border: Color { danger && hover ? Theme.danger.opacity(0.45) : Theme.edge }
+
     var body: some View {
         Button(action: action) {
             Image(systemName: system)
                 .font(.system(size: fontSize, weight: weight))
-                .foregroundStyle(danger && hover ? Theme.danger : (hover ? Theme.ink : Theme.ink2))
+                .foregroundStyle(fg)
                 .frame(width: size, height: size)          // 先定方框，再绕方框中心旋转 → 同心转，不晃
                 .rotationEffect(.degrees(spinning ? 360 : 0), anchor: .center)
-                .animation(spinning ? .linear(duration: 0.7).repeatForever(autoreverses: false) : .default,
-                           value: spinning)
-                .background(Circle().fill(hover ? (danger ? Theme.danger.opacity(0.10) : Theme.glassHi) : Theme.glass))
-                .overlay(Circle().strokeBorder(danger && hover ? Theme.danger.opacity(0.45) : Theme.edge))
-                .offset(y: hover ? -1 : 0)   // :hover translateY(-1px)
-                .animation(.easeOut(duration: 0.18), value: hover)
+                .background(Circle().fill(bg))
+                .overlay(Circle().strokeBorder(border))
+                .offset(y: hover ? -1 : 0)                 // :hover translateY(-1px)
         }
         .buttonStyle(.plain)
         .onHover { hover = $0 }
+        // v1 transition:.18s 作用于 background/color/transform/border 全属性，CSS 默认 ease ≈ easeInOut。
+        .animation(.easeInOut(duration: 0.18), value: hover)
+        // 刷新自旋单独走线性循环（不被 hover 动画干扰）。
+        .animation(spinning ? .linear(duration: 0.7).repeatForever(autoreverses: false) : .default, value: spinning)
     }
 }
 
