@@ -5,7 +5,7 @@ import AgentDeckKit
 
 // 用法：PreviewGen [overview|charts|sessions|settings|widget|root|widgetroot] [outPath]
 var args = Array(CommandLine.arguments.dropFirst())
-let mode = ["charts", "sessions", "settings", "widget", "root", "widgetroot", "carousel"].contains(args.first)
+let mode = ["overview", "charts", "sessions", "settings", "widget", "root", "widgetroot", "carousel"].contains(args.first)
     ? args.removeFirst() : "overview"
 let outPath = args.first ?? "/tmp/agentdeck-\(mode).png"
 

@@ -75,7 +75,8 @@ build() {
   # 产物路径用 --show-bin-path 解析，免去硬编码 .build 布局。
   # 只构 AgentDeck 壳产物（不带开发用 PreviewGen）。
   local ARCHS=(--arch arm64 --arch x86_64)
-  local PROD=(--product AgentDeck)
+  # --package-path 锁定仓库根：从任意目录调用 build.sh 也对本包构建（不依赖调用方 cwd）。
+  local PROD=(--product AgentDeck --package-path "$ROOT")
   if ! swift build -c release "${PROD[@]}" "${ARCHS[@]}" 2>"$DIST/.swiftbuild.err"; then
     echo "  ⚠️ x86_64 交叉构建失败，回退 arm64-only（仍适配 ${MIN_MACOS}+ 的 Apple Silicon）"
     cat "$DIST/.swiftbuild.err" | tail -5
