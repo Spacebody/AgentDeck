@@ -63,11 +63,13 @@ public final class AppStore: ObservableObject {
     }
     public func stop() { pollTask?.cancel(); pollTask = nil }
 
-    public func refresh() async {
+    /// force=true 时给 /api/quota 带 ?force=1 绕过后端额度缓存、强制重采（对应 v1 手动刷新 refreshAll(true)）；
+    /// 周期轮询用 false 走缓存，避免每轮都出站打 Anthropic。
+    public func refresh(force: Bool = false) async {
         // 6 个接口并发拉取（旧实现串行 → 启动/手动刷新要等全部之和；quota 还出站打 Anthropic 最慢，
         // 串行时它把整屏都拖住）。APIClient 是 actor，并发 get 在各自 await 网络处挂起、互不阻塞。
         let needSessions = searchResults == nil
-        async let quotaR:    QuotaResponse?    = try? await api.get("/api/quota")
+        async let quotaR:    QuotaResponse?    = try? await api.get("/api/quota", query: force ? ["force": "1"] : [:])
         async let usageR:    UsageResponse?    = try? await api.get("/api/usage")
         async let activeR:   ActiveResponse?   = try? await api.get("/api/active")
         async let eventsR:   EventsResponse?   = try? await api.get("/api/events", query: ["recent": "4"])

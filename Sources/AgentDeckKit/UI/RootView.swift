@@ -224,7 +224,7 @@ public struct AgentDeckRootView: View {
     private func manualRefresh() {
         spinning = true
         Task {
-            await store.refresh()
+            await store.refresh(force: true)   // 手动刷新强制重采额度（绕过缓存，对应 v1 force=1）
             try? await Task.sleep(nanoseconds: 500_000_000)
             spinning = false
         }

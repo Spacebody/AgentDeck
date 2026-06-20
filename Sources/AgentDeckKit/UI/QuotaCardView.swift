@@ -44,9 +44,23 @@ struct BrandGlyph: View {
     /// 字形显示边长（v1：qbadge 20 内 glyph 12）
     var glyph: CGFloat = 12
 
+    /// 资源包解析（不直接用 SwiftPM 生成的 Bundle.module——它只查 .app 根目录与开发机本地 .build 路径，
+    /// 而 build.sh 把资源包放在 Contents/Resources，导致分发机两路皆空 → Bundle.module fatalError 崩溃）。
+    /// 先按 Contents/Resources / .app 根 自行查找；都找不到才退回 .module（仅开发期 swift run 命中）。
+    private static let kitBundle: Bundle = {
+        let name = "AgentDeck_AgentDeckKit.bundle"
+        let bases = [Bundle.main.resourceURL,
+                     Bundle.main.bundleURL,
+                     Bundle.main.bundleURL.appendingPathComponent("Contents/Resources")]
+        for base in bases.compactMap({ $0 }) {
+            if let b = Bundle(url: base.appendingPathComponent(name)) { return b }
+        }
+        return .module   // 开发期 SwiftPM 上下文兜底（分发不会走到这里，故不会触发其 fatalError）
+    }()
+
     private static func image(_ brand: Brand) -> NSImage? {
-        guard let url = Bundle.module.url(forResource: brand.rawValue, withExtension: "png",
-                                          subdirectory: "Brand") else { return nil }
+        guard let url = kitBundle.url(forResource: brand.rawValue, withExtension: "png",
+                                      subdirectory: "Brand") else { return nil }
         let img = NSImage(contentsOf: url)
         img?.isTemplate = true
         return img
