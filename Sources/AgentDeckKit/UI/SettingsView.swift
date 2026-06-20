@@ -70,7 +70,7 @@ struct SettingsView: View {
             setrow(label, hint) {
                 HStack(spacing: 4) {
                     ForEach(opts, id: \.0) { k, name in
-                        Chip(text: L(name), on: values[k]?.boolVal ?? false, size: 9.5) { onSet(k, .bool(!(values[k]?.boolVal ?? false))) }
+                        Chip(text: L(name), on: values[k]?.boolVal ?? false, size: 11.5) { onSet(k, .bool(!(values[k]?.boolVal ?? false))) }
                     }
                 }
             }
@@ -79,7 +79,7 @@ struct SettingsView: View {
                 HStack(spacing: 8) {
                     ForEach(opts, id: \.0) { k, _, def in colorSwatch(k, def: def) }
                     Button(L("set.resetColors"), action: onResetColors)
-                        .buttonStyle(.plain).font(.system(size: 9.5)).foregroundStyle(Theme.ink3)
+                        .buttonStyle(.plain).font(.system(size: 11.5)).foregroundStyle(Theme.ink3)
                         .fixedSize()
                 }
             }
@@ -88,7 +88,7 @@ struct SettingsView: View {
                 HStack(spacing: 6) {
                     ForEach(btns, id: \.0) { act, name in
                         Button(L(name)) { onAction(act) }
-                            .buttonStyle(.plain).font(.system(size: 9.5, weight: .semibold))
+                            .buttonStyle(.plain).font(.system(size: 11.5, weight: .semibold))
                             .foregroundStyle(Theme.ink)
                             .padding(.horizontal, 10).padding(.vertical, 5)
                             .background(Capsule().fill(Color.white.opacity(0.08)))
@@ -129,10 +129,10 @@ struct SettingsView: View {
         let isCustom = !opts.contains(cur)
         FlowLayout(spacing: 4, lineSpacing: 6) {
             ForEach(opts, id: \.self) { o in
-                Chip(text: fmt.text(o), on: cur == o && !editing(key), size: 9.5) { onSet(key, .int(o)); editingKey = nil }
+                Chip(text: fmt.text(o), on: cur == o && !editing(key), size: 11.5) { onSet(key, .int(o)); editingKey = nil }
             }
             if isCustom && !editing(key) {
-                Chip(text: fmt.text(cur), on: true, size: 9.5) { startEdit(key, cur) }
+                Chip(text: fmt.text(cur), on: true, size: 11.5) { startEdit(key, cur) }
             }
             if custom != nil {
                 if editing(key) {
@@ -143,7 +143,7 @@ struct SettingsView: View {
                         .background(Capsule().fill(Color.white.opacity(0.10)))
                         .onSubmit { commitEdit(key, custom!) }
                 } else {
-                    Chip(text: L("set.custom"), on: false, size: 9.5) { startEdit(key, cur) }
+                    Chip(text: L("set.custom"), on: false, size: 11.5) { startEdit(key, cur) }
                 }
             }
         }
@@ -155,11 +155,11 @@ struct SettingsView: View {
             ForEach(opts, id: \.0) { v, name in Button(L(name)) { onSet(key, .string(v)) } }
         } label: {
             HStack(spacing: 5) {
-                Text(L(opts.first { $0.0 == cur }?.1 ?? cur)).font(.system(size: 10.5, weight: .semibold))
-                Image(systemName: "chevron.down").font(.system(size: 7, weight: .bold))
+                Text(L(opts.first { $0.0 == cur }?.1 ?? cur)).font(.system(size: 12, weight: .semibold))
+                Image(systemName: "chevron.down").font(.system(size: 8, weight: .bold))
             }
             .foregroundStyle(Theme.ink)
-            .padding(.horizontal, 10).padding(.vertical, 4)
+            .padding(.horizontal, 11).padding(.vertical, 5)
             .background(RoundedRectangle(cornerRadius: 8).fill(Color.white.opacity(0.08)))
             .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Theme.edge))
         }

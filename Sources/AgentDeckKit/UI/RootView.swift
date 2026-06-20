@@ -64,8 +64,10 @@ struct IconButton: View {
         .onHover { hover = $0 }
         // v1 transition:.18s 作用于 background/color/transform/border 全属性，CSS 默认 ease ≈ easeInOut。
         .animation(.easeInOut(duration: 0.18), value: hover)
-        // 刷新自旋单独走线性循环（不被 hover 动画干扰）。
-        .animation(spinning ? .linear(duration: 0.7).repeatForever(autoreverses: false) : .default, value: spinning)
+        // 刷新自旋：顺时针连续（对应 v1 @keyframes rot → rotate(360deg)）。
+        // 停止时用 0 时长瞬切归零，绝不让 360→0 倒着逆时针回弹（那才是「方向不对」的观感）。
+        .animation(spinning ? .linear(duration: 0.7).repeatForever(autoreverses: false)
+                            : .linear(duration: 0), value: spinning)
     }
 }
 
