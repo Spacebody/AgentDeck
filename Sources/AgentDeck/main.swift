@@ -453,8 +453,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
+    /// 拖拽过程中持续落盘尺寸（inLiveResize 守卫 → 只在用户实时拖动时存，
+    /// 程序化 setFrame（恢复/缩放）不会触发，避免把恢复值/钳制值反写覆盖）。
+    /// 这样即便 resize 后立刻退出 app（没走 hidePanel/didEndLiveResize），尺寸也已保存。
+    func windowDidResize(_ notification: Notification) {
+        guard let w = notification.object as? NSWindow, w.inLiveResize else { return }
+        savePanelSize(w)
+    }
+
     func windowDidEndLiveResize(_ notification: Notification) {
         guard let w = notification.object as? NSWindow else { return }
+        savePanelSize(w)
+        w.invalidateShadow()
+    }
+
+    private func savePanelSize(_ w: NSWindow) {
         let d = UserDefaults.standard
         if w === panel {
             d.set(Double(w.frame.width / uiScale), forKey: "panelW")
@@ -463,7 +476,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             d.set(Double(w.frame.width / uiScale), forKey: "widgetW")
             d.set(Double(w.frame.height / uiScale), forKey: "widgetH")
         }
-        w.invalidateShadow()
     }
 
     var statusItem: NSStatusItem!
@@ -825,13 +837,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func hidePanel() {
-        // 收起前落盘当前尺寸：borderless 面板的 windowDidEndLiveResize 在部分系统不稳定触发，
-        // 这里兜底保存（showPanel 会按未缩放基准 panelW/H 恢复），确保「拉伸后重开保持大小」。
-        if let p = panel {
-            let d = UserDefaults.standard
-            d.set(Double(p.frame.width / uiScale), forKey: "panelW")
-            d.set(Double(p.frame.height / uiScale), forKey: "panelH")
-        }
+        // 尺寸已在拖拽时由 windowDidResize(inLiveResize) 持续落盘，这里不再保存——
+        // 否则会把 showPanel 恢复时的「按屏高钳制后的值」反写覆盖，导致高度逐次缩水。
         panel?.orderOut(nil)
         statusItem.button?.highlight(false)
         if let m = clickMonitor { NSEvent.removeMonitor(m); clickMonitor = nil }
