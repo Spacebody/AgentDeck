@@ -119,15 +119,13 @@ struct GlassCard: ViewModifier {
                         .fill(Color.white.opacity(0.055))
                 } else {
                     ZStack {
-                        // 真磨砂：NSVisualEffectView（withinWindow）采样身后玻璃+scrim+aurora（≈ v1 backdrop-filter）。
-                        // 无头预览回退 thinMaterial（ImageRenderer 渲不出 NSView）。
-                        if GlassRender.useNativeEffect {
-                            VisualEffectBackground()
-                        } else {
-                            Rectangle().fill(.thinMaterial)
-                        }
-                        // 顶亮底暗白渐变（linear-gradient(180deg, .085 → .04)），给文字一层可读性底
-                        LinearGradient(colors: [Color.white.opacity(0.085), Color.white.opacity(0.04)],
+                        // 半透明深色磨砂底（不透光 → 文字对比高，消除 aurora 透底「糊」感）。
+                        // 旧实现给每张卡各挂一个 NSVisualEffectView(withinWindow) 实时模糊身后内容：
+                        // 6 张卡同屏 → 滚动/交互每帧重算窗内模糊，是「操作卡顿」主因。改静态分层填充：
+                        // 面板本体已是 behindWindow 玻璃，卡片只需在其上叠一层带色磨砂即可（省、且更清晰）。
+                        Color(hex: 0x14141d).opacity(0.52)
+                        // 顶亮底暗白渐变高光（linear-gradient(180deg, .10 → .035)），液态玻璃镜面感
+                        LinearGradient(colors: [Color.white.opacity(0.10), Color.white.opacity(0.035)],
                                        startPoint: .top, endPoint: .bottom)
                     }
                     .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
@@ -188,22 +186,22 @@ struct AuroraBackground: View {
                     let d = max(geo.size.width, geo.size.height) * b.size
                     Circle()
                         // v1 每团 opacity .72（容器再 .18），核心实色到 ~55% 再淡出（透明 65%）。
-                        // 之前用满透明度 → aurora 比 v1 浓约 40%，背景发糊压低文字对比。对齐 v1。
                         .fill(RadialGradient(
                             stops: [.init(color: b.color.opacity(0.72), location: 0),
                                     .init(color: b.color.opacity(0.72), location: 0.5),
                                     .init(color: b.color.opacity(0), location: 1)],
                             center: .center, startRadius: 0, endRadius: d * 0.5))
                         .frame(width: d, height: d)
+                        .blur(radius: 70)
+                        .drawingGroup()   // 每团各自离屏栅格化成纹理：之后只是移动这张缓存纹理，
+                                          // 不再每帧重算 blur(70)（旧实现把 blur 套在整组外 + drift → 每帧重糊，卡顿根源）
                         .position(x: geo.size.width * b.x + (drift ? minSide * b.dx : 0),
                                   y: geo.size.height * b.y + (drift ? minSide * b.dy : 0))
                         .animation(.easeInOut(duration: b.period).repeatForever(autoreverses: true), value: drift)
                 }
             }
             .frame(width: geo.size.width, height: geo.size.height)
-            .blur(radius: 70)
             .saturation(1.5)
-            .drawingGroup()   // Metal 离屏合成：blur/saturation 走 GPU，drift 不再每帧 CPU 重算（消抖）
             .opacity(opacity)
         }
         .ignoresSafeArea()
@@ -259,6 +257,54 @@ extension View {
     /// 悬浮上移 1px（对应 v1 :hover translateY(-1px)）；精简模式禁用。
     func hoverLift(_ lift: CGFloat = 1) -> some View {
         modifier(HoverLift(lift: lift))
+    }
+}
+
+// MARK: - 流式换行布局（对应 v1 .setchips：flex-wrap + justify-content:flex-end）
+// 子项按行排，放不下自动换行；每行右对齐（trailing）。用于设置里成排的 chip。
+struct FlowLayout: Layout {
+    var spacing: CGFloat = 4
+    var lineSpacing: CGFloat = 6
+
+    private func rows(_ subviews: Subviews, maxWidth: CGFloat) -> [[(LayoutSubviews.Element, CGSize)]] {
+        var rows: [[(LayoutSubviews.Element, CGSize)]] = [[]]
+        var x: CGFloat = 0
+        for s in subviews {
+            let sz = s.sizeThatFits(.unspecified)
+            if x > 0, x + sz.width > maxWidth { rows.append([]); x = 0 }
+            rows[rows.count - 1].append((s, sz))
+            x += sz.width + spacing
+        }
+        return rows
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout Void) -> CGSize {
+        let maxWidth = proposal.width ?? .greatestFiniteMagnitude
+        let rs = rows(subviews, maxWidth: maxWidth)
+        var h: CGFloat = 0, maxRowW: CGFloat = 0
+        for (i, row) in rs.enumerated() {
+            let rowW = row.reduce(0) { $0 + $1.1.width } + spacing * CGFloat(max(0, row.count - 1))
+            let rowH = row.map(\.1.height).max() ?? 0
+            maxRowW = max(maxRowW, rowW)
+            h += rowH + (i > 0 ? lineSpacing : 0)
+        }
+        return CGSize(width: min(maxWidth, maxRowW), height: h)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout Void) {
+        let rs = rows(subviews, maxWidth: bounds.width)
+        var y = bounds.minY
+        for row in rs {
+            let rowW = row.reduce(0) { $0 + $1.1.width } + spacing * CGFloat(max(0, row.count - 1))
+            let rowH = row.map(\.1.height).max() ?? 0
+            var x = bounds.maxX - rowW   // 右对齐
+            for (s, sz) in row {
+                s.place(at: CGPoint(x: x, y: y + (rowH - sz.height) / 2),
+                        anchor: .topLeading, proposal: ProposedViewSize(sz))
+                x += sz.width + spacing
+            }
+            y += rowH + lineSpacing
+        }
     }
 }
 

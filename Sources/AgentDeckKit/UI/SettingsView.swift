@@ -58,7 +58,8 @@ struct SettingsView: View {
                 Toggle("", isOn: bool(key)).labelsHidden().toggleStyle(.switch).tint(Brand.claude.accent)
             }
         case let .chips(key, label, hint, opts, fmt, custom):
-            setrow(label, hint) { chips(key: key, opts: opts, fmt: fmt, custom: custom) }
+            // 成排 chip 走整行块式（标签在上、chip 右对齐自动换行在下），避免被标签挤成「1 分 钟」竖排。
+            setrowBlock(label, hint) { chips(key: key, opts: opts, fmt: fmt, custom: custom) }
         case let .select(key, label, hint, opts):
             // 恢复方式：auto + 已安装终端 + copy（对应 v1 /api/terminals 动态注入）。
             let effective = key == "terminal" && !terminals.isEmpty
@@ -69,7 +70,7 @@ struct SettingsView: View {
             setrow(label, hint) {
                 HStack(spacing: 4) {
                     ForEach(opts, id: \.0) { k, name in
-                        Chip(text: L(name), on: values[k]?.boolVal ?? false) { onSet(k, .bool(!(values[k]?.boolVal ?? false))) }
+                        Chip(text: L(name), on: values[k]?.boolVal ?? false, size: 9.5) { onSet(k, .bool(!(values[k]?.boolVal ?? false))) }
                     }
                 }
             }
@@ -110,16 +111,28 @@ struct SettingsView: View {
         .padding(.vertical, 10)
     }
 
-    // MARK: chips（含自定义编辑）
+    /// 块式行：标签/说明在上，控件整行在下右对齐（成排 chip 用，给足横向空间自动换行）。
+    private func setrowBlock<C: View>(_ label: String, _ hint: String?, @ViewBuilder control: () -> C) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(L(label)).font(.system(size: 13)).foregroundStyle(Theme.ink)
+                if let hint { Text(L(hint)).font(.system(size: 10.5)).foregroundStyle(Theme.ink3) }
+            }
+            control().frame(maxWidth: .infinity, alignment: .trailing)
+        }
+        .padding(.vertical, 10)
+    }
+
+    // MARK: chips（含自定义编辑）。FlowLayout 自动换行 + 右对齐（对应 v1 .setchips flex-wrap）。
     @ViewBuilder private func chips(key: String, opts: [Int], fmt: ChipFmt, custom: ClosedRange<Int>?) -> some View {
         let cur = values[key]?.intVal ?? opts.first ?? 0
         let isCustom = !opts.contains(cur)
-        HStack(spacing: 4) {
+        FlowLayout(spacing: 4, lineSpacing: 6) {
             ForEach(opts, id: \.self) { o in
-                Chip(text: fmt.text(o), on: cur == o && !editing(key)) { onSet(key, .int(o)); editingKey = nil }
+                Chip(text: fmt.text(o), on: cur == o && !editing(key), size: 9.5) { onSet(key, .int(o)); editingKey = nil }
             }
             if isCustom && !editing(key) {
-                Chip(text: fmt.text(cur), on: true) { startEdit(key, cur) }
+                Chip(text: fmt.text(cur), on: true, size: 9.5) { startEdit(key, cur) }
             }
             if custom != nil {
                 if editing(key) {
@@ -130,7 +143,7 @@ struct SettingsView: View {
                         .background(Capsule().fill(Color.white.opacity(0.10)))
                         .onSubmit { commitEdit(key, custom!) }
                 } else {
-                    Chip(text: L("set.custom"), on: false) { startEdit(key, cur) }
+                    Chip(text: L("set.custom"), on: false, size: 9.5) { startEdit(key, cur) }
                 }
             }
         }

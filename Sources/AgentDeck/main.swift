@@ -825,6 +825,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func hidePanel() {
+        // 收起前落盘当前尺寸：borderless 面板的 windowDidEndLiveResize 在部分系统不稳定触发，
+        // 这里兜底保存（showPanel 会按未缩放基准 panelW/H 恢复），确保「拉伸后重开保持大小」。
+        if let p = panel {
+            let d = UserDefaults.standard
+            d.set(Double(p.frame.width / uiScale), forKey: "panelW")
+            d.set(Double(p.frame.height / uiScale), forKey: "panelH")
+        }
         panel?.orderOut(nil)
         statusItem.button?.highlight(false)
         if let m = clickMonitor { NSEvent.removeMonitor(m); clickMonitor = nil }

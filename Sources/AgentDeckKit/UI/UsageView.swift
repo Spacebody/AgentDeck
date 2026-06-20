@@ -72,10 +72,12 @@ extension String {
 struct Chip: View {
     let text: String
     let on: Bool
+    var size: CGFloat = 10.5
     var action: () -> Void = {}
     var body: some View {
         Button(action: action) {
-            Text(text).font(.system(size: 10.5, weight: .semibold))
+            Text(text).font(.system(size: size, weight: .semibold))
+                .lineLimit(1).fixedSize()          // 永不竖排（设置里曾出现「1 分 钟」逐字换行）
                 .foregroundStyle(on ? Theme.ink : Theme.ink3)
                 .padding(.horizontal, 10).padding(.vertical, 4)
                 .background(Capsule().fill(on ? Color.white.opacity(0.13) : .clear))

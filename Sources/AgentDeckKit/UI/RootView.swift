@@ -48,11 +48,11 @@ struct IconButton: View {
         Button(action: action) {
             Image(systemName: system)
                 .font(.system(size: fontSize, weight: weight))
-                .rotationEffect(.degrees(spinning ? 360 : 0))
+                .foregroundStyle(danger && hover ? Theme.danger : (hover ? Theme.ink : Theme.ink2))
+                .frame(width: size, height: size)          // 先定方框，再绕方框中心旋转 → 同心转，不晃
+                .rotationEffect(.degrees(spinning ? 360 : 0), anchor: .center)
                 .animation(spinning ? .linear(duration: 0.7).repeatForever(autoreverses: false) : .default,
                            value: spinning)
-                .foregroundStyle(danger && hover ? Theme.danger : (hover ? Theme.ink : Theme.ink2))
-                .frame(width: size, height: size)
                 .background(Circle().fill(hover ? (danger ? Theme.danger.opacity(0.10) : Theme.glassHi) : Theme.glass))
                 .overlay(Circle().strokeBorder(danger && hover ? Theme.danger.opacity(0.45) : Theme.edge))
                 .offset(y: hover ? -1 : 0)   // :hover translateY(-1px)
