@@ -212,6 +212,56 @@ struct AuroraBackground: View {
     }
 }
 
+// MARK: - 入场动画（.reveal：淡入 + 上滑 10px，错峰延时）
+// v1: animation: in .55s cubic-bezier(.2,.7,.2,1) backwards; @keyframes in { from { opacity:0; translateY(10px) } }
+// 各元素 animation-delay 错峰（header 0 / tabbar .03 / quota .05 / today .06 / active .09 / done .1 / usage·sess .12）。
+// 精简模式（body.minimal .reveal）禁用；无头渲染（PreviewGen，onAppear 不触发）直接呈现，避免 PNG 全透明。
+struct Reveal: ViewModifier {
+    var delay: Double = 0
+    var distance: CGFloat = 10
+    var duration: Double = 0.55
+    @Environment(\.minimalMode) private var minimal
+    @State private var shown = false
+
+    // 无头渲染时（ImageRenderer）onAppear 不跑，直接当作已呈现。
+    private var skip: Bool { minimal || !GlassRender.useNativeEffect }
+
+    func body(content: Content) -> some View {
+        content
+            .opacity(skip || shown ? 1 : 0)
+            .offset(y: skip || shown ? 0 : distance)
+            .onAppear {
+                guard !skip else { return }
+                withAnimation(.timingCurve(0.2, 0.7, 0.2, 1, duration: duration).delay(delay)) { shown = true }
+            }
+    }
+}
+
+// MARK: - 悬浮微交互（.iconbtn / .ubgo 等 :hover { transform: translateY(-1px) }，transition .18s）
+struct HoverLift: ViewModifier {
+    var lift: CGFloat = 1
+    @Environment(\.minimalMode) private var minimal
+    @State private var hovering = false
+
+    func body(content: Content) -> some View {
+        content
+            .offset(y: (hovering && !minimal) ? -lift : 0)
+            .animation(.easeOut(duration: 0.18), value: hovering)
+            .onHover { hovering = $0 }
+    }
+}
+
+extension View {
+    /// 入场动画：淡入 + 上滑（对应 v1 .reveal）。delay 做错峰；精简/无头自动跳过。
+    func reveal(delay: Double = 0, distance: CGFloat = 10, duration: Double = 0.55) -> some View {
+        modifier(Reveal(delay: delay, distance: distance, duration: duration))
+    }
+    /// 悬浮上移 1px（对应 v1 :hover translateY(-1px)）；精简模式禁用。
+    func hoverLift(_ lift: CGFloat = 1) -> some View {
+        modifier(HoverLift(lift: lift))
+    }
+}
+
 // MARK: - 工具：16 进制 → Color
 extension Color {
     init(hex: UInt32) {

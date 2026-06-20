@@ -55,6 +55,8 @@ struct IconButton: View {
                 .frame(width: size, height: size)
                 .background(Circle().fill(hover ? (danger ? Theme.danger.opacity(0.10) : Theme.glassHi) : Theme.glass))
                 .overlay(Circle().strokeBorder(danger && hover ? Theme.danger.opacity(0.45) : Theme.edge))
+                .offset(y: hover ? -1 : 0)   // :hover translateY(-1px)
+                .animation(.easeOut(duration: 0.18), value: hover)
         }
         .buttonStyle(.plain)
         .onHover { hover = $0 }
@@ -115,11 +117,11 @@ public struct AgentDeckRootView: View {
         ScaledContainer(scale: fontScale) {
             ZStack {
                 background
-                // 主内容
+                // 主内容（入场错峰淡入上滑，延时对齐 v1 .reveal animation-delay）
                 VStack(spacing: 10) {
-                    header
+                    header.reveal(delay: 0)
                     if showUpdate { updateBar }
-                    tabbar
+                    tabbar.reveal(delay: 0.03)
                     tabContent
                 }
                 .padding(14)
@@ -196,7 +198,7 @@ public struct AgentDeckRootView: View {
                     .padding(.horizontal, 12).padding(.vertical, 4)
                     .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.10)))
                     .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Theme.edge))
-            }.buttonStyle(.plain)
+            }.buttonStyle(.plain).hoverLift()
             Button { updateDismissed = true } label: {
                 Image(systemName: "xmark").font(.system(size: 11)).foregroundStyle(Theme.ink3)
             }.buttonStyle(.plain)
@@ -267,6 +269,7 @@ public struct AgentDeckRootView: View {
         .padding(.horizontal, 14).padding(.vertical, 12)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .glassCard()
+        .reveal(delay: 0.05)
     }
 
     // MARK: 设置浮层

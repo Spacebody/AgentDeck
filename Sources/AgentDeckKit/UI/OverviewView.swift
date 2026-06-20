@@ -13,12 +13,13 @@ struct OverviewView: View {
     var onFocusDone: (DoneEvent) -> Void = { _ in }
 
     var body: some View {
+        // 入场错峰淡入上滑，延时逐一对齐 v1 各卡 animation-delay。
         VStack(spacing: 10) {
-            quotaSection
-            if let today { TodayBar(summary: today) }
-            if showActive { ActiveCard(sessions: active, onTap: onFocusActive) }
-            DoneCard(events: done, onTap: onFocusDone)
-            UsageView(usage: usage)   // 用量趋势（24h / 近7天 / 项目 Top）
+            quotaSection.reveal(delay: 0.05)
+            if let today { TodayBar(summary: today).reveal(delay: 0.06) }
+            if showActive { ActiveCard(sessions: active, onTap: onFocusActive).reveal(delay: 0.09) }
+            DoneCard(events: done, onTap: onFocusDone).reveal(delay: 0.10)
+            UsageView(usage: usage).reveal(delay: 0.12)   // 用量趋势（24h / 近7天 / 项目 Top）
         }
     }
 
