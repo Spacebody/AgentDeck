@@ -435,9 +435,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             })
         }
         if let p = panel, p.isVisible {          // 面板：锚定顶边中心重排
-            let d = UserDefaults.standard
-            let w = max(kPanelW, CGFloat(d.double(forKey: "panelW"))) * s
-            let h = max(kPanelH, CGFloat(d.double(forKey: "panelH"))) * s
+            let w = savedPanelW() * s
+            let h = savedPanelH() * s
             let f = p.frame
             animate(p, NSRect(x: f.midX - w / 2, y: f.maxY - h, width: w, height: h))
         }
@@ -466,6 +465,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         savePanelSize(w)
         w.invalidateShadow()
     }
+
+    /// 恢复用的面板基准尺寸（未缩放）：有保存值用保存值（允许小于默认），否则用默认。
+    func savedPanelW() -> CGFloat { let v = UserDefaults.standard.double(forKey: "panelW"); return v > 0 ? CGFloat(v) : kPanelW }
+    func savedPanelH() -> CGFloat { let v = UserDefaults.standard.double(forKey: "panelH"); return v > 0 ? CGFloat(v) : kPanelH }
 
     private func savePanelSize(_ w: NSWindow) {
         let d = UserDefaults.standard
@@ -804,13 +807,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         loaded = true
         Task { await store.refresh() }   // 开面板即刻拉一次最新数据
 
-        // 尺寸：恢复用户上次拖拽的大小（不小于默认），高度不超过屏幕可视范围
-        let d = UserDefaults.standard
+        // 尺寸：恢复用户上次拖拽的大小，高度不超过屏幕可视范围
         let bFrame = bw.convertToScreen(button.convert(button.bounds, to: nil))
         let vis = (bw.screen ?? NSScreen.main!).visibleFrame
-        let w = max(kPanelW, CGFloat(d.double(forKey: "panelW"))) * uiScale
+        // 直接用「上次保存的尺寸」恢复（不再跟默认值取 max——那会禁止用户把面板改小，
+        // 表现为「拉小后重开又变回默认大小」）。最小尺寸由窗口 minSize(420×600) 兜底；高度按屏高封顶。
+        let w = savedPanelW() * uiScale
         let maxH = bFrame.minY - 6 - (vis.minY + 8)   // 图标下沿到屏幕底的可用高度
-        let h = min(max(kPanelH, CGFloat(d.double(forKey: "panelH"))) * uiScale, maxH)
+        let h = min(savedPanelH() * uiScale, maxH)
         // 定位：状态栏图标正下方，水平钳制在屏幕内
         let x = min(max(bFrame.midX - w / 2, vis.minX + 8), vis.maxX - w - 8)
         let y = bFrame.minY - 6 - h
