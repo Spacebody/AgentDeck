@@ -28,9 +28,24 @@ actor APIClient {
         return URLSession(configuration: cfg)
     }()
 
+    // 自定义 snake_case → camelCase：Foundation 自带的 .convertFromSnakeCase 对「下划线后接数字」
+    // 的键（cost_7d / cost_30d / claude_cost_7d / projects_7d）转换错误 → 解不出、字段静默为 nil
+    // （表现：API 等值金额全 0、项目 Top 空、成本拆分缺失）。这里自己实现，数字段也正确映射。
+    private struct AnyKey: CodingKey {
+        var stringValue: String; var intValue: Int?
+        init(stringValue: String) { self.stringValue = stringValue; intValue = Int(stringValue) }
+        init(intValue: Int) { self.stringValue = String(intValue); self.intValue = intValue }
+    }
     private let decoder: JSONDecoder = {
         let d = JSONDecoder()
-        d.keyDecodingStrategy = .convertFromSnakeCase   // used_percent → usedPercent 等
+        d.keyDecodingStrategy = .custom { path in
+            let key = path.last!.stringValue
+            guard key.contains("_") else { return path.last! }
+            let parts = key.split(separator: "_", omittingEmptySubsequences: false)
+            var out = String(parts.first ?? "")
+            for p in parts.dropFirst() { out += p.prefix(1).uppercased() + p.dropFirst() }
+            return AnyKey(stringValue: out)   // cost_7d→cost7d, used_percent→usedPercent, five_hour→fiveHour
+        }
         return d
     }()
     private let encoder: JSONEncoder = {
