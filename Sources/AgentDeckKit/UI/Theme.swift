@@ -259,17 +259,20 @@ struct Reveal: ViewModifier {
 }
 
 // MARK: - 呼吸动效（对应 v1 @keyframes pulse{50%{opacity:.35}}：live 点 / 活跃点 / 「工作中」标）
-// 用 TimelineView 按时钟算透明度（与刷新自旋同理：不走 .repeatForever，避免轮询重绘把动画取消掉）。
+// ⚡️省电关键：用「隐式 repeatForever 透明度动画」（Core Animation 渲染服务器驱动，≈v1 CSS animation），
+// onAppear 一次性起跳后由渲染服务器/GPU 接管，几乎不再唤醒主线程。
+// 之前用 TimelineView(.animation) 每显示帧(60-120fps)唤醒主线程重算——桌面小组件常驻 + 内含呼吸，
+// 是 v2 比 v1 更耗电的主因（v1 是 CSS 动画走合成器，不烧 CPU）。dim 为内部 @State，越轮询重绘越保持。
 // 无头渲染（PreviewGen）退化为静态满透明，保证 PNG 自检稳定。
 struct Pulse: ViewModifier {
     var period: Double = 1.6
+    @State private var dim = false
     func body(content: Content) -> some View {
         if GlassRender.useNativeEffect {
-            TimelineView(.animation) { ctx in
-                let t = ctx.date.timeIntervalSinceReferenceDate
-                // 1 ↔ .35 平滑往返（cos 给 ease-in-out 感）：mid .675 ± amp .325
-                content.opacity(0.675 + 0.325 * cos(2 * .pi * t / period))
-            }
+            content
+                .opacity(dim ? 0.35 : 1.0)   // 对应 pulse{50%{opacity:.35}}
+                .animation(.easeInOut(duration: period / 2).repeatForever(autoreverses: true), value: dim)
+                .onAppear { dim = true }
         } else {
             content
         }
