@@ -298,7 +298,10 @@ public struct AgentDeckRootView: View {
                 quota: store.quota, usage: store.usage, today: store.today,
                 active: store.activeShown, done: store.doneShown, showActive: store.showActive,
                 onFocusActive: focusActive, onFocusDone: focusDone)
-            if previewMode { overview } else { ScrollView { overview }.scrollIndicators(.hidden) }
+            // 充满窗口高度（maxHeight:.infinity）：否则 ScrollView 贴内容高，刷新换数据时整块卡片
+            // 随之变高变矮，看着像「面板大小被刷新改了」。撑满后数据变化只在内部滚动，区域稳定。
+            if previewMode { overview }
+            else { ScrollView { overview }.scrollIndicators(.hidden).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top) }
         } else {
             sessionsCard
         }
