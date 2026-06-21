@@ -200,6 +200,8 @@ EOF
     ;;
   uninstall)
     stop_running
+    # 干净还原我们对 ~/.claude / ~/.codex 的配置改动（只删带标记的那部分）
+    python3 "$ROOT/agentdeckd.py" --remove-integration 2>/dev/null || true
     rm -rf "/Applications/AgentDeck.app" "$DIST"
     echo "✓ 已卸载 App。数据目录保留在:"
     echo "    ~/Library/Application Support/AgentDeck"

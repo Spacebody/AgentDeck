@@ -14,6 +14,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import threading
 import time
 import urllib.request
@@ -1483,6 +1484,157 @@ _event_seq = 0
 EVENTS_FILE = DATA_DIR / "events.jsonl"
 
 
+# ------------------------------------------------- 完成事件钩子：自动配置 / 干净移除
+# 目标：装上即用、卸载即净。只「合并」不覆盖用户已有配置；只删「我们打了标记的那条」。
+# 改动记录在 INTEGRATION_FILE，供 --remove-integration（build.sh uninstall 调）或关开关时还原。
+INTEGRATION_FILE = DATA_DIR / "integration.json"
+_CLAUDE_SETTINGS = Path.home() / ".claude" / "settings.json"
+_HOOK_WRAPPER = DATA_DIR / "claude-stop-hook.sh"   # 放 app-support：App 删了也在 → 可自清理
+# 识别「我们装的」Stop 钩子：新版指向 wrapper；旧版是裸 curl（兼容迁移，一并清掉）
+_HOOK_MARKS = ("claude-stop-hook.sh", "127.0.0.1:7777/api/event")
+_HOOK_CMD = f'sh {json.dumps(str(_HOOK_WRAPPER))}'   # json.dumps 给路径加引号（含空格安全）
+
+# 自清理 wrapper：转发完成事件给 daemon；若 App 已被拖进废纸篓（bundle 不在且 daemon 不在），
+# 则自动从 ~/.claude/settings.json 摘掉本钩子并自删——drag-to-trash 卸载也能净。
+_HOOK_WRAPPER_SH = '''#!/bin/sh
+# AgentDeck Claude Stop hook（自动安装/自清理，勿手改）
+APP="/Applications/AgentDeck.app"
+SELF="__SELFDIR__"
+BODY="$(cat)"
+printf '%s' "$BODY" | curl -sf -m 3 -X POST http://127.0.0.1:7777/api/event \\
+  -H 'Content-Type: application/json' --data-binary @- >/dev/null 2>&1 && exit 0
+# POST 失败=daemon 没跑。仅当 App 也不在了（=已卸载，区别于「临时退出」）才自清理。
+[ -d "$APP" ] && exit 0
+python3 - "$HOME/.claude/settings.json" >/dev/null 2>&1 <<'PY'
+import json,sys
+p=sys.argv[1]
+try: d=json.load(open(p))
+except Exception: raise SystemExit
+h=d.get("hooks") or {}; st=h.get("Stop")
+if isinstance(st,list):
+    kept=[g for g in st if not (isinstance(g,dict) and any(
+        "claude-stop-hook.sh" in (x.get("command") or "") for x in (g.get("hooks") or [])))]
+    if kept: h["Stop"]=kept
+    else:
+        h.pop("Stop",None)
+        if not h: d.pop("hooks",None)
+    json.dump(d,open(p,"w"),ensure_ascii=False,indent=2)
+PY
+rm -f "$SELF/claude-stop-hook.sh" "$SELF/integration.json" 2>/dev/null
+exit 0
+'''
+
+
+def _integration_state():
+    try:
+        return json.loads(INTEGRATION_FILE.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def _integration_state_save(st):
+    try:
+        INTEGRATION_FILE.parent.mkdir(parents=True, exist_ok=True)
+        INTEGRATION_FILE.write_text(json.dumps(st, ensure_ascii=False, indent=2))
+    except OSError:
+        pass
+
+
+def _hook_is_ours(grp):
+    if not isinstance(grp, dict):
+        return False
+    return any(any(m in (h.get("command") or "") for m in _HOOK_MARKS)
+               for h in (grp.get("hooks") or []))
+
+
+def _write_hook_wrapper():
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        _HOOK_WRAPPER.write_text(_HOOK_WRAPPER_SH.replace("__SELFDIR__", str(DATA_DIR)))
+        _HOOK_WRAPPER.chmod(0o755)
+        return True
+    except OSError:
+        return False
+
+
+def _install_claude_hook():
+    """幂等：写自清理 wrapper + 把指向它的 Stop 钩子合并进 settings.json（不覆盖用户其它钩子）。
+    已配置正确则完全跳过（不重写 settings.json）。返回是否发生了改动。"""
+    try:
+        d = json.loads(_CLAUDE_SETTINGS.read_text()) if _CLAUDE_SETTINGS.exists() else {}
+    except (OSError, ValueError):
+        return False
+    if not isinstance(d, dict):
+        return False
+    hooks = d.get("hooks")
+    stop = hooks.get("Stop") if isinstance(hooks, dict) else None
+    ours = [g for g in stop if _hook_is_ours(g)] if isinstance(stop, list) else []
+    already = (len(ours) == 1 and _HOOK_WRAPPER.exists()
+               and (ours[0].get("hooks") or [{}])[0].get("command") == _HOOK_CMD)
+    if already:
+        return False
+    if not _write_hook_wrapper():
+        return False
+    hooks = d.setdefault("hooks", {})
+    if not isinstance(hooks, dict):
+        return False
+    stop = hooks.setdefault("Stop", [])
+    if not isinstance(stop, list):
+        return False
+    # 先剔除我们的旧条目（裸 curl 旧版 / 重复），再装当前 wrapper 版——保证幂等且单条
+    stop[:] = [g for g in stop if not _hook_is_ours(g)]
+    stop.append({"hooks": [{"type": "command", "command": _HOOK_CMD, "timeout": 5}]})
+    try:
+        _CLAUDE_SETTINGS.parent.mkdir(parents=True, exist_ok=True)
+        _CLAUDE_SETTINGS.write_text(json.dumps(d, ensure_ascii=False, indent=2))
+        return True
+    except OSError:
+        return False
+
+
+def _remove_claude_hook():
+    """只移除我们打了标记的 Stop 钩子（新/旧版都认）；用户自己的钩子原样保留。"""
+    try:
+        d = json.loads(_CLAUDE_SETTINGS.read_text())
+    except (OSError, ValueError):
+        return
+    hooks = d.get("hooks") if isinstance(d, dict) else None
+    stop = hooks.get("Stop") if isinstance(hooks, dict) else None
+    if not isinstance(stop, list):
+        return
+    kept = [g for g in stop if not _hook_is_ours(g)]
+    if len(kept) == len(stop):
+        return
+    if kept:
+        hooks["Stop"] = kept
+    else:
+        hooks.pop("Stop", None)
+        if not hooks:
+            d.pop("hooks", None)
+    try:
+        _CLAUDE_SETTINGS.write_text(json.dumps(d, ensure_ascii=False, indent=2))
+    except OSError:
+        pass
+
+
+def install_integration():
+    """启动时调用（幂等）：自动接好完成事件钩子。"""
+    if _install_claude_hook():
+        st = _integration_state()
+        st["claude_hook"] = True
+        _integration_state_save(st)
+
+
+def remove_integration():
+    """卸载 / 关开关时调用：还原我们的所有改动。"""
+    _remove_claude_hook()
+    for f in (_HOOK_WRAPPER, INTEGRATION_FILE):
+        try:
+            f.unlink()
+        except OSError:
+            pass
+
+
 def _events_load():
     """启动时回灌最近事件（重启后「最近完成」不清零）。"""
     global _event_seq
@@ -2528,6 +2680,7 @@ def _parent_watchdog():
 def main():
     _events_load()
     _alert_state_load()
+    install_integration()   # 启动即自动接好完成事件钩子（幂等、只合并不覆盖）
     threading.Thread(target=_parent_watchdog, daemon=True).start()
     threading.Thread(target=_sampler_loop, daemon=True).start()
     threading.Thread(target=_keepawake_loop, daemon=True).start()
@@ -2537,4 +2690,12 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # 卸载用：build.sh uninstall 调 `agentdeckd.py --remove-integration` 干净还原我们的配置改动
+    if "--remove-integration" in sys.argv:
+        remove_integration()
+        print("integration removed")
+    elif "--install-integration" in sys.argv:
+        install_integration()
+        print("integration installed")
+    else:
+        main()
