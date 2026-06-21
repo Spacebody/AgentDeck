@@ -483,8 +483,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func savePanelSize(_ w: NSWindow) {
         let d = UserDefaults.standard
         if w === panel {
+            // 面板高度已自适应内容（fitPanelHeight 管），用户拖拽只持久化宽度
             d.set(Double(w.frame.width / uiScale), forKey: "panelW")
-            d.set(Double(w.frame.height / uiScale), forKey: "panelH")
         } else if w === widgetPanel {
             d.set(Double(w.frame.width / uiScale), forKey: "widgetW")
             d.set(Double(w.frame.height / uiScale), forKey: "widgetH")
@@ -517,7 +517,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             onOpenExternal: { [weak self] in self?.openExternal($0) },
             onPasteEnter: { autoPasteEnter() },
             onHidePanel: { [weak self] in self?.hidePanel() },
-            onScale: { [weak self] z in self?.applyUIScale(z) })
+            onScale: { [weak self] z in self?.applyUIScale(z) },
+            onContentHeight: { [weak self] h in self?.fitPanelHeight(h) })
+    }
+
+    /// 面板高度自适应内容：窗口高 = 内容自然高×缩放，钳到 [最小, 屏幕可用]，锚定顶边（菜单栏下）。
+    /// 消除内容不足时底部的空隙；内容超屏则封顶到屏幕高、由内部 ScrollView 滚动。
+    private var lastFitH: CGFloat = 0
+    func fitPanelHeight(_ contentH: CGFloat) {
+        guard let p = panel, p.isVisible, contentH > 1,
+              let screen = p.screen ?? NSScreen.main else { return }
+        let target = (contentH * uiScale).rounded()
+        let vis = screen.visibleFrame
+        let f = p.frame
+        let maxH = f.maxY - (vis.minY + 8)            // 顶边到屏幕底的可用高
+        let h = min(max(target, 200 * uiScale), maxH)  // 下限 200，上限屏幕可用
+        guard abs(h - f.height) > 2 else { return }    // 抖动抑制
+        lastFitH = h
+        p.setFrame(NSRect(x: f.minX, y: f.maxY - h, width: f.width, height: h), display: true)
+        p.invalidateShadow()
+        UserDefaults.standard.set(Double(h / uiScale), forKey: "panelH")  // 记住，下次开就近、少闪
     }
 
     /// 桌面小组件根视图（点击开主面板）。
@@ -792,7 +811,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         p.backgroundColor = .clear
         p.isOpaque = false
         p.hasShadow = true
-        p.minSize = NSSize(width: 420, height: 600)   // 最小尺寸限制，只许放大
+        p.minSize = NSSize(width: 420, height: 200)   // 宽度下限 420；高度自适应内容，下限放小
         p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         p.appearance = NSAppearance(named: .darkAqua)
         p.delegate = self

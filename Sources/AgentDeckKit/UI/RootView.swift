@@ -6,6 +6,12 @@ import SwiftUI
 // MARK: - 统计口径弹层种类（today 摘要 / usage 当前视图）
 enum InfoKind: Equatable { case today; case usage(UsageMode) }
 
+// MARK: - 主内容自然高度（驱动面板高度自适应，消除底部空隙）
+private struct ContentHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
+}
+
 // MARK: - 统计口径环境闭包（TodayBar / UsageView 深层触发，根视图实现）
 private struct ShowInfoKey: EnvironmentKey { static let defaultValue: (InfoKind) -> Void = { _ in } }
 extension EnvironmentValues {
@@ -118,6 +124,8 @@ public struct AgentDeckRootView: View {
     var onHidePanel: () -> Void
     /// 字体大小变更（驱动主壳同步缩放窗口，保持有效布局宽度）。
     var onScale: (CGFloat) -> Void
+    /// 内容自然高度变化（驱动主壳把面板高度自适应到内容，去掉底部空隙）。
+    var onContentHeight: (CGFloat) -> Void
     /// 预览模式：用 VStack 取代 ScrollView（ImageRenderer 渲不了滚动内容）。
     var previewMode: Bool
 
@@ -126,11 +134,12 @@ public struct AgentDeckRootView: View {
                 onOpenExternal: @escaping (String) -> Void = { _ in },
                 onPasteEnter: @escaping () -> Void = {},
                 onHidePanel: @escaping () -> Void = {},
-                onScale: @escaping (CGFloat) -> Void = { _ in }) {
+                onScale: @escaping (CGFloat) -> Void = { _ in },
+                onContentHeight: @escaping (CGFloat) -> Void = { _ in }) {
         self.store = store; self.version = version
         self.onQuit = onQuit; self.onOpenExternal = onOpenExternal
         self.onPasteEnter = onPasteEnter; self.onHidePanel = onHidePanel
-        self.onScale = onScale
+        self.onScale = onScale; self.onContentHeight = onContentHeight
         self.previewMode = false
     }
 
@@ -138,7 +147,7 @@ public struct AgentDeckRootView: View {
     init(previewStore: AppStore, version: String) {
         self.store = previewStore; self.version = version
         self.onQuit = {}; self.onOpenExternal = { _ in }; self.onPasteEnter = {}; self.onHidePanel = {}
-        self.onScale = { _ in }
+        self.onScale = { _ in }; self.onContentHeight = { _ in }
         self.previewMode = true
     }
 
@@ -160,17 +169,9 @@ public struct AgentDeckRootView: View {
     public var body: some View {
         // 字体缩放：内容在「基准宽度」(窗口/scale)布局后整体放大，等价 v1 的 zoom；窗口由主壳同步扩大。
         ScaledContainer(scale: fontScale) {
-            ZStack {
+            ZStack(alignment: .top) {
                 background
-                // 主内容（入场错峰淡入上滑，延时对齐 v1 .reveal animation-delay）
-                VStack(spacing: 10) {
-                    header.reveal(delay: 0)
-                    if showUpdate { updateBar }
-                    tabbar.reveal(delay: 0.03)
-                    tabContent
-                }
-                .padding(14)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                mainScroll   // 内容自然高 + 量高上报（主壳据此把面板高度自适应到内容）
 
                 // 设置右滑浮层
                 if showSettings { settingsOverlay.transition(.move(edge: .trailing)) }
@@ -291,17 +292,35 @@ public struct AgentDeckRootView: View {
         }.buttonStyle(.plain)
     }
 
-    // MARK: Tab 内容
+    // MARK: 主内容滚动容器（量自然高 → 上报主壳做高度自适应；超屏才滚动）
+    private var mainScroll: some View {
+        let content = VStack(spacing: 10) {
+            header.reveal(delay: 0)
+            if showUpdate { updateBar }
+            tabbar.reveal(delay: 0.03)
+            tabContent
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .top)
+        .background(GeometryReader { g in
+            Color.clear.preference(key: ContentHeightKey.self, value: g.size.height)
+        })
+
+        return Group {
+            if previewMode { content }
+            else { ScrollView { content }.scrollIndicators(.hidden) }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .onPreferenceChange(ContentHeightKey.self) { onContentHeight($0) }
+    }
+
+    // MARK: Tab 内容（自然高；超屏由外层 ScrollView 滚动）
     @ViewBuilder private var tabContent: some View {
         if tab == "overview" {
-            let overview = OverviewView(
+            OverviewView(
                 quota: store.quota, usage: store.usage, today: store.today,
                 active: store.activeShown, done: store.doneShown, showActive: store.showActive,
                 onFocusActive: focusActive, onFocusDone: focusDone)
-            // 充满窗口高度（maxHeight:.infinity）：否则 ScrollView 贴内容高，刷新换数据时整块卡片
-            // 随之变高变矮，看着像「面板大小被刷新改了」。撑满后数据变化只在内部滚动，区域稳定。
-            if previewMode { overview }
-            else { ScrollView { overview }.scrollIndicators(.hidden).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top) }
         } else {
             sessionsCard
         }
@@ -309,14 +328,15 @@ public struct AgentDeckRootView: View {
 
     private var sessionsCard: some View {
         VStack(alignment: .leading, spacing: 9) {
+            // scrollable:false → 会话列表按自然高展开，由外层 ScrollView 统一滚动（避免嵌套滚动）
             SessionsView(
-                sessions: store.sessionsShown, scrollable: !previewMode,
+                sessions: store.sessionsShown, scrollable: false,
                 onResume: resume, onCopy: copyCommand, onPin: pin,
                 loadPreview: { await store.preview($0) },
                 onSearch: { store.search($0) })
         }
         .padding(.horizontal, 14).padding(.vertical, 12)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .frame(maxWidth: .infinity, alignment: .top)
         .glassCard()
         .reveal(delay: 0.05)
     }
