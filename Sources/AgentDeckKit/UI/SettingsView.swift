@@ -31,7 +31,7 @@ struct SettingsView: View {
             // 标题由外壳 .sethead 提供（设置浮层顶部），此处直接从首个分区开始。
             ForEach(Array(groups.enumerated()), id: \.offset) { _, g in
                 Text(L(g.title).uppercased())
-                    .font(.system(size: 12, weight: .heavy)).foregroundStyle(Theme.ink2)
+                    .font(.system(size: 12, weight: .bold)).foregroundStyle(Theme.ink2)
                     .tracking(1.2).padding(.top, 14).padding(.bottom, 7).padding(.leading, 4)
                 VStack(spacing: 0) {
                     ForEach(Array(g.rows.enumerated()), id: \.offset) { idx, row in
@@ -88,7 +88,7 @@ struct SettingsView: View {
                 HStack(spacing: 6) {
                     ForEach(btns, id: \.0) { act, name in
                         Button(L(name)) { onAction(act) }
-                            .buttonStyle(.plain).font(.system(size: 11.5, weight: .semibold))
+                            .buttonStyle(.plain).font(.system(size: 11.5, weight: .medium))
                             .foregroundStyle(Theme.ink)
                             .padding(.horizontal, 10).padding(.vertical, 5)
                             .background(Capsule().fill(Color.white.opacity(0.08)))
@@ -155,8 +155,8 @@ struct SettingsView: View {
             ForEach(opts, id: \.0) { v, name in Button(L(name)) { onSet(key, .string(v)) } }
         } label: {
             HStack(spacing: 5) {
-                Text(L(opts.first { $0.0 == cur }?.1 ?? cur)).font(.system(size: 12, weight: .semibold))
-                Image(systemName: "chevron.down").font(.system(size: 8, weight: .bold))
+                Text(L(opts.first { $0.0 == cur }?.1 ?? cur)).font(.system(size: 12, weight: .medium))
+                Image(systemName: "chevron.down").font(.system(size: 8, weight: .semibold))
             }
             .foregroundStyle(Theme.ink)
             .padding(.horizontal, 11).padding(.vertical, 5)

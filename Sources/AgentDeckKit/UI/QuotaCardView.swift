@@ -28,8 +28,8 @@ struct RingView: View {
                 .rotationEffect(.degrees(-90))          // SVG rotate(-90)：从顶部起
                 .animation(.easeOut(duration: 1), value: percent)
             HStack(alignment: .firstTextBaseline, spacing: 1) {
-                Text("\(Int(percent.rounded()))").font(.rounded(15, weight: .heavy))
-                Text("%").font(.rounded(9, weight: .bold)).foregroundStyle(Theme.ink2)
+                Text("\(Int(percent.rounded()))").font(.rounded(15, weight: .bold))
+                Text("%").font(.rounded(9, weight: .semibold)).foregroundStyle(Theme.ink2)
             }
         }
         .padding(lineWidth / 2)                          // 防 stroke 被 frame 裁切
@@ -75,7 +75,7 @@ struct BrandGlyph: View {
                     .foregroundStyle(brand.accent)
             } else {   // 资源缺失兜底
                 Image(systemName: brand == .claude ? "sparkle" : "apple.terminal")
-                    .font(.system(size: glyph, weight: .medium))
+                    .font(.system(size: glyph, weight: .regular))
                     .foregroundStyle(brand.accent)
             }
         }
@@ -111,13 +111,13 @@ struct WindowRow: View {
                         .font(.system(size: 10.5)).foregroundStyle(Theme.ink2).lineLimit(1)
                     let cd = Fmt.countdown(window.resetsAt?.date, compact: true)
                     if !cd.isEmpty {
-                        Text(cd).font(.system(size: 10, weight: .semibold))
+                        Text(cd).font(.system(size: 10, weight: .medium))
                             .foregroundStyle(Theme.ink2).lineLimit(1)
                     }
                 }
                 Spacer(minLength: 6)
                 Text("\(pctText(window.usedPercent))%")
-                    .font(.rounded(11, weight: .bold)).foregroundStyle(Theme.ink)
+                    .font(.rounded(11, weight: .semibold)).foregroundStyle(Theme.ink)
             }
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
@@ -306,10 +306,10 @@ struct QuotaCardView: View {
     @ViewBuilder private func head(main: QuotaWindow?) -> some View {
         HStack(alignment: .center, spacing: 6) {
             BrandBadge(brand: brand)
-            Text(name).font(.system(size: 12.5, weight: .bold))
+            Text(name).font(.system(size: 12.5, weight: .semibold))
                 .lineLimit(1).fixedSize(horizontal: true, vertical: false)   // 名称不被右侧挤换行
             if let acct = accountLabel, !acct.isEmpty {
-                Text(acct).font(.system(size: 9.5, weight: .semibold))
+                Text(acct).font(.system(size: 9.5, weight: .medium))
                     .foregroundStyle(Theme.ink2)
                     .padding(.horizontal, 6).padding(.vertical, 1)
                     .background(Capsule().fill(Color.white.opacity(0.09)))

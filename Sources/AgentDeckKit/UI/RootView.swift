@@ -208,16 +208,16 @@ public struct AgentDeckRootView: View {
                     LinearGradient(colors: [Brand.claude.accent, Brand.codex.accent],
                                    startPoint: .topLeading, endPoint: .bottomTrailing))
             }
-            .font(.rounded(17, weight: .heavy))
+            .font(.rounded(17, weight: .bold))
             Circle()
                 .fill(store.online ? Theme.ok : Theme.danger)
                 .frame(width: 7, height: 7)
                 .shadow(color: store.online ? Theme.ok : Theme.danger, radius: 4)
             Spacer()
             IconButton(system: "gearshape", fontSize: 16) { showSettings = true }
-            IconButton(system: "arrow.clockwise", weight: .bold, fontSize: 15, spinning: spinning, customRefresh: true) { manualRefresh() }
+            IconButton(system: "arrow.clockwise", weight: .semibold, fontSize: 15, spinning: spinning, customRefresh: true) { manualRefresh() }
             // 原生壳里显示退出按钮（对应 v1：bridge 存在时 #quit 显示）。
-            IconButton(system: "power", weight: .bold, fontSize: 15, danger: true) { onQuit() }
+            IconButton(system: "power", weight: .semibold, fontSize: 15, danger: true) { onQuit() }
         }
     }
 
@@ -239,7 +239,7 @@ public struct AgentDeckRootView: View {
             Button {
                 onOpenExternal(store.update?.dmg ?? store.update?.url ?? "")
             } label: {
-                Text(L("update.go")).font(.system(size: 11, weight: .bold)).foregroundStyle(Theme.ink)
+                Text(L("update.go")).font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.ink)
                     .padding(.horizontal, 12).padding(.vertical, 4)
                     .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.10)))
                     .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Theme.edge))
@@ -275,8 +275,8 @@ public struct AgentDeckRootView: View {
         let on = tab == id
         return Button { tab = id } label: {
             HStack(spacing: 6) {
-                Image(systemName: icon).font(.system(size: 11, weight: .bold))
-                Text(label).font(.system(size: 11, weight: .bold)).tracking(0.3)
+                Image(systemName: icon).font(.system(size: 11, weight: .semibold))
+                Text(label).font(.system(size: 11, weight: .semibold)).tracking(0.3)
             }
             .foregroundStyle(on ? Theme.ink : Theme.ink3)
             .frame(maxWidth: .infinity).padding(.vertical, 6)
@@ -324,8 +324,8 @@ public struct AgentDeckRootView: View {
                 .background(.ultraThinMaterial)
             VStack(spacing: 10) {
                 HStack(spacing: 8) {
-                    IconButton(system: "chevron.left", weight: .bold, fontSize: 15) { showSettings = false }
-                    Text(L("header.settings")).font(.rounded(17, weight: .heavy)).foregroundStyle(Theme.ink)
+                    IconButton(system: "chevron.left", weight: .semibold, fontSize: 15) { showSettings = false }
+                    Text(L("header.settings")).font(.rounded(17, weight: .bold)).foregroundStyle(Theme.ink)
                     Spacer()
                 }
                 SettingsView(
@@ -348,15 +348,15 @@ public struct AgentDeckRootView: View {
                 .onTapGesture { info = nil }
             VStack(alignment: .leading, spacing: 0) {
                 HStack {
-                    Text(L("info.title")).font(.system(size: 13, weight: .bold)).foregroundStyle(Theme.ink)
+                    Text(L("info.title")).font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.ink)
                     Spacer()
-                    IconButton(system: "xmark", weight: .bold, fontSize: 11, size: 22) { info = nil }
+                    IconButton(system: "xmark", weight: .semibold, fontSize: 11, size: 22) { info = nil }
                 }
                 .padding(.bottom, 9)
                 ForEach(Array(infoRows(kind).enumerated()), id: \.offset) { idx, row in
                     if idx > 0 { Divider().overlay(Color.white.opacity(0.07)) }
                     HStack(alignment: .top, spacing: 9) {
-                        Text(row.0).font(.system(size: 12, weight: .bold)).foregroundStyle(Theme.ink)
+                        Text(row.0).font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.ink)
                             .frame(width: 40, alignment: .leading)
                         Text(row.1).font(.system(size: 12)).foregroundStyle(Theme.ink2).lineSpacing(2)
                     }

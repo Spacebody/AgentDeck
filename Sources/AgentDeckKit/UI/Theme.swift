@@ -323,7 +323,7 @@ extension Color {
 // MARK: - 字体助手（数字用 SF Pro Rounded，对应 ui-rounded）
 extension Font {
     /// 圆体（百分比/数值），对应 CSS 的 "SF Pro Rounded", ui-rounded
-    static func rounded(_ size: CGFloat, weight: Font.Weight = .bold) -> Font {
+    static func rounded(_ size: CGFloat, weight: Font.Weight = .semibold) -> Font {
         .system(size: size, weight: weight, design: .rounded)
     }
 }

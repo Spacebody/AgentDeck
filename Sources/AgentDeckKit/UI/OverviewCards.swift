@@ -64,7 +64,7 @@ struct TodayBar: View {
 
     private var text: some View {
         var s = Text(L("info.todayTerm") + " ").foregroundColor(Theme.ink2)
-            + Text(Fmt.tokens(summary.totalTokens)).font(.rounded(11.5, weight: .bold)).foregroundColor(Theme.ink)
+            + Text(Fmt.tokens(summary.totalTokens)).font(.rounded(11.5, weight: .semibold)).foregroundColor(Theme.ink)
             + Text(" tok").foregroundColor(Theme.ink2)
             + Text("  ·  ").foregroundColor(Theme.ink3)
             + Text("≈ $\(Int(summary.costUSD.rounded()))").foregroundColor(Theme.ink2)
@@ -98,7 +98,7 @@ private struct SessionRow: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 trailing
                 Image(systemName: "chevron.right")
-                    .font(.system(size: 9, weight: .bold)).foregroundStyle(Theme.ink3)
+                    .font(.system(size: 9, weight: .semibold)).foregroundStyle(Theme.ink3)
             }
             .padding(.horizontal, 6).padding(.vertical, 4)
             .contentShape(Rectangle())
@@ -119,7 +119,7 @@ struct ActiveCard: View {
                     Circle().fill(Theme.ok).frame(width: 6, height: 6)
                         .shadow(color: Theme.ok, radius: 3)
                     Text(L("active.running", ["n": "\(sessions.count)"]))
-                        .font(.system(size: 11, weight: .bold)).foregroundStyle(Theme.ink2)
+                        .font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.ink2)
                 }
                 .padding(.bottom, 4)
                 ForEach(Array(sessions.enumerated()), id: \.offset) { _, a in
@@ -158,7 +158,7 @@ struct ActiveCard: View {
     private func statePill(_ st: String) -> some View {
         let busy = st == "busy"
         return Text(busy ? L("active.busy") : L("active.idle"))
-            .font(.system(size: 9, weight: .bold))
+            .font(.system(size: 9, weight: .semibold))
             .foregroundStyle(busy ? Theme.warn : Theme.ok)
             .padding(.horizontal, 7).padding(.vertical, 2)
             .background(Capsule().fill((busy ? Theme.warn : Theme.ok).opacity(0.12)))
@@ -174,7 +174,7 @@ struct DoneCard: View {
         if !events.isEmpty {
             VStack(alignment: .leading, spacing: 2) {
                 Text(L("done.recent"))
-                    .font(.system(size: 11, weight: .bold)).foregroundStyle(Theme.ink2)
+                    .font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.ink2)
                     .padding(.bottom, 4)
                 ForEach(Array(events.enumerated()), id: \.offset) { _, e in
                     SessionRow(

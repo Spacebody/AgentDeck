@@ -73,7 +73,7 @@ struct SessionsView: View {
 
     private var header: some View {
         HStack(spacing: 7) {
-            Text(L("session.recent")).font(.system(size: 12.5, weight: .bold))
+            Text(L("session.recent")).font(.system(size: 12.5, weight: .semibold))
             ForEach(["all", "claude", "codex"], id: \.self) { f in
                 Chip(text: f == "all" ? L("session.all") : (f == "claude" ? "Claude" : "Codex"),
                      on: filter == f) { filter = f }
@@ -152,7 +152,7 @@ private struct SessionRow: View {
                     .foregroundStyle(session.pinned == true ? Color(hex: 0xffd479) : Theme.ink2)
             }.buttonStyle(.plain)
             Button(action: onResume) {
-                Text(L("session.resume")).font(.system(size: 9.5, weight: .bold)).foregroundStyle(Theme.ink)
+                Text(L("session.resume")).font(.system(size: 9.5, weight: .semibold)).foregroundStyle(Theme.ink)
                     .padding(.horizontal, 11).frame(height: 25)
                     .background(Capsule().fill(Color.white.opacity(0.10)))
                     .overlay(Capsule().strokeBorder(Theme.edgeHi))
@@ -175,7 +175,7 @@ private struct SessionRow: View {
                     ForEach(msgs) { m in
                         HStack(alignment: .top, spacing: 7) {
                             Text(m.role == "user" ? L("session.roleUser") : L("session.roleAI"))
-                                .font(.system(size: 8.5, weight: .heavy))
+                                .font(.system(size: 8.5, weight: .bold))
                                 .foregroundStyle(m.role == "user" ? Brand.codex.accent : Brand.claude.accent)
                                 .frame(width: 18, alignment: .leading)
                             Text(m.text).font(.system(size: 10.5)).foregroundStyle(Theme.ink2)

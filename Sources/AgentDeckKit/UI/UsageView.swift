@@ -76,7 +76,7 @@ struct Chip: View {
     var action: () -> Void = {}
     var body: some View {
         Button(action: action) {
-            Text(text).font(.system(size: size, weight: .semibold))
+            Text(text).font(.system(size: size, weight: .medium))
                 .lineLimit(1).fixedSize()          // 永不竖排（设置里曾出现「1 分 钟」逐字换行）
                 .foregroundStyle(on ? Theme.ink : Theme.ink3)
                 .padding(.horizontal, 10).padding(.vertical, 4)
@@ -288,7 +288,7 @@ struct Week7Bars: View {
                                                    startPoint: CGPoint(x: x, y: Y1), endPoint: CGPoint(x: x, y: Y0)))
                     cur -= h
                 }
-                ctx.draw(Text(Fmt.tokens(b.all)).font(.system(size: 6.5, weight: .semibold))
+                ctx.draw(Text(Fmt.tokens(b.all)).font(.system(size: 6.5, weight: .medium))
                     .foregroundColor(.white.opacity(isToday ? 0.92 : 0.4)),
                          at: CGPoint(x: cx, y: Y0 - totalH - 6), anchor: .center)
             } else {
@@ -331,11 +331,11 @@ struct ProjectTop: View {
                     let isCodex = p.cwd.contains("/Codex")
                     VStack(alignment: .leading, spacing: 3) {
                         HStack(alignment: .firstTextBaseline, spacing: 8) {
-                            Text(p.name).font(.system(size: 11.5, weight: .semibold))
+                            Text(p.name).font(.system(size: 11.5, weight: .medium))
                                 .foregroundStyle(Theme.ink).lineLimit(1)
                             Spacer(minLength: 6)
                             Text("$\(Int(p.cost.rounded()))").font(.system(size: 9)).foregroundStyle(Theme.ink3)
-                            Text(Fmt.tokens(p.tokens)).font(.rounded(11, weight: .bold)).foregroundStyle(Theme.ink2)
+                            Text(Fmt.tokens(p.tokens)).font(.rounded(11, weight: .semibold)).foregroundStyle(Theme.ink2)
                         }
                         GeometryReader { geo in
                             ZStack(alignment: .leading) {
