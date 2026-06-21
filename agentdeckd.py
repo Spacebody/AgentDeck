@@ -2520,7 +2520,7 @@ def _parent_watchdog():
     if start_ppid <= 1:
         return
     while True:
-        time.sleep(2)
+        time.sleep(10)   # 省电：10s 足够（App 退出后 daemon 至多多活 10s 再自杀），减少进程唤醒
         if os.getppid() != start_ppid:
             os._exit(0)
 

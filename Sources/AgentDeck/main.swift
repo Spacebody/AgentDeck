@@ -505,7 +505,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var lastEventId = 0
     var eventsPrimed = false
     var loaded = false
-    var appearanceObs: NSKeyValueObservation?   // 菜单栏明暗变化 → 重绘混色图标
+    // 菜单栏明暗变化 → 重绘混色图标，改用系统主题分布式通知（见 didFinishLaunching），不再 KVO 自激
 
     var appVersion: String { Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev" }
 
@@ -550,10 +550,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             button.action = #selector(handleClick)
             button.target = self
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
-            // 混色图标的常规段颜色取决于菜单栏明暗，外观变化时重绘
-            appearanceObs = button.observe(\.effectiveAppearance) { [weak self] _, _ in
-                DispatchQueue.main.async { self?.updateIconState() }
-            }
+            // 混色图标的常规段颜色随系统明暗变。⚠️不用 KVO 观察 effectiveAppearance——
+            // updateIconState 改 button.image/tintColor 会让 AppKit 重算 effectiveAppearance → KVO 再触发
+            // → 自激死循环，菜单栏图标持续重绘吃满一核（v2 一直耗电的真凶）。
+            // 改听系统主题切换分布式通知：只在用户真正切浅/深色时发，绝不被自身绘制触发。
+            DistributedNotificationCenter.default().addObserver(
+                forName: Notification.Name("AppleInterfaceThemeChangedNotification"),
+                object: nil, queue: .main) { [weak self] _ in self?.updateIconState() }
         }
 
         // 设置变更 → 即时重绘菜单栏（语言/常显用量/告警阈值等，等价 v1 "sync" 桥消息）
@@ -573,9 +576,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             UserDefaults.standard.set(true, forKey: "loginItemSetup")
         }
 
-        pollTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
+        // 省电：菜单栏图标刷新 15→20s + 大 tolerance，让系统合并唤醒（避免进「能耗显著」列表）。
+        pollTimer = Timer.scheduledTimer(withTimeInterval: 20, repeats: true) { [weak self] _ in
             self?.updateIconState()
         }
+        pollTimer?.tolerance = 8
         DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
             self?.updateIconState()
         }
@@ -584,9 +589,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         IslandController.shared.onTap = { [weak self] event in
             self?.focusSession(event)
         }
-        eventTimer = Timer.scheduledTimer(withTimeInterval: 2.5, repeats: true) { [weak self] _ in
+        // 省电：完成事件轮询 2.5→5s + tolerance，唤醒减半且可被系统合并（完成提醒晚几秒可接受）。
+        eventTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
             self?.pollEvents()
         }
+        eventTimer?.tolerance = 1.5
     }
 
     func focusSession(_ event: IslandController.Event?) {

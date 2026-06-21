@@ -267,8 +267,11 @@ struct Reveal: ViewModifier {
 struct Pulse: ViewModifier {
     var period: Double = 1.6
     @State private var dim = false
+    /// 常显桌面小组件(flatCard)里禁用呼吸：持续动画 = 合成器每帧为该窗口干活 = 持续 GPU 能耗，
+    /// 会把 app 推进「能耗显著」列表。小组件改静态点（更像原生），呼吸只留在短暂打开的面板里。
+    @Environment(\.flatCard) private var flat
     func body(content: Content) -> some View {
-        if GlassRender.useNativeEffect {
+        if GlassRender.useNativeEffect && !flat {
             content
                 .opacity(dim ? 0.35 : 1.0)   // 对应 pulse{50%{opacity:.35}}
                 .animation(.easeInOut(duration: period / 2).repeatForever(autoreverses: true), value: dim)
