@@ -903,15 +903,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             wv.autoresizingMask = [.width, .height]
             effect.addSubview(wv)
             addRim(to: effect, radius: 28)   // 顶亮底暗渐变描边
-            addEdgeCursor(to: effect, allowTop: false)   // 顶部是拖动把手
             // 顶部 28px 原生拖拽把手（盖在内容之上）
             let handle = DragHandle(frame: NSRect(x: 0, y: H - 28, width: W, height: 28))
             handle.autoresizingMask = [.width, .minYMargin]
             effect.addSubview(handle)
-            // 最上层：按住 ⌘ 任意位置可拖（顶部把手够不到时的兜底），平时事件穿透不挡交互
+            // 按住 ⌘ 任意位置可拖（顶部把手够不到时的兜底），平时事件穿透不挡交互
             let cmdDrag = CmdDragView(frame: effect.bounds)
             cmdDrag.autoresizingMask = [.width, .height]
             effect.addSubview(cmdDrag)
+            // 边缘缩放光标提示放最上层（hitTest 返回 nil 不挡点击；之前被 handle/cmdDrag 压在底下
+            // 拿不到 mouseMoved → 边缘不显示缩放光标）。allowTop:false：顶部是拖拽把手不提示缩放。
+            addEdgeCursor(to: effect, allowTop: false)
+            p.acceptsMouseMovedEvents = true   // 非 key 桌面窗：确保边缘 tracking area 收到 mouseMoved
             p.contentView = effect
             widgetPanel = p
 
