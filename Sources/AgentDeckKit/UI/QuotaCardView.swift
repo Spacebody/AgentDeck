@@ -232,7 +232,8 @@ struct QuotaCardView: View {
         if let node, node.ok {
             let windows = node.displayWindows
             let main = windows.first
-            let rest = windows.dropFirst().filter { $0.usedPercent > 0 || $0.resetsAt?.date != nil }
+            // 小组件(compact)只显示有用量的副窗口；主面板还显示有重置时间的（对应 v1 wgt ? >0% : >0%||resets_at）
+            let rest = windows.dropFirst().filter { compact ? $0.usedPercent > 0 : ($0.usedPercent > 0 || $0.resetsAt?.date != nil) }
             head(main: main)
             HStack(spacing: 11) {                 // .qbody
                 RingView(percent: main?.usedPercent ?? 0, brand: brand)
