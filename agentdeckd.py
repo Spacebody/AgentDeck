@@ -2145,7 +2145,8 @@ def _push_alert(tool, msg, level, sound=False):
     """额度告警走事件流（壳层用灵动岛弹丸统一渲染），不再用 osascript 系统通知。
     kind=alert 标记：「最近完成」卡过滤掉，灵动岛通道照常推送。"""
     global _event_seq
-    evt = {"tool": tool, "kind": "alert", "level": level, "title": msg,
+    # tool 存小写（与会话完成事件一致）→ 壳层 appIcon 选对 Claude/Codex 图标；msg 里仍是显示名
+    evt = {"tool": (tool or "").lower(), "kind": "alert", "level": level, "title": msg,
            "session": "", "cwd": "", "project": "", "sound": bool(sound), "ts": time.time()}
     with _events_lock:
         _event_seq += 1

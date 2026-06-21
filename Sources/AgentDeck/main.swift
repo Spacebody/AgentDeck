@@ -295,7 +295,9 @@ final class IslandController {
     }
 
     private func appIcon(for tool: String) -> NSImage {
-        let path = tool == "claude" ? "/Applications/Claude.app" : "/Applications/Codex.app"
+        // 大小写不敏感：告警事件的 tool 是 daemon 大写传的("Claude"/"Codex")，
+        // 会话完成是小写——统一 lowercased 比对，否则 Claude 告警弹丸会错用 Codex 图标
+        let path = tool.lowercased() == "claude" ? "/Applications/Claude.app" : "/Applications/Codex.app"
         let img = NSWorkspace.shared.icon(forFile: path)
         img.size = NSSize(width: 26, height: 26)
         return img
@@ -310,7 +312,7 @@ final class IslandController {
         let isAlert = e.kind == "alert"
         let headText = isAlert
             ? L("alert.\(["warn", "crit", "reset"].contains(e.level) ? e.level : "warn")")
-            : "\(e.project.isEmpty ? (e.tool == "claude" ? "Claude" : "Codex") : e.project) · \(L("island.done"))"
+            : "\(e.project.isEmpty ? (e.tool.lowercased() == "claude" ? "Claude" : "Codex") : e.project) · \(L("island.done"))"
         let head = NSTextField(labelWithString: headText)
         head.font = .systemFont(ofSize: 12.5, weight: .semibold)
         head.textColor = isAlert ? (e.level == "crit" ? .systemRed
