@@ -649,10 +649,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     IslandController.shared.dwellSecs = Double(secs)
                 }
                 if let loc = json["locale"] as? String { appLocale = loc }   // 三层语言一致
-                if let last = json["last"] as? Int { self.lastEventId = max(self.lastEventId, last) }
-                // 首次轮询只对齐游标不弹窗：壳重启而 daemon 存活时，避免重放历史事件
-                if !self.eventsPrimed { self.eventsPrimed = true; return }
+                // 首次轮询只对齐游标不弹窗（壳重启而 daemon 存活时，避免重放历史事件）
+                let primed = self.eventsPrimed
+                self.eventsPrimed = true
                 for ev in events {
+                    // 按事件 id 去重：并发/重叠轮询（如休眠唤醒后）可能用同一 since 重复返回同一事件，
+                    // 仅当 id 严格大于已处理游标才弹，杜绝同一完成重复提醒。main 队列串行 → 无数据竞争。
+                    guard let id = ev["id"] as? Int, id > self.lastEventId else { continue }
+                    self.lastEventId = id
+                    guard primed else { continue }   // 首轮只推进游标、不弹
                     let kind = ev["kind"] as? String ?? ""
                     if kind == "alert", ev["sound"] as? Bool ?? false {
                         NSSound(named: "Glass")?.play()   // 严重/恢复带提示音（设置 notify_sound）
@@ -666,6 +671,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                         kind: kind,
                         level: ev["level"] as? String ?? ""))
                 }
+                // 推进游标到全局 last（跳过重放事件 id），下轮 since 不再回取
+                if let last = json["last"] as? Int { self.lastEventId = max(self.lastEventId, last) }
             }
         }.resume()
     }
