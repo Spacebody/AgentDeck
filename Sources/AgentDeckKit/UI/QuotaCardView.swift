@@ -28,8 +28,8 @@ struct RingView: View {
                 .rotationEffect(.degrees(-90))          // SVG rotate(-90)：从顶部起
                 .animation(.easeOut(duration: 1), value: percent)
             HStack(alignment: .firstTextBaseline, spacing: 1) {
-                Text("\(Int(percent.rounded()))").font(.rounded(15, weight: .bold))
-                Text("%").font(.rounded(9, weight: .semibold)).foregroundStyle(Theme.ink2)
+                Text("\(Int(percent.rounded()))").font(.rounded(size * 0.23, weight: .bold))   // 随环径缩放
+                Text("%").font(.rounded(size * 0.14, weight: .semibold)).foregroundStyle(Theme.ink2)
             }
         }
         .padding(lineWidth / 2)                          // 防 stroke 被 frame 裁切
@@ -102,22 +102,26 @@ struct BrandBadge: View {
 struct WindowRow: View {
     let window: QuotaWindow
     let brand: Brand
+    /// 小组件窄卡：字号/间距收紧，标签少截断（"周限额" 不再变 "周..."）。
+    var compact: Bool = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            HStack(alignment: .top, spacing: 6) {
+        VStack(alignment: .leading, spacing: compact ? 2 : 3) {
+            HStack(alignment: .top, spacing: compact ? 4 : 6) {
                 VStack(alignment: .leading, spacing: 1) {
                     Text(window.displayLabel)
-                        .font(.system(size: 10.5)).foregroundStyle(Theme.ink2).lineLimit(1)
+                        .font(.system(size: compact ? 9 : 10.5)).foregroundStyle(Theme.ink2)
+                        .lineLimit(1).minimumScaleFactor(0.8)   // 略缩以容下完整标签
                     let cd = Fmt.countdown(window.resetsAt?.date, compact: true)
                     if !cd.isEmpty {
-                        Text(cd).font(.system(size: 10, weight: .medium))
-                            .foregroundStyle(Theme.ink2).lineLimit(1)
+                        Text(cd).font(.system(size: compact ? 8.5 : 10, weight: .medium))
+                            .foregroundStyle(Theme.ink2).lineLimit(1).minimumScaleFactor(0.8)
                     }
                 }
-                Spacer(minLength: 6)
+                Spacer(minLength: 4)
                 Text("\(pctText(window.usedPercent))%")
-                    .font(.rounded(11, weight: .semibold)).foregroundStyle(Theme.ink)
+                    .font(.rounded(compact ? 10 : 11, weight: .semibold)).foregroundStyle(Theme.ink)
+                    .fixedSize()
             }
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
@@ -127,7 +131,7 @@ struct WindowRow: View {
                         .animation(.easeOut(duration: 1), value: window.usedPercent)
                 }
             }
-            .frame(height: 4)
+            .frame(height: compact ? 3 : 4)
         }
     }
 }
@@ -235,18 +239,19 @@ struct QuotaCardView: View {
             // 小组件(compact)只显示有用量的副窗口；主面板还显示有重置时间的（对应 v1 wgt ? >0% : >0%||resets_at）
             let rest = windows.dropFirst().filter { compact ? $0.usedPercent > 0 : ($0.usedPercent > 0 || $0.resetsAt?.date != nil) }
             head(main: main)
-            HStack(spacing: 11) {                 // .qbody
-                RingView(percent: main?.usedPercent ?? 0, brand: brand)
-                VStack(alignment: .leading, spacing: 9) {   // .qmeta
+            HStack(spacing: compact ? 9 : 11) {                 // .qbody
+                RingView(percent: main?.usedPercent ?? 0, brand: brand,
+                         size: compact ? 52 : 64, lineWidth: compact ? 5 : 6)
+                VStack(alignment: .leading, spacing: compact ? 6 : 9) {   // .qmeta
                     if rest.isEmpty {
-                        Text(L("quota.noOther")).font(.system(size: 10.5)).foregroundStyle(Theme.ink3)
+                        Text(L("quota.noOther")).font(.system(size: compact ? 9 : 10.5)).foregroundStyle(Theme.ink3)
                     } else {
-                        ForEach(rest) { WindowRow(window: $0, brand: brand) }
+                        ForEach(rest) { WindowRow(window: $0, brand: brand, compact: compact) }
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .padding(.top, 9)   // .qhead margin-bottom:9
+            .padding(.top, compact ? 7 : 9)   // .qhead margin-bottom:9
             if !compact, let foot = footer(node) {   // .qfoot：限流警示 / 烧录速率 / 额外用量 / Credits / 新鲜度
                 Divider().overlay(Color.white.opacity(0.07)).padding(.top, 9)
                 Text(foot.text).font(.system(size: 9.5))
