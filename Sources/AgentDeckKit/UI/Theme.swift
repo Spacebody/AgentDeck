@@ -236,6 +236,24 @@ struct Reveal: ViewModifier {
     }
 }
 
+// MARK: - 呼吸动效（对应 v1 @keyframes pulse{50%{opacity:.35}}：live 点 / 活跃点 / 「工作中」标）
+// 用 TimelineView 按时钟算透明度（与刷新自旋同理：不走 .repeatForever，避免轮询重绘把动画取消掉）。
+// 无头渲染（PreviewGen）退化为静态满透明，保证 PNG 自检稳定。
+struct Pulse: ViewModifier {
+    var period: Double = 1.6
+    func body(content: Content) -> some View {
+        if GlassRender.useNativeEffect {
+            TimelineView(.animation) { ctx in
+                let t = ctx.date.timeIntervalSinceReferenceDate
+                // 1 ↔ .35 平滑往返（cos 给 ease-in-out 感）：mid .675 ± amp .325
+                content.opacity(0.675 + 0.325 * cos(2 * .pi * t / period))
+            }
+        } else {
+            content
+        }
+    }
+}
+
 // MARK: - 悬浮微交互（.iconbtn / .ubgo 等 :hover { transform: translateY(-1px) }，transition .18s）
 struct HoverLift: ViewModifier {
     var lift: CGFloat = 1
@@ -259,6 +277,8 @@ extension View {
     func hoverLift(_ lift: CGFloat = 1) -> some View {
         modifier(HoverLift(lift: lift))
     }
+    /// 呼吸动效（对应 v1 .live/.adot/.astate.busy 的 pulse）。
+    func pulse(_ period: Double = 1.6) -> some View { modifier(Pulse(period: period)) }
 }
 
 // MARK: - 流式换行布局（对应 v1 .setchips：flex-wrap + justify-content:flex-end）

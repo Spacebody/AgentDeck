@@ -116,7 +116,7 @@ struct ActiveCard: View {
         if !sessions.isEmpty {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
-                    Circle().fill(Theme.ok).frame(width: 6, height: 6)
+                    Circle().fill(Theme.ok).frame(width: 6, height: 6).pulse(1.6)   // .adot 呼吸
                         .shadow(color: Theme.ok, radius: 3)
                     Text(L("active.running", ["n": "\(sessions.count)"]))
                         .font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.ink2)
@@ -155,13 +155,14 @@ struct ActiveCard: View {
             .padding(.horizontal, 5).padding(.vertical, 1)
             .background(Capsule().fill(Color.white.opacity(0.08)))
     }
-    private func statePill(_ st: String) -> some View {
+    @ViewBuilder private func statePill(_ st: String) -> some View {
         let busy = st == "busy"
-        return Text(busy ? L("active.busy") : L("active.idle"))
+        let pill = Text(busy ? L("active.busy") : L("active.idle"))
             .font(.system(size: 9, weight: .semibold))
             .foregroundStyle(busy ? Theme.warn : Theme.ok)
             .padding(.horizontal, 7).padding(.vertical, 2)
             .background(Capsule().fill((busy ? Theme.warn : Theme.ok).opacity(0.12)))
+        if busy { pill.pulse(1.6) } else { pill }   // 「工作中」呼吸（对应 v1 .astate.busy pulse 1.6s）
     }
 }
 

@@ -49,13 +49,14 @@ struct SessionsView: View {
                     .frame(maxWidth: .infinity, alignment: .center).padding(.top, 26)
             } else {
                 let rows = VStack(spacing: 2) {
-                    ForEach(filtered, id: \.rowKey) { s in
+                    ForEach(Array(filtered.enumerated()), id: \.element.rowKey) { idx, s in
                         SessionRow(
                             session: s,
                             expanded: expandedKey == s.rowKey,
                             preview: previews[s.rowKey],
                             onToggle: { toggle(s) },
                             onResume: { onResume(s) }, onCopy: { onCopy(s) }, onPin: { onPin(s) })
+                            .reveal(delay: Double(idx) * 0.025, duration: 0.4)   // 行错峰入场（对应 v1 in .4s ${i*0.025}s）
                     }
                 }
                 if scrollable { ScrollView { rows }.scrollIndicators(.hidden) } else { rows }
@@ -117,7 +118,7 @@ private struct SessionRow: View {
                 BrandBadge(brand: brand, size: 26)
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 4) {
-                        if live { Circle().fill(Theme.ok).frame(width: 5, height: 5).shadow(color: Theme.ok, radius: 3) }
+                        if live { Circle().fill(Theme.ok).frame(width: 5, height: 5).shadow(color: Theme.ok, radius: 3).pulse(1.6) }   // .livedot 呼吸
                         Text(session.title ?? "—").font(.system(size: 11)).foregroundStyle(Theme.ink).lineLimit(1)
                     }
                     Text(meta).font(.system(size: 8.5)).foregroundStyle(Theme.ink3).lineLimit(1)

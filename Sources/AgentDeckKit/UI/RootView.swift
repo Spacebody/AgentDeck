@@ -182,7 +182,7 @@ public struct AgentDeckRootView: View {
             .environment(\.minimalMode, minimal)
             .environment(\.adShowInfo, { info = $0 })
             .animation(.spring(response: 0.32, dampingFraction: 0.85), value: showSettings)
-            .animation(.easeOut(duration: 0.2), value: info)
+            .animation(.spring(response: 0.3, dampingFraction: 0.72), value: info)   // ipin 轻微过冲
             .animation(.easeOut(duration: 0.2), value: toastMsg)
         }
         .preferredColorScheme(.dark)
@@ -213,6 +213,7 @@ public struct AgentDeckRootView: View {
                 .fill(store.online ? Theme.ok : Theme.danger)
                 .frame(width: 7, height: 7)
                 .shadow(color: store.online ? Theme.ok : Theme.danger, radius: 4)
+                .pulse(store.online ? 2.4 : .infinity)   // .live 呼吸 2.4s；离线(err) 不闪
             Spacer()
             IconButton(system: "gearshape", fontSize: 16) { showSettings = true }
             IconButton(system: "arrow.clockwise", weight: .semibold, fontSize: 15, spinning: spinning, customRefresh: true) { manualRefresh() }
@@ -346,6 +347,7 @@ public struct AgentDeckRootView: View {
             Rectangle().fill(Color(hex: 0x040409).opacity(0.46)).ignoresSafeArea()
                 .background(.ultraThinMaterial)
                 .onTapGesture { info = nil }
+                .transition(.opacity)
             VStack(alignment: .leading, spacing: 0) {
                 HStack {
                     Text(L("info.title")).font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.ink)
@@ -375,6 +377,7 @@ public struct AgentDeckRootView: View {
                         .strokeBorder(Color.white.opacity(0.15)))
                     .shadow(color: .black.opacity(0.55), radius: 32, y: 14)
             }
+            .transition(.scale(scale: 0.93).combined(with: .opacity))   // ipin：缩放弹入（.93→1）
         }
     }
 
