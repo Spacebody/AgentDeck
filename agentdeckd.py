@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import threading
@@ -1617,17 +1618,134 @@ def _remove_claude_hook():
         pass
 
 
-def install_integration():
-    """启动时调用（幂等）：自动接好完成事件钩子。"""
-    if _install_claude_hook():
-        st = _integration_state()
-        st["claude_hook"] = True
+# ---- Codex notify（单槽，可能被 Computer Use 等占用 → 链式转发，不破坏原工具）----
+_CODEX_CONFIG = Path.home() / ".codex" / "config.toml"
+_CODEX_WRAPPER = DATA_DIR / "codex-notify.sh"
+_CODEX_MARK = "codex-notify.sh"
+
+
+def _codex_read_notify(text):
+    """从 config.toml 文本里取 notify 数组（优先 tomllib，回退正则单行）。"""
+    try:
+        import tomllib
+        v = tomllib.loads(text).get("notify")
+        return v if isinstance(v, list) else None
+    except Exception:
+        # 注意用 [ \t]* 而非 \s*：\s 含换行，会把上一空行也吃掉
+        m = re.search(r'^[ \t]*notify[ \t]*=[ \t]*(\[.*\])[ \t]*$', text, re.M)
+        if not m:
+            return None
+        try:
+            return json.loads(m.group(1))   # TOML 单行数组与 JSON 数组语法兼容（双引号字符串）
+        except ValueError:
+            return None
+
+
+def _codex_set_notify(text, arr):
+    """把 config.toml 文本里的 notify 行替换/插入为 arr（仅动 notify 单行，其余原样）。
+    arr=None 表示删除 notify 行。返回新文本。用 [ \t]* 避免误吃上一空行。"""
+    line = None if arr is None else "notify = " + json.dumps(arr, ensure_ascii=False)
+    if re.search(r'^[ \t]*notify[ \t]*=', text, re.M):
+        if line is None:
+            return re.sub(r'^[ \t]*notify[ \t]*=.*\n?', '', text, count=1, flags=re.M)
+        return re.sub(r'^[ \t]*notify[ \t]*=.*$', line, text, count=1, flags=re.M)
+    return (text.rstrip("\n") + "\n" + line + "\n") if line else text
+
+
+def _write_codex_wrapper(orig):
+    """生成 codex wrapper：POST 给 daemon → 转发回原 notify（orig 烘进脚本）→ App 没了则还原+自删。"""
+    fwd = (" ".join(shlex.quote(x) for x in orig) + ' "$@"') if orig else 'true'
+    restore = json.dumps(orig, ensure_ascii=False) if orig is not None else "null"
+    sh = f'''#!/bin/sh
+# AgentDeck Codex notify wrapper（自动安装/链式转发/自清理，勿手改）
+APP="/Applications/AgentDeck.app"
+SELF={shlex.quote(str(DATA_DIR))}
+curl -sf -m 3 -X POST http://127.0.0.1:7777/api/event \\
+  -H 'Content-Type: application/json' --data-binary "$1" >/dev/null 2>&1
+{fwd}   # 链式转发回原 notify（如 Computer Use）
+[ -d "$APP" ] && exit 0
+# App 已卸载 → 还原 config.toml 的 notify、删 wrapper（drag-trash 也能净；不破坏原工具）
+python3 - "$HOME/.codex/config.toml" >/dev/null 2>&1 <<'PY'
+import re,sys,json
+p=sys.argv[1]
+try: t=open(p).read()
+except Exception: raise SystemExit
+orig={restore}
+line=None if orig is None else "notify = "+json.dumps(orig,ensure_ascii=False)
+if re.search(r'^[ \\t]*notify[ \\t]*=',t,re.M):
+    t=re.sub(r'^[ \\t]*notify[ \\t]*=.*\\n?','',t,count=1,flags=re.M) if line is None else re.sub(r'^[ \\t]*notify[ \\t]*=.*$',line,t,count=1,flags=re.M)
+open(p,"w").write(t)
+PY
+rm -f "$SELF/codex-notify.sh"
+exit 0
+'''
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        _CODEX_WRAPPER.write_text(sh)
+        _CODEX_WRAPPER.chmod(0o755)
+        return True
+    except OSError:
+        return False
+
+
+def _install_codex_notify():
+    """幂等：备份原 notify → 写转发 wrapper → 把 notify 指向 wrapper（不破坏原工具）。返回是否改动。"""
+    if not _CODEX_CONFIG.exists():
+        return False   # 没装 Codex 就不动
+    try:
+        text = _CODEX_CONFIG.read_text()
+    except OSError:
+        return False
+    cur = _codex_read_notify(text)
+    wrapper = str(_CODEX_WRAPPER)
+    if cur == [wrapper] and _CODEX_WRAPPER.exists():
+        return False   # 已是我们的，且 wrapper 在
+    st = _integration_state()
+    # 仅首次备份原值（cur 已是我们的 wrapper 时不要把它当原值覆盖备份）
+    if cur != [wrapper] and "codex_prev_notify" not in st:
+        st["codex_prev_notify"] = cur
         _integration_state_save(st)
+    orig = st.get("codex_prev_notify")
+    if not _write_codex_wrapper(orig):
+        return False
+    try:
+        _CODEX_CONFIG.write_text(_codex_set_notify(text, [wrapper]))
+        return True
+    except OSError:
+        return False
+
+
+def _remove_codex_notify():
+    """还原 config.toml 的 notify 为原值（备份里取），删 wrapper。"""
+    st = _integration_state()
+    if _CODEX_CONFIG.exists():
+        try:
+            text = _CODEX_CONFIG.read_text()
+            cur = _codex_read_notify(text)
+            # 只在当前确实指向我们 wrapper 时才还原（别覆盖用户后来手改的值）
+            if cur == [str(_CODEX_WRAPPER)] or (cur and any(_CODEX_MARK in str(x) for x in cur)):
+                _CODEX_CONFIG.write_text(_codex_set_notify(text, st.get("codex_prev_notify")))
+        except OSError:
+            pass
+    try:
+        _CODEX_WRAPPER.unlink()
+    except OSError:
+        pass
+
+
+def install_integration():
+    """启动时调用（幂等）：自动接好完成事件钩子（Claude Stop + Codex notify 链式转发）。
+    每步各自重读 state 再加标记，避免覆盖 _install_codex_notify 写入的原值备份。"""
+    if _install_claude_hook():
+        st = _integration_state(); st["claude_hook"] = True; _integration_state_save(st)
+    if _install_codex_notify():
+        st = _integration_state(); st["codex_notify"] = True; _integration_state_save(st)
 
 
 def remove_integration():
     """卸载 / 关开关时调用：还原我们的所有改动。"""
     _remove_claude_hook()
+    _remove_codex_notify()
     for f in (_HOOK_WRAPPER, INTEGRATION_FILE):
         try:
             f.unlink()
