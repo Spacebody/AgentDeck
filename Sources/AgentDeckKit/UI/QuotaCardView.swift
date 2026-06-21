@@ -228,7 +228,7 @@ struct QuotaCardView: View {
                            startRadius: 0, endRadius: 170)
                 .allowsHitTesting(false)
         }
-        .glassCard(radius: radius)
+        .glassCard(radius: radius)   // 小组件里由 \.flatCard 环境令其扁平（见 GlassCard）
         .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
     }
 

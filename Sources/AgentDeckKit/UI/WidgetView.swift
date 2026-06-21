@@ -25,6 +25,7 @@ struct WidgetView: View {
             if let today { TodayBar(summary: today) }
             if showActive { ActiveCard(sessions: active, onTap: onFocusActive) }
         }
+        .environment(\.flatCard, true)   // 小组件内卡片走扁平轻磨砂（原生小组件观感）
         .contentShape(Rectangle())
         .onTapGesture(perform: onTapPanel)   // 点击小组件 → 打开主面板（body.wgt #quota/#active cursor:pointer）
     }
@@ -40,7 +41,7 @@ struct WidgetChrome<Content: View>: View {
             Theme.bg
             AuroraBackground(opacity: 0.14)
             VStack(spacing: 0) {
-                Capsule().fill(Color.white.opacity(0.28)).frame(width: 36, height: 4).padding(.top, 7)
+                Capsule().fill(Color.white.opacity(0.16)).frame(width: 28, height: 3.5).padding(.top, 7)
                 content.padding(EdgeInsets(top: 8, leading: 10, bottom: 8, trailing: 10))
                 Spacer(minLength: 0)
             }

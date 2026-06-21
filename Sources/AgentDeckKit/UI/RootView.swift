@@ -536,8 +536,8 @@ public struct AgentDeckWidgetRootView: View {
     public var body: some View {
         ScaledContainer(scale: fontScale) {
             ZStack(alignment: .top) {
-                // 小组件顶部 grip 提示
-                Capsule().fill(Color.white.opacity(0.28)).frame(width: 36, height: 4)
+                // 小组件顶部 grip 提示（弱化，更接近原生小组件的干净表面）
+                Capsule().fill(Color.white.opacity(0.16)).frame(width: 28, height: 3.5)
                     .padding(.top, 7).frame(maxWidth: .infinity, alignment: .center)
                 WidgetView(
                     quota: store.quota, today: store.today, active: store.activeShown,

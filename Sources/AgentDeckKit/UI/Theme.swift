@@ -103,14 +103,36 @@ extension EnvironmentValues {
     }
 }
 
+// MARK: - 扁平卡环境键（桌面小组件）。小组件本体已是整块磨砂表面，内部卡片改扁平轻磨砂分组，
+// 内容像「浮在小组件表面上」而非「卡中卡」深色块 → 更接近 macOS 原生小组件观感。
+private struct FlatCardKey: EnvironmentKey { static let defaultValue = false }
+extension EnvironmentValues {
+    var flatCard: Bool {
+        get { self[FlatCardKey.self] }
+        set { self[FlatCardKey.self] = newValue }
+    }
+}
+
 // MARK: - 玻璃卡（对应 .card：白渐变高光 + 模糊背板 + 描边 + 投影 + 内嵌镜面线）
 struct GlassCard: ViewModifier {
     var radius: CGFloat = Theme.rLg
     /// 精简模式：去渐变高光与内嵌镜面线，降视觉噪声（body.minimal .card）。
     /// 默认跟随环境 minimalMode（根视图按设置注入），整树一致切换。
     @Environment(\.minimalMode) private var minimal
+    @Environment(\.flatCard) private var flat
 
     func body(content: Content) -> some View {
+        if flat {
+            // 小组件：扁平轻磨砂分组（薄白底 + 细描边，无深色块/无投影），浮在小组件磨砂表面上。
+            content
+                .background(RoundedRectangle(cornerRadius: radius, style: .continuous).fill(Color.white.opacity(0.05)))
+                .overlay(RoundedRectangle(cornerRadius: radius, style: .continuous).strokeBorder(Color.white.opacity(0.10)))
+        } else {
+            full(content)
+        }
+    }
+
+    @ViewBuilder private func full(_ content: Content) -> some View {
         content
             .background {
                 if minimal {
