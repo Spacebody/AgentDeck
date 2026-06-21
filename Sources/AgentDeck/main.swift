@@ -41,16 +41,19 @@ let kStrings: [String: [String: String]] = [
         "menu.openBrowser": "在浏览器中打开", "menu.restartBackend": "重启后端",
         "menu.loginItem": "开机自启", "menu.widget": "桌面小组件", "menu.quit": "退出 AgentDeck",
         "island.done": "会话完成", "island.taskDone": "任务完成",
+        "alert.warn": "额度提醒", "alert.crit": "额度严重", "alert.reset": "额度恢复",
     ],
     "en": [
         "menu.openBrowser": "Open in browser", "menu.restartBackend": "Restart backend",
         "menu.loginItem": "Launch at login", "menu.widget": "Desktop widget", "menu.quit": "Quit AgentDeck",
         "island.done": "Session done", "island.taskDone": "Task complete",
+        "alert.warn": "Quota warning", "alert.crit": "Quota critical", "alert.reset": "Quota recovered",
     ],
     "ja": [
         "menu.openBrowser": "ブラウザで開く", "menu.restartBackend": "バックエンドを再起動",
         "menu.loginItem": "ログイン時に起動", "menu.widget": "デスクトップウィジェット", "menu.quit": "AgentDeck を終了",
         "island.done": "セッション完了", "island.taskDone": "タスク完了",
+        "alert.warn": "残量警告", "alert.crit": "残量重大", "alert.reset": "残量回復",
     ],
 ]
 func L(_ key: String) -> String {
@@ -271,7 +274,8 @@ final class HostController: NSViewController {
 final class IslandController {
     static let shared = IslandController()
     typealias Event = (tool: String, title: String, project: String,
-                       session: String, cwd: String)
+                       session: String, cwd: String,
+                       kind: String, level: String)   // kind="alert" 时为额度告警弹丸
     private var queue: [Event] = []
     private var showing = false
     private var window: KeyPanel?
@@ -302,12 +306,18 @@ final class IslandController {
         guard let screen = NSScreen.main else { showing = false; return }
         let H: CGFloat = 46
 
-        // 文案
-        let head = NSTextField(labelWithString:
-            "\(e.project.isEmpty ? (e.tool == "claude" ? "Claude" : "Codex") : e.project) · \(L("island.done"))")
+        // 文案（kind=alert：额度告警，标题用级别本地化词 + 级别配色；否则会话完成）
+        let isAlert = e.kind == "alert"
+        let headText = isAlert
+            ? L("alert.\(["warn", "crit", "reset"].contains(e.level) ? e.level : "warn")")
+            : "\(e.project.isEmpty ? (e.tool == "claude" ? "Claude" : "Codex") : e.project) · \(L("island.done"))"
+        let head = NSTextField(labelWithString: headText)
         head.font = .systemFont(ofSize: 12.5, weight: .semibold)
-        head.textColor = .labelColor
-        let sub = NSTextField(labelWithString: e.title.isEmpty ? L("island.taskDone") : e.title)
+        head.textColor = isAlert ? (e.level == "crit" ? .systemRed
+                                    : e.level == "reset" ? .systemGreen : .systemOrange)
+                                 : .labelColor
+        let sub = NSTextField(labelWithString: isAlert ? e.title
+                                                       : (e.title.isEmpty ? L("island.taskDone") : e.title))
         sub.font = .systemFont(ofSize: 10.5)
         sub.textColor = .secondaryLabelColor
         sub.lineBreakMode = .byTruncatingTail
@@ -580,7 +590,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func focusSession(_ event: IslandController.Event?) {
-        guard let event else { showPanel(); return }
+        // 额度告警弹丸无会话可跳转 → 直接打开面板看额度
+        guard let event, event.kind != "alert" else { showPanel(); return }
         var req = URLRequest(url: URL(string: "\(kBase)/api/focus")!)
         req.httpMethod = "POST"
         req.timeoutInterval = 15
@@ -614,12 +625,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 // 首次轮询只对齐游标不弹窗：壳重启而 daemon 存活时，避免重放历史事件
                 if !self.eventsPrimed { self.eventsPrimed = true; return }
                 for ev in events {
+                    let kind = ev["kind"] as? String ?? ""
+                    if kind == "alert", ev["sound"] as? Bool ?? false {
+                        NSSound(named: "Glass")?.play()   // 严重/恢复带提示音（设置 notify_sound）
+                    }
                     IslandController.shared.push((
                         tool: ev["tool"] as? String ?? "claude",
                         title: ev["title"] as? String ?? "",
                         project: ev["project"] as? String ?? "",
                         session: ev["session"] as? String ?? "",
-                        cwd: ev["cwd"] as? String ?? ""))
+                        cwd: ev["cwd"] as? String ?? "",
+                        kind: kind,
+                        level: ev["level"] as? String ?? ""))
                 }
             }
         }.resume()

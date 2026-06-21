@@ -1591,8 +1591,9 @@ def api_event(body):
 def api_events(query):
     with _events_lock:
         recent = int(query.get("recent", ["0"])[0])
-        if recent:        # 「最近完成」卡：取末尾 N 条（新→旧）
-            return {"events": list(_events)[-recent:][::-1], "last": _event_seq}
+        if recent:        # 「最近完成」卡：取末尾 N 条（新→旧）；排除额度告警事件（kind=alert）
+            done = [e for e in _events if e.get("kind") != "alert"]
+            return {"events": done[-recent:][::-1], "last": _event_seq}
         since = int(query.get("since", ["0"])[0])
         # 灵动岛通道：排除重启回灌的历史事件，只推真正新发生的
         evs = [e for e in _events if e["id"] > since and not e.get("replayed")]
@@ -1870,12 +1871,16 @@ def _alert_state_save():
         pass
 
 
-def _notify(msg, sound=False):
-    script = (f'display notification "{_osa_escape(msg)}" '
-              f'with title "AgentDeck"')
-    if sound:
-        script += ' sound name "Glass"'
-    subprocess.run(["osascript", "-e", script], capture_output=True, timeout=10)
+def _push_alert(tool, msg, level, sound=False):
+    """额度告警走事件流（壳层用灵动岛弹丸统一渲染），不再用 osascript 系统通知。
+    kind=alert 标记：「最近完成」卡过滤掉，灵动岛通道照常推送。"""
+    global _event_seq
+    evt = {"tool": tool, "kind": "alert", "level": level, "title": msg,
+           "session": "", "cwd": "", "project": "", "sound": bool(sound), "ts": time.time()}
+    with _events_lock:
+        _event_seq += 1
+        _events.append({"id": _event_seq, **evt})
+    _events_persist(evt)
 
 
 def _check_alerts(tool_name, windows):
@@ -1895,11 +1900,11 @@ def _check_alerts(tool_name, windows):
         label = labels.get(w.get("id") or "", w.get("label", ""))
         if cur != prev:
             if cur == "crit":
-                _notify(strs["crit"].format(tool=tool_name, label=label, pct=pct), sound=sound)
+                _push_alert(tool_name, strs["crit"].format(tool=tool_name, label=label, pct=pct), "crit", sound)
             elif cur == "warn" and prev == "normal":
-                _notify(strs["warn"].format(tool=tool_name, label=label, pct=pct))
+                _push_alert(tool_name, strs["warn"].format(tool=tool_name, label=label, pct=pct), "warn")
             elif cur == "normal" and prev in ("warn", "crit") and s["notify_reset"]:
-                _notify(strs["reset"].format(tool=tool_name, label=label, pct=pct), sound=sound)
+                _push_alert(tool_name, strs["reset"].format(tool=tool_name, label=label, pct=pct), "reset", sound)
             _alert_state[key] = cur
             _alert_state_save()
 
