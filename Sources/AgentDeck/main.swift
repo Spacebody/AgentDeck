@@ -856,8 +856,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if panel == nil { panel = makePanel() }
         guard let p = panel, let button = statusItem.button,
               let bw = button.window else { return }
+        // hidePanel 时把承载视图摘下了（停离屏 display link 省电）；重开先 reattach 回玻璃层底部
+        // （rim/边缘光标是后加的覆盖层，须在其下），保持 @State 与原始 z 序。
+        if let host = panelHost, host.view.superview == nil,
+           let effect = p.contentView {
+            host.view.frame = effect.bounds
+            host.view.autoresizingMask = [.width, .height]
+            effect.addSubview(host.view, positioned: .below, relativeTo: nil)
+        }
         loaded = true
-        Task { await store.refresh() }   // 开面板即刻拉一次最新数据
+        Task { await store.refreshOnOpen() }   // 开面板即刻刷新；额度够旧才强刷（节流+失败降级）
 
         // 尺寸：恢复用户上次拖拽的大小，高度不超过屏幕可视范围
         let bFrame = bw.convertToScreen(button.convert(button.bounds, to: nil))
@@ -896,6 +904,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // 尺寸已在拖拽时由 windowDidResize(inLiveResize) 持续落盘，这里不再保存——
         // 否则会把 showPanel 恢复时的「按屏高钳制后的值」反写覆盖，导致高度逐次缩水。
         panel?.orderOut(nil)
+        // ⚡️省电关键：orderOut 只是隐藏窗口，承载的 NSHostingView 仍在窗口里，其内
+        // .repeatForever 呼吸/极光动画会让 SwiftUI 的 display link 继续每帧重绘 → 隐藏后
+        // 仍持续吃 CPU（额度可取时 live 点呼吸尤甚）。把承载视图从窗口摘下：无窗口可渲染，
+        // AppKit 即停掉它的 display link；@State 仍存活在 panelHost 上，重开 reattach 即恢复。
+        panelHost?.view.removeFromSuperview()
         statusItem.button?.highlight(false)
         if let m = clickMonitor { NSEvent.removeMonitor(m); clickMonitor = nil }
         if let m = keyMonitor { NSEvent.removeMonitor(m); keyMonitor = nil }
@@ -990,11 +1003,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 }
             }
         }
+        // 复用既有小组件窗：hideWidget 摘下了承载视图，重新启用时 reattach 回玻璃层底部
+        // （rim/把手/⌘拖层/边缘光标都是覆盖层，须在其下）。
+        if let host = widgetHost, host.view.superview == nil,
+           let effect = widgetPanel?.contentView {
+            host.view.frame = effect.bounds
+            host.view.autoresizingMask = [.width, .height]
+            effect.addSubview(host.view, positioned: .below, relativeTo: nil)
+        }
         widgetPanel?.orderFront(nil)
     }
 
     func hideWidget() {
         widgetPanel?.orderOut(nil)
+        widgetHost?.view.removeFromSuperview()   // 同面板：摘下承载视图停离屏 display link，关掉小组件后不再耗电
     }
 
     func windowDidMove(_ notification: Notification) {

@@ -45,6 +45,12 @@ public final class AppStore: ObservableObject {
     private let api = APIClient.shared
     private var pollTask: Task<Void, Never>?
     private var searchTask: Task<Void, Never>?
+    /// 上次「成功强刷额度」的时刻——开面板智能强刷据此节流。
+    private var lastForceAt: Date?
+    /// 开面板强刷的过期阈值：超过该时长才真去打 Anthropic，否则用缓存。
+    /// 把开面板看到的额度滞后从 quota_interval（可至 30 分钟）压到 ~3 分钟内，
+    /// 又不至于每次开关都出站（频繁强刷易触发 429）。
+    private let openForceStaleSecs: Double = 180
 
     private var refreshInterval: Double { Double(max(5, settings["refresh_interval"]?.intVal ?? 30)) }
 
@@ -62,6 +68,15 @@ public final class AppStore: ObservableObject {
         }
     }
     public func stop() { pollTask?.cancel(); pollTask = nil }
+
+    /// 开面板时调用：数据「够旧」才强刷额度（绕缓存打一次 Anthropic），否则走缓存即可。
+    /// 强刷失败（daemon 出站异常）时 daemon 已回退到 last_good 陈旧数据、不会把卡片刷成
+    /// 「获取失败」；只有真拿到新鲜数据才记 lastForceAt，失败则下次开面板照常再试。
+    public func refreshOnOpen() async {
+        let due = lastForceAt.map { Date().timeIntervalSince($0) > openForceStaleSecs } ?? true
+        await refresh(force: due)
+        if due && online { lastForceAt = Date() }
+    }
 
     /// force=true 时给 /api/quota 带 ?force=1 绕过后端额度缓存、强制重采（对应 v1 手动刷新 refreshAll(true)）；
     /// 周期轮询用 false 走缓存，避免每轮都出站打 Anthropic。

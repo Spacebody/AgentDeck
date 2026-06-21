@@ -37,11 +37,29 @@ struct QuotaNode: Decodable, Identifiable {
     var displayWindows: [QuotaWindow] { windows ?? [] }
 }
 
+/// 上游（Codex credits / Claude extra_usage）的金额字段偶尔以字符串形式下发（如 balance "0"）。
+/// Codable 是「全有或全无」：单个字段类型漂移会让整张 /api/quota 解码失败 → 两张额度卡全
+/// 显示「额度获取失败」。故这些透传数值一律按「数字或字符串皆容」解。
+private extension KeyedDecodingContainer {
+    func flexDouble(_ key: Key) -> Double? {
+        if let n = try? decode(Double.self, forKey: key) { return n }
+        if let s = try? decode(String.self, forKey: key) { return Double(s) }
+        return nil
+    }
+}
+
 /// Codex Credits 余额（credits 透传自上游）。
 struct CreditsInfo: Decodable {
     let hasCredits: Bool?
     let unlimited: Bool?
     let balance: Double?
+    enum CodingKeys: String, CodingKey { case hasCredits, unlimited, balance }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        hasCredits = (try? c.decodeIfPresent(Bool.self, forKey: .hasCredits)) ?? nil
+        unlimited = (try? c.decodeIfPresent(Bool.self, forKey: .unlimited)) ?? nil
+        balance = c.flexDouble(.balance)
+    }
 }
 
 /// Claude 原始用量响应里只取 extra_usage（其余键忽略）。
@@ -52,6 +70,13 @@ struct ExtraUsage: Decodable {
     let isEnabled: Bool?
     let usedCredits: Double?    // 单位：美分
     let monthlyLimit: Double?   // 单位：美分
+    enum CodingKeys: String, CodingKey { case isEnabled, usedCredits, monthlyLimit }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        isEnabled = (try? c.decodeIfPresent(Bool.self, forKey: .isEnabled)) ?? nil
+        usedCredits = c.flexDouble(.usedCredits)
+        monthlyLimit = c.flexDouble(.monthlyLimit)
+    }
 }
 
 /// 单个限额窗口（5h / 周限额 / Sonnet / Opus …）。

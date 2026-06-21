@@ -16,6 +16,7 @@ import re
 import shlex
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.request
@@ -1808,6 +1809,23 @@ def _last_user_msg(transcript_path):
     return None, ""
 
 
+_TEMP_ROOTS = tuple(sorted({
+    os.path.realpath(b) for b in (tempfile.gettempdir(), "/tmp", "/private/tmp", "/var/folders")
+}))
+
+
+def _is_temp_cwd(cwd):
+    """cwd 落在系统临时目录（$TMPDIR=/var/folders/.../T、/tmp …）→ 非交互的一次性子调用
+    （headless / 子 agent），其完成提醒是噪音：项目名被解析成 'T'、标题为空。一律跳过。"""
+    if not cwd:
+        return False
+    try:
+        rp = os.path.realpath(os.path.expanduser(cwd))
+    except (OSError, ValueError):
+        return False
+    return any(rp == r or rp.startswith(r + os.sep) for r in _TEMP_ROOTS)
+
+
 def api_event(body):
     """接收 Claude Stop hook / Codex notify 包装脚本推来的完成事件。"""
     s = get_settings()
@@ -1845,6 +1863,11 @@ def api_event(body):
         title = _clean_title(str(msgs))[:60]
     else:
         return {"ok": False, "error": "unknown event"}
+
+    # 临时目录里的会话（cwd=/var/folders/.../T 等）是 headless/子 agent 一次性调用，
+    # 完成提醒纯噪音（弹丸头显示成 'T'、标题空），直接丢弃不入队。
+    if _is_temp_cwd(cwd):
+        return {"ok": True, "skipped": "temp_cwd"}
 
     global _event_seq
     # 空标题存为 ""，由前端 / Swift 壳按当前语言本地化「任务完成」回退
