@@ -235,7 +235,7 @@ footer{padding:48px 0 56px;border-top:1px solid var(--line);margin-top:40px}
 <section class="wrap" id="features">
   <span class="sec-tag" data-i18n="feat.tag">特性</span>
   <h2 class="rv" data-i18n="feat.h2">一个面板，看住两个 Agent</h2>
-  <p class="sec-sub rv" data-i18n="feat.sub">纯标准库 Python daemon + 单文件 Swift 壳 + 单文件 HTML 界面，没有 Node、没有 Electron、没有打包器。</p>
+  <p class="sec-sub rv" data-i18n="feat.sub">纯标准库 Python daemon + 原生 SwiftUI 界面，没有 Node、没有 Electron、没有打包器。</p>
   <div class="grid">
     <div class="card rv"><div class="ico"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 3a9 9 0 1 0 9 9"/><path d="M12 7a5 5 0 1 0 5 5"/><circle cx="12" cy="12" r="1"/></svg></div><h3 data-i18n="f1.t">额度监控</h3><p data-i18n="f1.d">Claude 5h/7d 窗口与 Codex rate limits 实时聚合，菜单栏常显百分比，临界自动告警。</p></div>
     <div class="card rv"><div class="ico"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="14" rx="2.5"/><path d="m8 9 2.5 2.5L8 14M13 14h3.5"/></svg></div><h3 data-i18n="f2.t">会话一键跳回</h3><p data-i18n="f2.d">自动识别会话所在终端（iTerm、Warp、Ghostty、VS Code 等任意终端），点一下直达现场。</p></div>
@@ -260,7 +260,7 @@ footer{padding:48px 0 56px;border-top:1px solid var(--line);margin-top:40px}
 <section class="wrap" id="install">
   <span class="sec-tag" data-i18n="inst.tag">安装</span>
   <h2 class="rv" data-i18n="inst.h2">一条命令装好</h2>
-  <p class="sec-sub rv" data-i18n="inst.sub">克隆即编译，swiftc 直出原生 App；也可以去 Releases 直接下 DMG。</p>
+  <p class="sec-sub rv" data-i18n="inst.sub">克隆即编译，swift build 直出原生 App；也可以去 Releases 直接下 DMG。</p>
   <div class="term rv">
     <div class="term-bar"><i></i><i></i><i></i><em>zsh</em></div>
     <div class="term-body">
@@ -297,7 +297,7 @@ const STR = {
   'badge.os':'<b>macOS 13+</b>','badge.dep':'<b>零依赖</b> · 无 Electron',
   'badge.tele':'<b>零遥测</b> · 数据纯本地','badge.lang':'<b>中 · EN · 日</b>三语',
   'feat.tag':'特性','feat.h2':'一个面板，看住两个 Agent',
-  'feat.sub':'纯标准库 Python daemon + 单文件 Swift 壳 + 单文件 HTML 界面，没有 Node、没有 Electron、没有打包器。',
+  'feat.sub':'纯标准库 Python daemon + 原生 SwiftUI 界面，没有 Node、没有 Electron、没有打包器。',
   'f1.t':'额度监控','f1.d':'Claude 5h/7d 窗口与 Codex rate limits 实时聚合，菜单栏常显百分比，临界自动告警。',
   'f2.t':'会话一键跳回','f2.d':'自动识别会话所在终端（iTerm、Warp、Ghostty、VS Code 等任意终端），点一下直达现场。',
   'f3.t':'用量分析','f3.d':'按模型 / 项目统计 token 与等值美元，24 小时曲线、今日摘要、7 天项目榜。',
@@ -308,7 +308,7 @@ const STR = {
   'p1.t':'第三方依赖','p1.d':'无包管理器、无构建链、无运行时下载',
   'p2.t':'出站请求','p2.d':'查你自己的额度 + 检查新版本（可关闭）',
   'p3.t':'本地数据','p3.d':'历史与设置仅存于 ~/Library/Application Support',
-  'inst.tag':'安装','inst.h2':'一条命令装好','inst.sub':'克隆即编译，swiftc 直出原生 App；也可以去 Releases 直接下 DMG。',
+  'inst.tag':'安装','inst.h2':'一条命令装好','inst.sub':'克隆即编译，swift build 直出原生 App；也可以去 Releases 直接下 DMG。',
   'inst.copy':'复制','inst.copied':'已复制 ✓','inst.copyFail':'复制失败','inst.note':'# 装到 /Applications 并启动，仅需 Xcode Command Line Tools',
   'foot.log':'更新日志','foot.issue':'反馈问题',
 },
@@ -321,7 +321,7 @@ const STR = {
   'badge.os':'<b>macOS 13+</b>','badge.dep':'<b>Zero deps</b> · no Electron',
   'badge.tele':'<b>Zero telemetry</b> · local-only','badge.lang':'<b>中 · EN · 日</b> trilingual',
   'feat.tag':'Features','feat.h2':'One panel, both agents covered',
-  'feat.sub':'Pure-stdlib Python daemon + single-file Swift shell + single-file HTML UI. No Node, no Electron, no bundler.',
+  'feat.sub':'Pure-stdlib Python daemon + native SwiftUI UI. No Node, no Electron, no bundler.',
   'f1.t':'Quota monitoring','f1.d':'Claude 5h/7d windows and Codex rate limits aggregated live, percentage in the menu bar, alerts before you hit the ceiling.',
   'f2.t':'Jump to session','f2.d':'Auto-detects the terminal hosting each session — iTerm, Warp, Ghostty, VS Code, anything — one click brings you back.',
   'f3.t':'Usage analytics','f3.d':'Tokens and dollar equivalents by model and project, 24-hour curve, daily digest, 7-day project leaderboard.',
@@ -332,7 +332,7 @@ const STR = {
   'p1.t':'third-party deps','p1.d':'No package manager, no build chain, no runtime downloads',
   'p2.t':'outbound requests','p2.d':'Your own quota check + update check (can be disabled)',
   'p3.t':'local data','p3.d':'History and settings live only in ~/Library/Application Support',
-  'inst.tag':'Install','inst.h2':'One command and done','inst.sub':'Clone and compile — swiftc produces a real native app. Or grab the DMG from Releases.',
+  'inst.tag':'Install','inst.h2':'One command and done','inst.sub':'Clone and compile — swift build produces a real native app. Or grab the DMG from Releases.',
   'inst.copy':'Copy','inst.copied':'Copied ✓','inst.copyFail':'Copy failed','inst.note':'# Installs to /Applications and launches. Just needs Xcode Command Line Tools.',
   'foot.log':'Changelog','foot.issue':'Issues',
 },
@@ -345,7 +345,7 @@ const STR = {
   'badge.os':'<b>macOS 13+</b>','badge.dep':'<b>依存ゼロ</b> · Electron 不使用',
   'badge.tele':'<b>テレメトリなし</b> · 完全ローカル','badge.lang':'<b>中 · EN · 日</b> 三言語',
   'feat.tag':'機能','feat.h2':'ひとつのパネルで両エージェントを',
-  'feat.sub':'標準ライブラリのみの Python daemon + 単一ファイル Swift シェル + 単一ファイル HTML UI。Node も Electron もバンドラーも不要。',
+  'feat.sub':'標準ライブラリのみの Python daemon + ネイティブ SwiftUI UI。Node も Electron もバンドラーも不要。',
   'f1.t':'クォータ監視','f1.d':'Claude の 5h/7d ウィンドウと Codex のレート制限をリアルタイム集約。メニューバーに常時表示、上限前に通知。',
   'f2.t':'セッションへ復帰','f2.d':'セッションのホスト端末を自動判別（iTerm・Warp・Ghostty・VS Code など何でも）。ワンクリックで現場へ。',
   'f3.t':'使用量分析','f3.d':'モデル / プロジェクト別のトークンと金額換算、24 時間カーブ、本日のサマリー、7 日間ランキング。',
@@ -356,7 +356,7 @@ const STR = {
   'p1.t':'サードパーティ依存','p1.d':'パッケージマネージャーもビルドチェーンも実行時ダウンロードもなし',
   'p2.t':'外部リクエスト','p2.d':'自分のクォータ照会 + 更新チェック（オフ可）',
   'p3.t':'ローカルデータ','p3.d':'履歴と設定は ~/Library/Application Support のみに保存',
-  'inst.tag':'インストール','inst.h2':'コマンド 1 行で完了','inst.sub':'クローンしてコンパイル、swiftc がネイティブアプリを直接生成。Releases から DMG も入手可。',
+  'inst.tag':'インストール','inst.h2':'コマンド 1 行で完了','inst.sub':'クローンしてコンパイル、swift build がネイティブアプリを直接生成。Releases から DMG も入手可。',
   'inst.copy':'コピー','inst.copied':'コピー済み ✓','inst.copyFail':'コピー失敗','inst.note':'# /Applications にインストールして起動。Xcode Command Line Tools のみ必要。',
   'foot.log':'更新履歴','foot.issue':'フィードバック',
 },
