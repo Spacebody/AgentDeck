@@ -865,7 +865,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             effect.addSubview(host.view, positioned: .below, relativeTo: nil)
         }
         loaded = true
-        Task { await store.refreshOnOpen() }   // 开面板即刻刷新；额度够旧才强刷（节流+失败降级）
+        Task { await store.refreshOnOpen() }   // 开面板即刻按缓存快刷，与菜单栏对齐；实时最新值由🔄(force)触发
 
         // 尺寸：恢复用户上次拖拽的大小，高度不超过屏幕可视范围
         let bFrame = bw.convertToScreen(button.convert(button.bounds, to: nil))
