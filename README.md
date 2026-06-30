@@ -27,11 +27,11 @@
 </p>
 <p align="center"><sub>左：概览 / 会话面板（三语轮播，默认跟随系统语言）· 右：设置</sub></p>
 
-AgentDeck 将 Claude Code 与 Codex 的额度监控、会话管理与用量统计集成在一个菜单栏面板中。后端为纯标准库 Python daemon，应用壳为单文件 Swift（`swiftc` 直接编译），界面为单文件 HTML——无包管理器、无构建链、无运行时下载。
+AgentDeck 将 Claude Code 与 Codex 的额度监控、会话管理与用量统计集成在一个菜单栏面板中。后端为纯标准库 Python daemon，macOS 客户端为 SwiftPM 工程中的原生 AppKit + SwiftUI 应用，仍保持零第三方运行时依赖、无 Node / Electron / 打包器、无运行时下载。
 
 ## 设计原则
 
-- **零第三方依赖** — 标准库 Python + 原生编译 Swift + WKWebView；不引入 Node、Electron 或任何打包器
+- **零第三方依赖** — 标准库 Python + SwiftPM 原生 AppKit / SwiftUI；不引入 Node、Electron 或任何打包器
 - **本地优先** — 数据全程本机处理，零遥测；仅有两条出站请求（额度查询、版本检查），语义透明、后者可关闭
 - **原生体验** — 连续曲率圆角、玻璃材质、桌面小组件，对齐系统组件的视觉标准
 - **多语言** — 简体中文 / English / 日本語三层（面板 / 通知 / 菜单）统一，默认跟随系统
@@ -75,7 +75,7 @@ git clone https://github.com/Spacebody/AgentDeck.git && cd AgentDeck
 
 编译、安装至 `/Applications` 并启动，首次启动注册登录项实现自启。
 
-**环境要求**：macOS 13+（产出 Apple Silicon + Intel 通用二进制）；已安装 [Claude Code](https://claude.com/claude-code) 或 [Codex](https://openai.com/codex)（任一）；Xcode Command Line Tools（提供 `swiftc`，可经 `xcode-select --install` 安装）。
+**环境要求**：macOS 13+（产出 Apple Silicon + Intel 通用二进制）；已安装 [Claude Code](https://claude.com/claude-code) 或 [Codex](https://openai.com/codex)（任一）；Xcode Command Line Tools（提供 SwiftPM / Swift toolchain，可经 `xcode-select --install` 安装）。
 
 其余构建目标：
 
@@ -87,11 +87,17 @@ git clone https://github.com/Spacebody/AgentDeck.git && cd AgentDeck
 
 首次使用「跳转会话」时，系统将请求**自动化（Apple Events）**权限用于聚焦终端窗口。
 
-## 可选配置：会话完成提醒
+## 会话完成提醒集成
 
-完成提醒依赖 Claude / Codex 的事件回调。AgentDeck 不修改任何外部配置文件，需手动接入（均为单行改动）：
+完成提醒依赖 Claude / Codex 的事件回调。当前版本在 daemon 启动时会**幂等自动接入**，并只合并 / 移除带 AgentDeck 标记的配置：
 
-**Claude Code** — 在 `~/.claude/settings.json` 的 `hooks.Stop` 中追加：
+- Claude Code：向 `~/.claude/settings.json` 的 `hooks.Stop` 合并一个指向 `~/Library/Application Support/AgentDeck/claude-stop-hook.sh` 的 Stop hook。
+- Codex：把 `~/.codex/config.toml` 的 `notify` 指向 `~/Library/Application Support/AgentDeck/codex-notify.sh`。如果原本已有 notify，会链式转发回原命令。
+- 集成状态记录在 `~/Library/Application Support/AgentDeck/integration.json`；`./build.sh uninstall` 会调用 daemon 的 `--remove-integration` 仅还原 AgentDeck 自己安装的条目。
+
+仓库内仍保留手动调试用脚本 `scripts/codex-notify.sh`，但正常安装使用 App Support 中自动生成的 wrapper。
+
+手动转发 Claude Stop 事件的最小命令形态如下：
 
 ```json
 {
@@ -104,26 +110,21 @@ git clone https://github.com/Spacebody/AgentDeck.git && cd AgentDeck
 }
 ```
 
-**Codex** — 在 `~/.codex/config.toml` 中将 `notify` 指向仓库内的包装脚本：
-
-```toml
-notify = ["/path/to/agentdeck/scripts/codex-notify.sh"]
-```
-
-若 `notify` 已被其他工具占用，可在脚本末尾以 `exec` 链式转发原命令（脚本内有说明）。
-
 ## 架构
 
 ```
-agentdeckd.py        后端 daemon：采集 / 解析 / 聚合 / HTTP API（纯标准库）
-app/main.swift       应用壳：菜单栏、面板、桌面小组件、完成提醒
-static/index.html    面板界面：单文件，无构建步骤
+Package.swift        SwiftPM 包定义：AgentDeck 可执行目标、AgentDeckKit 库、PreviewGen 预览工具
+Sources/AgentDeck/   AppKit 壳：菜单栏、NSPanel、桌面小组件、灵动岛、daemon 守护
+Sources/AgentDeckKit/SwiftUI UI、API 客户端、数据模型、三语 i18n、预览渲染
+Sources/PreviewGen/  无头渲染 UI 预览图，用于开发检查
+agentdeckd.py        后端 daemon：采集 / 解析 / 聚合 / HTTP API / hook 集成（纯标准库）
+static/index.html    旧 Web UI / 浏览器 fallback；daemon 仍在 / 和 /index.html 提供
 site/                官网与更新清单（Cloudflare Pages，零依赖静态页）
 build.sh             构建 / 安装 / DMG / 卸载
 scripts/             图标与 DMG 背景生成、Codex notify 包装、CSRF 回归测试
 ```
 
-应用壳启动时拉起 daemon（监听 `127.0.0.1:7777`）；面板与小组件为 WKWebView 加载同一份本地页面，经 HTTP API 取数。
+应用壳启动时拉起 daemon（监听 `127.0.0.1:7777`）；面板与小组件由 `NSHostingView` 承载 SwiftUI 根视图，经 HTTP API 取数。`static/index.html` 不再是主 App UI。
 
 ## 数据来源与隐私
 
@@ -135,7 +136,7 @@ scripts/             图标与 DMG 背景生成、Codex notify 包装、CSRF 回
 | 版本检查 | `agentdeck.yilin.dev/version.json`（静态清单，6 小时缓存） | 仅比对版本号，不携带凭据或本机信息；可在设置中关闭 |
 | Claude 用量 / 会话 | 解析已发现的各 Claude 配置目录下 `projects/**/*.jsonl` | token 统计、成本估算、会话列表 |
 | Codex 额度 / 用量 / 会话 | 解析本地 `~/.codex/sessions` rollout 文件 | 同上 |
-| 完成事件 | Claude Stop hook / Codex notify 回调（见可选配置） | 完成提醒与事件流 |
+| 完成事件 | AgentDeck 自动安装的 Claude Stop hook / Codex notify wrapper 回调（见会话完成提醒集成） | 完成提醒与事件流 |
 
 运行时产物：数据目录 `~/Library/Application Support/AgentDeck/`，日志 `~/Library/Logs/AgentDeck.log`。
 

@@ -26,6 +26,16 @@ let kDirectSession: URLSession = {
 // 默认高取概览页全显 + 设置页大半的折中值，展示时钳制到屏幕可视高度
 let kPanelW: CGFloat = 420, kPanelH: CGFloat = 780
 
+func quotaAlertColor(_ level: String) -> NSColor {
+    switch level {
+    case "crit":  return NSColor(calibratedRed: 1.00, green: 0.32, blue: 0.41, alpha: 1)
+    case "reset": return NSColor(calibratedRed: 0.45, green: 0.89, blue: 0.63, alpha: 1)
+    default:      return NSColor(calibratedRed: 1.00, green: 0.82, blue: 0.28, alpha: 1)
+    }
+}
+
+func quotaWarnColor() -> NSColor { quotaAlertColor("warn") }
+
 // ----------------------------------------------------------------- 多语言 i18n
 // 应用壳的菜单 / 灵动岛 / 通知文案。有效 locale 由 daemon 经 /api/events 下发，
 // 与面板、后端三层一致；首次轮询前回退到系统语言。
@@ -294,13 +304,34 @@ final class IslandController {
         display(queue.removeFirst())
     }
 
-    private func appIcon(for tool: String) -> NSImage {
-        // 大小写不敏感：告警事件的 tool 是 daemon 大写传的("Claude"/"Codex")，
-        // 会话完成是小写——统一 lowercased 比对，否则 Claude 告警弹丸会错用 Codex 图标
-        let path = tool.lowercased() == "claude" ? "/Applications/Claude.app" : "/Applications/Codex.app"
-        let img = NSWorkspace.shared.icon(forFile: path)
+    private func brandIcon(for tool: String) -> NSImage {
+        let key = tool.lowercased() == "claude" ? "claude" : "codex"
+        let bundleName = "AgentDeck_AgentDeckKit.bundle"
+        let bases = [Bundle.main.resourceURL,
+                     Bundle.main.bundleURL,
+                     Bundle.main.bundleURL.appendingPathComponent("Contents/Resources")]
+        for base in bases.compactMap({ $0 }) {
+            if let b = Bundle(url: base.appendingPathComponent(bundleName)),
+               let url = b.url(forResource: key, withExtension: "png", subdirectory: "Brand"),
+               let img = NSImage(contentsOf: url) {
+                img.isTemplate = true
+                img.size = NSSize(width: 26, height: 26)
+                return img
+            }
+        }
+        let conf = NSImage.SymbolConfiguration(pointSize: 20, weight: .semibold)
+        let img = NSImage(systemSymbolName: key == "claude" ? "sparkle" : "apple.terminal",
+                          accessibilityDescription: key)?
+            .withSymbolConfiguration(conf) ?? NSImage(size: NSSize(width: 26, height: 26))
+        img.isTemplate = true
         img.size = NSSize(width: 26, height: 26)
         return img
+    }
+
+    private func brandColor(for tool: String) -> NSColor {
+        tool.lowercased() == "claude"
+            ? NSColor(calibratedRed: 1.00, green: 0.62, blue: 0.48, alpha: 1)
+            : NSColor(calibratedRed: 0.55, green: 0.91, blue: 0.89, alpha: 1)
     }
 
     private func display(_ e: Event) {
@@ -315,9 +346,8 @@ final class IslandController {
             : "\(e.project.isEmpty ? (e.tool.lowercased() == "claude" ? "Claude" : "Codex") : e.project) · \(L("island.done"))"
         let head = NSTextField(labelWithString: headText)
         head.font = .systemFont(ofSize: 12.5, weight: .semibold)
-        head.textColor = isAlert ? (e.level == "crit" ? .systemRed
-                                    : e.level == "reset" ? .systemGreen : .systemOrange)
-                                 : .labelColor
+        let accent = quotaAlertColor(e.level)
+        head.textColor = isAlert ? accent : .labelColor
         let sub = NSTextField(labelWithString: isAlert ? e.title
                                                        : (e.title.isEmpty ? L("island.taskDone") : e.title))
         sub.font = .systemFont(ofSize: 10.5)
@@ -338,10 +368,15 @@ final class IslandController {
         effect.layer?.cornerCurve = .continuous
         effect.layer?.masksToBounds = true
         effect.layer?.borderWidth = 1
-        effect.layer?.borderColor = NSColor.white.withAlphaComponent(0.15).cgColor
+        effect.layer?.borderColor = (isAlert ? accent.withAlphaComponent(0.42)
+                                             : NSColor.white.withAlphaComponent(0.15)).cgColor
+        if isAlert {
+            effect.layer?.backgroundColor = accent.withAlphaComponent(0.08).cgColor
+        }
 
         let iconView = NSImageView(frame: NSRect(x: 14, y: (H - 26) / 2, width: 26, height: 26))
-        iconView.image = appIcon(for: e.tool)
+        iconView.image = brandIcon(for: e.tool)
+        iconView.contentTintColor = brandColor(for: e.tool)
         head.frame = NSRect(x: 50, y: H / 2 + 1, width: textW, height: 15)
         sub.frame = NSRect(x: 50, y: H / 2 - 15, width: textW, height: 13)
         effect.addSubview(iconView); effect.addSubview(head); effect.addSubview(sub)
@@ -1157,7 +1192,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let colorDim = mb?["color_dim"] as? String ?? "shortest"
             func alertFor(_ pct: Double) -> NSColor? {
                 !alertEnabled ? nil : pct >= 95 ? .systemRed
-                              : pct >= 80 ? .systemOrange : nil
+                              : pct >= 80 ? quotaWarnColor() : nil
             }
             // 抽象维度 → 各 agent 自己的窗口（对 Claude/Codex 都成立）
             //   shortest=首窗口(5h)  weekly=seven_day(缺则次窗口/末窗口)  max=所有窗口最大值

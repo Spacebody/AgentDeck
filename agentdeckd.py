@@ -1484,6 +1484,40 @@ _events = deque(maxlen=50)
 _events_lock = threading.Lock()
 _event_seq = 0
 EVENTS_FILE = DATA_DIR / "events.jsonl"
+_event_keys = deque()
+_event_key_set = set()
+_EVENT_DEDUPE_MAX = 200
+
+
+def _event_key(evt):
+    """同一次会话完成的稳定身份。
+
+    Claude Stop / Codex notify 在异常重试、旧 wrapper 链式转发或重复 hook 配置下，
+    可能把同一完成事件 POST 多次。ts/duration 每次都会变，不能参与去重。
+    """
+    if evt.get("kind") == "alert":
+        return None
+    tool = evt.get("tool") or ""
+    sid = evt.get("session") or ""
+    cwd = evt.get("cwd") or ""
+    title = evt.get("title") or ""
+    if sid:
+        return f"{tool}\0{sid}\0{cwd}\0{title}"
+    if cwd or title:
+        return f"{tool}\0{cwd}\0{title}"
+    return None
+
+
+def _remember_event_key(key):
+    if not key or key in _event_key_set:
+        return False
+    _event_key_set.add(key)
+    _event_keys.append(key)
+    while len(_event_keys) > _EVENT_DEDUPE_MAX:
+        old = _event_keys.popleft()
+        _event_key_set.discard(old)
+    return True
+    return True
 
 
 # ------------------------------------------------- 完成事件钩子：自动配置 / 干净移除
@@ -1623,6 +1657,7 @@ def _remove_claude_hook():
 _CODEX_CONFIG = Path.home() / ".codex" / "config.toml"
 _CODEX_WRAPPER = DATA_DIR / "codex-notify.sh"
 _CODEX_MARK = "codex-notify.sh"
+_CODEX_OUR_MARKS = (_CODEX_MARK, "127.0.0.1:7777/api/event")
 
 
 def _codex_read_notify(text):
@@ -1651,6 +1686,18 @@ def _codex_set_notify(text, arr):
             return re.sub(r'^[ \t]*notify[ \t]*=.*\n?', '', text, count=1, flags=re.M)
         return re.sub(r'^[ \t]*notify[ \t]*=.*$', line, text, count=1, flags=re.M)
     return (text.rstrip("\n") + "\n" + line + "\n") if line else text
+
+
+def _codex_notify_is_ours(arr):
+    """识别 AgentDeck 自己的 Codex notify（新版 App Support wrapper 或旧仓库脚本）。
+
+    旧版用户可能已手动把 notify 指到 scripts/codex-notify.sh。自动安装新版 wrapper
+    时若把旧脚本当成“原 notify”链式转发，会造成同一完成事件 POST 两次。
+    """
+    if not isinstance(arr, list):
+        return False
+    joined = " ".join(str(x) for x in arr)
+    return any(mark in joined for mark in _CODEX_OUR_MARKS)
 
 
 def _write_codex_wrapper(orig):
@@ -1699,14 +1746,31 @@ def _install_codex_notify():
         return False
     cur = _codex_read_notify(text)
     wrapper = str(_CODEX_WRAPPER)
-    if cur == [wrapper] and _CODEX_WRAPPER.exists():
-        return False   # 已是我们的，且 wrapper 在
     st = _integration_state()
-    # 仅首次备份原值（cur 已是我们的 wrapper 时不要把它当原值覆盖备份）
+    prev = st.get("codex_prev_notify")
+
+    # 如果历史状态里已经把旧 AgentDeck notify 备份成“原 notify”，先清掉；
+    # 否则新版 wrapper 会 POST 一次后再转发旧脚本，又 POST 一次。
+    changed_state = False
+    if _codex_notify_is_ours(prev):
+        st["codex_prev_notify"] = None
+        changed_state = True
+        prev = None
+    if changed_state:
+        _integration_state_save(st)
+
+    if cur == [wrapper] and _CODEX_WRAPPER.exists() and not _codex_notify_is_ours(prev):
+        return False   # 已是我们的，且 wrapper 在
+
+    # 仅首次备份真正的外部 notify；AgentDeck 旧脚本/旧 wrapper 不当作原工具转发
     if cur != [wrapper] and "codex_prev_notify" not in st:
-        st["codex_prev_notify"] = cur
+        st["codex_prev_notify"] = None if _codex_notify_is_ours(cur) else cur
         _integration_state_save(st)
     orig = st.get("codex_prev_notify")
+    if _codex_notify_is_ours(orig):
+        orig = None
+        st["codex_prev_notify"] = None
+        _integration_state_save(st)
     if not _write_codex_wrapper(orig):
         return False
     try:
@@ -1770,6 +1834,7 @@ def _events_load():
             _event_seq += 1
             e["id"] = _event_seq
             e["replayed"] = True   # 回灌仅供「最近完成」卡；不得再次触发灵动岛
+            _remember_event_key(_event_key(e))
             _events.append(e)
 
 
@@ -1875,6 +1940,8 @@ def api_event(body):
            "title": title or "", "project": project,
            "duration": round(duration or 0), "ts": time.time()}
     with _events_lock:
+        if not _remember_event_key(_event_key(evt)):
+            return {"ok": True, "skipped": "duplicate"}
         _event_seq += 1
         _events.append({"id": _event_seq, **evt})
     _events_persist(evt)

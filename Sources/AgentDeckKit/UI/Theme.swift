@@ -45,7 +45,7 @@ enum Theme {
 
     // 状态色（--ok / --warn / --danger）
     static let ok      = Color(hex: 0x7ee2a8)
-    static let warn    = Color(hex: 0xffc46b)
+    static let warn    = Color(hex: 0xffd166)
     static let danger  = Color(hex: 0xff7a8a)
 
     // 圆角（--r-lg / --r-md / --r-sm；同心圆角：卡片 24 − 内边距 12 = 12）
@@ -80,7 +80,7 @@ enum Brand: String, CaseIterable {
 // MARK: - 告警/危险渐变（对应 SVG grad-warn / grad-danger 与 .wbar i.warn/.danger）
 extension Theme {
     static let warnGradient = LinearGradient(
-        colors: [Color(hex: 0xffd28a), Color(hex: 0xe8a04f)], startPoint: .topLeading, endPoint: .bottomTrailing)
+        colors: [Color(hex: 0xffdf7e), Color(hex: 0xf2a900)], startPoint: .topLeading, endPoint: .bottomTrailing)
     static let dangerGradient = LinearGradient(
         colors: [Color(hex: 0xff9aa8), Color(hex: 0xe84f68)], startPoint: .topLeading, endPoint: .bottomTrailing)
 

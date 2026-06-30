@@ -27,11 +27,11 @@
 </p>
 <p align="center"><sub>Left: overview / sessions panel (trilingual rotation, follows the system language) · Right: settings</sub></p>
 
-AgentDeck integrates quota monitoring, session management, and usage analytics for Claude Code and Codex into a single menu-bar panel. The backend is a pure standard-library Python daemon, the app shell is a single Swift file compiled directly with `swiftc`, and the UI is a single HTML file — no package manager, no build chain, no runtime downloads.
+AgentDeck integrates quota monitoring, session management, and usage analytics for Claude Code and Codex into a single menu-bar panel. The backend is a pure standard-library Python daemon, and the macOS client is a native AppKit + SwiftUI app in a SwiftPM package. It still has zero third-party runtime dependencies: no Node, Electron, bundlers, or runtime downloads.
 
 ## Design principles
 
-- **Zero third-party dependencies** — stdlib Python + natively compiled Swift + WKWebView; no Node, Electron, or bundlers
+- **Zero third-party dependencies** — stdlib Python + native SwiftPM AppKit / SwiftUI; no Node, Electron, or bundlers
 - **Local-first** — all data is processed on your machine with zero telemetry; exactly two outbound requests (quota query, update check), both transparent in intent and the latter can be disabled
 - **Native experience** — continuous-curvature corners, glass materials, and a desktop widget held to system-widget visual standards
 - **Multilingual** — Simplified Chinese / English / Japanese unified across all three layers (panel / notifications / menus), following the system by default
@@ -75,7 +75,7 @@ git clone https://github.com/Spacebody/AgentDeck.git && cd AgentDeck
 
 Compiles, installs to `/Applications`, and launches; the first launch registers a login item.
 
-**Requirements**: macOS 13+ (produces an Apple Silicon + Intel universal binary); [Claude Code](https://claude.com/claude-code) or [Codex](https://openai.com/codex) installed (either); Xcode Command Line Tools (provides `swiftc`; install via `xcode-select --install`).
+**Requirements**: macOS 13+ (produces an Apple Silicon + Intel universal binary); [Claude Code](https://claude.com/claude-code) or [Codex](https://openai.com/codex) installed (either); Xcode Command Line Tools (provides SwiftPM / the Swift toolchain; install via `xcode-select --install`).
 
 Other build targets:
 
@@ -87,11 +87,17 @@ Other build targets:
 
 The first "jump to session" prompts for **Automation (Apple Events)** permission, which is used to focus terminal windows.
 
-## Optional: session-done alerts
+## Session-Done Alert Integration
 
-Done alerts rely on Claude / Codex event callbacks. AgentDeck never modifies external config files; wire it up manually (one line each):
+Done alerts rely on Claude / Codex event callbacks. The current daemon wires them up **automatically and idempotently** on startup, and only merges / removes entries marked as AgentDeck-owned:
 
-**Claude Code** — append to `hooks.Stop` in `~/.claude/settings.json`:
+- Claude Code: merges a Stop hook into `~/.claude/settings.json` that points to `~/Library/Application Support/AgentDeck/claude-stop-hook.sh`.
+- Codex: points `notify` in `~/.codex/config.toml` to `~/Library/Application Support/AgentDeck/codex-notify.sh`. If another notify command already exists, the generated wrapper chain-forwards back to it.
+- Integration state is stored in `~/Library/Application Support/AgentDeck/integration.json`; `./build.sh uninstall` calls the daemon's `--remove-integration` path to restore only AgentDeck-owned entries.
+
+The repository still includes `scripts/codex-notify.sh` for manual debugging, but normal app installs use the generated wrapper in Application Support.
+
+The minimal manual Claude Stop forwarding command looks like this:
 
 ```json
 {
@@ -104,26 +110,21 @@ Done alerts rely on Claude / Codex event callbacks. AgentDeck never modifies ext
 }
 ```
 
-**Codex** — point `notify` in `~/.codex/config.toml` to the wrapper script in this repo:
-
-```toml
-notify = ["/path/to/agentdeck/scripts/codex-notify.sh"]
-```
-
-If `notify` is already used by another tool, chain-forward the original command with `exec` at the end of the script (see the script's comments).
-
 ## Architecture
 
 ```
-agentdeckd.py        backend daemon: collection / parsing / aggregation / HTTP API (stdlib only)
-app/main.swift       app shell: menu bar, panel, desktop widget, done alerts
-static/index.html    panel UI: single file, no build step
+Package.swift        SwiftPM package: AgentDeck executable, AgentDeckKit library, PreviewGen renderer
+Sources/AgentDeck/   AppKit shell: menu bar, NSPanel, desktop widget, island alerts, daemon supervision
+Sources/AgentDeckKit/SwiftUI UI, API client, data models, trilingual i18n, preview rendering
+Sources/PreviewGen/  headless UI screenshot renderer for development checks
+agentdeckd.py        backend daemon: collection / parsing / aggregation / HTTP API / hook integration (stdlib only)
+static/index.html    legacy Web UI / browser fallback; still served by the daemon at / and /index.html
 site/                website and update manifest (Cloudflare Pages, dependency-free static page)
 build.sh             build / install / DMG / uninstall
 scripts/             icon & DMG-background generation, Codex notify wrapper, CSRF regression test
 ```
 
-The app shell starts the daemon on launch (listening on `127.0.0.1:7777`); the panel and widget are WKWebViews loading the same local page and reading data over the HTTP API.
+The app shell starts the daemon on launch (listening on `127.0.0.1:7777`); the panel and widget are SwiftUI roots hosted in `NSHostingView` and read data over the HTTP API. `static/index.html` is no longer the primary app UI.
 
 ## Data sources & privacy
 
@@ -135,7 +136,7 @@ All data is **processed locally** — no telemetry, no reporting:
 | Update check | `agentdeck.yilin.dev/version.json` (static manifest, 6-hour cache) | Version comparison only; carries no credentials or machine info; can be disabled in Settings |
 | Claude usage / sessions | parses `projects/**/*.jsonl` under each discovered Claude config directory | token stats, cost estimates, session list |
 | Codex quota / usage / sessions | parses local `~/.codex/sessions` rollout files | same as above |
-| Done events | Claude Stop hook / Codex notify callback (see optional config) | done alerts and the event stream |
+| Done events | AgentDeck-installed Claude Stop hook / Codex notify wrapper callbacks (see Session-Done Alert Integration) | done alerts and the event stream |
 
 Runtime artifacts: data directory `~/Library/Application Support/AgentDeck/`, log `~/Library/Logs/AgentDeck.log`.
 
