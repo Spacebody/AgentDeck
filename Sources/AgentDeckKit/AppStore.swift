@@ -10,6 +10,17 @@ struct UpdateInfo: Decodable {
     let notesUrl: String?
 }
 
+struct UpdateInstallStatus: Decodable {
+    let ok: Bool?
+    let running: Bool?
+    let id: String?
+    let stage: String?
+    let progress: Double?
+    let version: String?
+    let error: String?
+    let message: String?
+}
+
 @MainActor
 public final class AppStore: ObservableObject {
     // 仅初始化默认值，无需主线程隔离 → nonisolated，便于主壳在属性声明处直接构造。
@@ -25,6 +36,7 @@ public final class AppStore: ObservableObject {
     @Published var done: [DoneEvent] = []
     @Published var settings: [String: SettingValue] = [:]
     @Published var update: UpdateInfo?
+    @Published var updateInstall: UpdateInstallStatus?
     @Published var searchResults: [SessionItem]?   // 搜索态（nil=用周期列表）
     @Published var online = true                   // 后端健康（驱动顶栏 live 点）
 
@@ -207,5 +219,45 @@ public final class AppStore: ObservableObject {
 
     func checkUpdate() async {
         update = try? await api.get("/api/update", query: ["force": "1"])
+    }
+
+    func startUpdateInstall() async {
+        guard let up = update else { return }
+        let body: [String: Any] = [
+            "version": up.latest ?? "",
+        ]
+        do {
+            let raw = try await api.postJSON("/api/update/install", body: body)
+            updateInstall = Self.updateInstallStatus(raw)
+        } catch {
+            updateInstall = UpdateInstallStatus(ok: false, running: false, id: nil, stage: "error",
+                                                progress: 0, version: up.latest, error: "\(error)",
+                                                message: "error")
+            return
+        }
+        await pollUpdateInstall()
+    }
+
+    func pollUpdateInstall() async {
+        for _ in 0..<240 {
+            guard let raw = try? await api.getJSON("/api/update/install") else { return }
+            let st = Self.updateInstallStatus(raw)
+            updateInstall = st
+            if st.running != true { return }
+            if st.stage == "installing" { return }
+            try? await Task.sleep(nanoseconds: 500_000_000)
+        }
+    }
+
+    private static func updateInstallStatus(_ raw: [String: Any]) -> UpdateInstallStatus {
+        UpdateInstallStatus(
+            ok: raw["ok"] as? Bool,
+            running: raw["running"] as? Bool,
+            id: raw["id"] as? String,
+            stage: raw["stage"] as? String,
+            progress: (raw["progress"] as? NSNumber)?.doubleValue ?? raw["progress"] as? Double,
+            version: raw["version"] as? String,
+            error: raw["error"] as? String,
+            message: raw["message"] as? String)
     }
 }

@@ -12,6 +12,7 @@ API:
 import hashlib
 import json
 import os
+import plistlib
 import re
 import shlex
 import subprocess
@@ -20,6 +21,8 @@ import tempfile
 import threading
 import time
 import urllib.request
+import urllib.parse
+import uuid
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -533,6 +536,165 @@ def api_update(force=False):
             "url": str(m.get("url") or ""),
             "dmg": dmg,
             "notes_url": str(m.get("notes_url") or "")}
+
+
+_update_job = {}
+_update_job_lock = threading.Lock()
+
+
+def _set_update_job(**kw):
+    with _update_job_lock:
+        _update_job.update(kw)
+
+
+def _update_status():
+    with _update_job_lock:
+        return dict(_update_job) if _update_job else {"running": False}
+
+
+def _safe_update_url(url):
+    p = urllib.parse.urlparse(url)
+    if p.scheme != "https":
+        return False
+    host = (p.hostname or "").lower()
+    if host != "github.com":
+        return False
+    return re.fullmatch(r"/Spacebody/AgentDeck/releases/download/v[^/]+/AgentDeck-[^/]+[.]dmg", p.path) is not None
+
+
+def _codesign_team(app_path):
+    r = _run_checked(["codesign", "-dv", str(app_path)], timeout=30)
+    blob = (r.stderr or "") + (r.stdout or "")
+    m = re.search(r"^TeamIdentifier=(.+)$", blob, re.M)
+    return (m.group(1).strip() if m else "")
+
+
+def _run_checked(cmd, **kw):
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=kw.pop("timeout", 120), **kw)
+    if r.returncode != 0:
+        raise RuntimeError((r.stderr or r.stdout or "command failed").strip()[:500])
+    return r
+
+
+def _update_install_worker(job_id, dmg_url, version):
+    tmp = Path(tempfile.mkdtemp(prefix="agentdeck-update-"))
+    dmg_path = tmp / f"AgentDeck-{version or 'latest'}.dmg"
+    mount = tmp / "mnt"
+    stage = tmp / "stage"
+    mounted = False
+    try:
+        _set_update_job(stage="downloading", progress=0.02, message="downloading")
+        req = urllib.request.Request(dmg_url, headers={"User-Agent": f"agentdeck/{VERSION}"})
+        with urllib.request.urlopen(req, timeout=30) as resp, open(dmg_path, "wb") as f:
+            total = int(resp.headers.get("Content-Length") or 0)
+            got = 0
+            while True:
+                chunk = resp.read(1024 * 256)
+                if not chunk:
+                    break
+                f.write(chunk)
+                got += len(chunk)
+                if total:
+                    _set_update_job(progress=min(0.72, 0.02 + 0.70 * got / total))
+                else:
+                    _set_update_job(progress=min(0.70, (_update_status().get("progress") or 0.02) + 0.01))
+        if dmg_path.stat().st_size < 1024 * 1024:
+            raise RuntimeError("downloaded DMG is too small")
+
+        _set_update_job(stage="mounting", progress=0.76, message="mounting")
+        mount.mkdir()
+        _run_checked(["hdiutil", "attach", str(dmg_path), "-nobrowse", "-noautoopen",
+                      "-mountpoint", str(mount)], timeout=90)
+        mounted = True
+        app = mount / "AgentDeck.app"
+        if not app.is_dir():
+            matches = list(mount.glob("*.app"))
+            if not matches:
+                raise RuntimeError("AgentDeck.app not found in DMG")
+            app = matches[0]
+        try:
+            info = plistlib.loads((app / "Contents" / "Info.plist").read_bytes())
+        except Exception as exc:
+            raise RuntimeError(f"invalid app bundle: {exc}")
+        if info.get("CFBundleIdentifier") != "com.agentdeck.app":
+            raise RuntimeError("DMG does not contain AgentDeck")
+        team = _codesign_team(app)
+        if team != "2E56T94S33":
+            raise RuntimeError("AgentDeck signature team mismatch")
+
+        _set_update_job(stage="staging", progress=0.86, message="staging")
+        stage.mkdir()
+        _run_checked(["cp", "-R", str(app), str(stage / "AgentDeck.app")], timeout=120)
+
+        helper = tmp / "install-agentdeck.sh"
+        helper.write_text(f'''#!/bin/sh
+set -eu
+APP="/Applications/AgentDeck.app"
+NEW={shlex.quote(str(stage / "AgentDeck.app"))}
+MOUNT={shlex.quote(str(mount))}
+TMP={shlex.quote(str(tmp))}
+OLD="$TMP/AgentDeck.old.app"
+cleanup() {{
+  /usr/bin/hdiutil detach "$MOUNT" >/dev/null 2>&1 || true
+  /bin/rm -rf "$TMP"
+}}
+restore() {{
+  if [ -d "$OLD" ] && [ ! -d "$APP" ]; then /bin/mv "$OLD" "$APP"; fi
+  cleanup
+  [ -d "$APP" ] && /usr/bin/open "$APP" || true
+}}
+trap restore ERR INT TERM
+/usr/bin/osascript -e 'tell application "AgentDeck" to quit' >/dev/null 2>&1 || true
+sleep 1
+/usr/bin/pkill -f agentdeckd.py >/dev/null 2>&1 || true
+if [ -d "$APP" ]; then /bin/mv "$APP" "$OLD"; fi
+/bin/cp -R "$NEW" "$APP"
+/bin/rm -rf "$OLD"
+/usr/bin/xattr -dr com.apple.quarantine "$APP" >/dev/null 2>&1 || true
+trap - ERR INT TERM
+cleanup
+/usr/bin/open "$APP"
+''')
+        helper.chmod(0o755)
+        _set_update_job(stage="installing", progress=0.95, message="installing")
+        subprocess.Popen(["/bin/sh", str(helper)], stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+    except Exception as exc:
+        if mounted:
+            subprocess.run(["hdiutil", "detach", str(mount)], stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=20)
+        try:
+            import shutil
+            shutil.rmtree(tmp)
+        except OSError:
+            pass
+        _set_update_job(running=False, stage="error", progress=0.0,
+                        error=str(exc)[:500], message="error")
+
+
+def api_update_install(body):
+    with _update_job_lock:
+        if _update_job.get("running"):
+            return {"ok": True, **_update_job}
+    version = str(body.get("version") or "")
+    info = api_update(force=True)
+    latest = str(info.get("latest") or "")
+    if not version:
+        version = latest
+    if version != latest or not info.get("available"):
+        return {"ok": False, "error": "no matching update available"}
+    dmg = info.get("dmg") or ""
+    if not dmg or not _safe_update_url(dmg):
+        return {"ok": False, "error": "invalid update url"}
+    job_id = str(uuid.uuid4())
+    with _update_job_lock:
+        _update_job.clear()
+        _update_job.update({"ok": True, "running": True, "id": job_id,
+                            "stage": "queued", "progress": 0.0,
+                            "version": version, "error": ""})
+    threading.Thread(target=_update_install_worker,
+                     args=(job_id, dmg, version), daemon=True).start()
+    return _update_status()
 
 
 # ---------------------------------------------------------------- Claude 额度
@@ -2812,6 +2974,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, _settings_response())
             elif path == "/api/update":
                 self._send(200, api_update(force=query.get("force") == ["1"]))
+            elif path == "/api/update/install":
+                self._send(200, _update_status())
             elif path == "/api/terminals":
                 self._send(200, api_terminals())
             elif path == "/api/events":
@@ -2857,7 +3021,8 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?")[0]
         handlers = {"/api/resume": api_resume, "/api/pin": api_pin,
                     "/api/settings": api_settings_save, "/api/event": api_event,
-                    "/api/focus": api_focus, "/api/data": api_data}
+                    "/api/focus": api_focus, "/api/data": api_data,
+                    "/api/update/install": api_update_install}
         fn = handlers.get(path)
         if not fn:
             return self._send(404, {"error": "not found"})

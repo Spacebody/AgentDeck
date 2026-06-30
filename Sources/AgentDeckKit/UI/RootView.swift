@@ -234,18 +234,52 @@ public struct AgentDeckRootView: View {
 
     // MARK: 更新横幅
     private var updateBar: some View {
-        HStack(spacing: 10) {
-            Text("✨ " + L("update.available", ["v": "v\(store.update?.latest ?? "")"]))
-                .font(.system(size: 12)).foregroundStyle(Theme.ink)
+        let install = store.updateInstall
+        let installing = install?.running == true
+        let progress = min(max(install?.progress ?? 0, 0), 1)
+        let stageKey: String = {
+            switch install?.stage {
+            case "downloading": return "update.downloading"
+            case "mounting": return "update.preparing"
+            case "staging": return "update.preparing"
+            case "installing": return "update.installing"
+            default: return "update.installing"
+            }
+        }()
+        return HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 5) {
+                Text("✨ " + L("update.available", ["v": "v\(store.update?.latest ?? "")"]))
+                    .font(.system(size: 12)).foregroundStyle(Theme.ink)
+                if installing {
+                    HStack(spacing: 7) {
+                        GeometryReader { geo in
+                            ZStack(alignment: .leading) {
+                                Capsule().fill(Color.white.opacity(0.13))
+                                Capsule().fill(LinearGradient(colors: [Brand.codex.deep, Brand.codex.accent],
+                                                              startPoint: .leading, endPoint: .trailing))
+                                    .frame(width: geo.size.width * progress)
+                            }
+                        }
+                        .frame(width: 120, height: 4)
+                        Text("\(Int((progress * 100).rounded()))%")
+                            .font(.system(size: 9.5, weight: .semibold)).foregroundStyle(Theme.ink2)
+                            .monospacedDigit()
+                    }
+                } else if install?.stage == "error" {
+                    Text(L("update.installFail"))
+                        .font(.system(size: 10)).foregroundStyle(Color(hex: 0xff7a8a))
+                }
+            }
             Spacer(minLength: 6)
             Button {
-                onOpenExternal(store.update?.dmg ?? store.update?.url ?? "")
+                Task { await store.startUpdateInstall() }
             } label: {
-                Text(L("update.go")).font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.ink)
+                Text(installing ? L(stageKey) : L("update.go"))
+                    .font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.ink)
                     .padding(.horizontal, 12).padding(.vertical, 4)
                     .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.10)))
                     .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Theme.edge))
-            }.buttonStyle(.plain).hoverLift()
+            }.buttonStyle(.plain).hoverLift().disabled(installing)
             Button { updateDismissed = true } label: {
                 Image(systemName: "xmark").font(.system(size: 11)).foregroundStyle(Theme.ink3)
             }.buttonStyle(.plain)
