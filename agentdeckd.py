@@ -1817,9 +1817,13 @@ def _remove_claude_hook():
 
 # ---- Codex notify（单槽，可能被 Computer Use 等占用 → 链式转发，不破坏原工具）----
 _CODEX_CONFIG = Path.home() / ".codex" / "config.toml"
+_CODEX_HOOKS = Path.home() / ".codex" / "hooks.json"
 _CODEX_WRAPPER = DATA_DIR / "codex-notify.sh"
+_CODEX_LEGACY_STOP_WRAPPER = DATA_DIR / "codex-stop-hook.sh"
+_CODEX_LEGACY_REPO_STOP_WRAPPER = Path(__file__).resolve().parent / "scripts" / "codex-stop-hook.sh"
 _CODEX_MARK = "codex-notify.sh"
 _CODEX_OUR_MARKS = (_CODEX_MARK, "127.0.0.1:7777/api/event")
+_CODEX_LEGACY_STOP_MARK = str(_CODEX_LEGACY_STOP_WRAPPER)
 
 
 def _codex_read_notify(text):
@@ -1960,9 +1964,70 @@ def _remove_codex_notify():
         pass
 
 
+def _codex_legacy_stop_entry_is_ours(entry):
+    if not isinstance(entry, dict):
+        return False
+    cmd = entry.get("command") or ""
+    expanded = os.path.expandvars(os.path.expanduser(cmd))
+    marks = (
+        _CODEX_LEGACY_STOP_MARK,
+        shlex.quote(_CODEX_LEGACY_STOP_MARK),
+        str(_CODEX_LEGACY_REPO_STOP_WRAPPER),
+        shlex.quote(str(_CODEX_LEGACY_REPO_STOP_WRAPPER)),
+    )
+    return any(mark in expanded for mark in marks)
+
+
+def _remove_legacy_codex_stop_hook():
+    """清理旧版迁移留下的 Codex Stop hook。
+
+    Codex 完成事件的正式入口是 notify wrapper；Stop hook 输入和 Claude Stop 形似，
+    同时启用会让同一 Codex turn 先被误归属成 Claude，再由 notify 归属成 Codex。
+    """
+    try:
+        d = json.loads(_CODEX_HOOKS.read_text())
+    except (OSError, ValueError):
+        d = None
+    if isinstance(d, dict):
+        hooks = d.get("hooks") if isinstance(d.get("hooks"), dict) else None
+        stop = hooks.get("Stop") if isinstance(hooks, dict) else None
+        if isinstance(stop, list):
+            kept = []
+            changed = False
+            for grp in stop:
+                if not isinstance(grp, dict) or not isinstance(grp.get("hooks"), list):
+                    kept.append(grp)
+                    continue
+                entries = [h for h in grp["hooks"] if not _codex_legacy_stop_entry_is_ours(h)]
+                if len(entries) == len(grp["hooks"]):
+                    kept.append(grp)
+                    continue
+                changed = True
+                if entries:
+                    new_grp = dict(grp)
+                    new_grp["hooks"] = entries
+                    kept.append(new_grp)
+            if changed:
+                if kept:
+                    hooks["Stop"] = kept
+                else:
+                    hooks.pop("Stop", None)
+                    if not hooks:
+                        d.pop("hooks", None)
+                try:
+                    _CODEX_HOOKS.write_text(json.dumps(d, ensure_ascii=False, indent=2) + "\n")
+                except OSError:
+                    pass
+    try:
+        _CODEX_LEGACY_STOP_WRAPPER.unlink()
+    except OSError:
+        pass
+
+
 def install_integration():
     """启动时调用（幂等）：自动接好完成事件钩子（Claude Stop + Codex notify 链式转发）。
     每步各自重读 state 再加标记，避免覆盖 _install_codex_notify 写入的原值备份。"""
+    _remove_legacy_codex_stop_hook()
     if _install_claude_hook():
         st = _integration_state(); st["claude_hook"] = True; _integration_state_save(st)
     if _install_codex_notify():
@@ -1973,6 +2038,7 @@ def remove_integration():
     """卸载 / 关开关时调用：还原我们的所有改动。"""
     _remove_claude_hook()
     _remove_codex_notify()
+    _remove_legacy_codex_stop_hook()
     for f in (_HOOK_WRAPPER, INTEGRATION_FILE):
         try:
             f.unlink()
@@ -2012,16 +2078,33 @@ def _events_persist(evt):
         pass
 
 
-def _last_user_msg(transcript_path):
+def _last_user_msg(transcript_path, sid="", cwd=""):
     """返回 (时间戳, 文本)——最后一条真实用户消息，用于算任务时长和提醒文案。"""
+    want_cwd = None
+    if cwd:
+        try:
+            want_cwd = os.path.realpath(os.path.expanduser(cwd))
+        except (OSError, ValueError):
+            want_cwd = None
     try:
         for line in reversed(_tail_lines(Path(transcript_path), 2_000_000)):
             try:
                 evt = json.loads(line)
             except ValueError:
                 continue
+            if sid and evt.get("sessionId") != sid:
+                continue
             if evt.get("type") != "user" or evt.get("isSidechain"):
                 continue
+            got_cwd = evt.get("cwd")
+            if want_cwd:
+                if not got_cwd:
+                    continue
+                try:
+                    if os.path.realpath(os.path.expanduser(got_cwd)) != want_cwd:
+                        continue
+                except (OSError, ValueError):
+                    continue
             text = _msg_text((evt.get("message") or {}).get("content"))
             if not text or text.lstrip().startswith(_SKIP_PREFIXES):
                 continue
@@ -2034,6 +2117,51 @@ def _last_user_msg(transcript_path):
     except OSError:
         pass
     return None, ""
+
+
+def _claude_transcript_matches(tp, sid, cwd):
+    if not sid:
+        return False
+    try:
+        want_cwd = os.path.realpath(os.path.expanduser(cwd))
+    except (OSError, ValueError):
+        return False
+    try:
+        with open(tp, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                try:
+                    evt = json.loads(line)
+                except ValueError:
+                    continue
+                if evt.get("sessionId") != sid:
+                    continue
+                if evt.get("type") != "user" or evt.get("isSidechain"):
+                    continue
+                got_cwd = evt.get("cwd")
+                if not got_cwd:
+                    continue
+                try:
+                    if os.path.realpath(os.path.expanduser(got_cwd)) == want_cwd:
+                        return True
+                except (OSError, ValueError):
+                    continue
+    except OSError:
+        pass
+    return False
+
+
+def _valid_claude_transcript_path(raw_path, sid="", cwd=""):
+    """只接受真实 Claude transcript，避免 Codex Stop hook 形似输入串成 Claude 事件。"""
+    if not raw_path or not sid or not cwd:
+        return None
+    try:
+        tp = os.path.realpath(os.path.expanduser(raw_path))
+    except (OSError, ValueError):
+        return None
+    roots = [os.path.realpath(src["path"]) + os.sep for src in claude_sources()]
+    if any(tp.startswith(r) for r in roots) and os.path.isfile(tp) and Path(tp).stem == sid:
+        return tp if _claude_transcript_matches(tp, sid, cwd) else None
+    return None
 
 
 _TEMP_ROOTS = tuple(sorted({
@@ -2070,13 +2198,13 @@ def api_event(body):
         cwd = body.get("cwd") or ""
         project = Path(cwd).name if cwd else ""
         # 外部输入→文件读取的唯一路径：限定在已发现的 Claude 配置目录内，防任意文件读取
-        tp = os.path.realpath(os.path.expanduser(body.get("transcript_path") or ""))
-        _roots = [os.path.realpath(src["path"]) + os.sep for src in claude_sources()]
-        if any(tp.startswith(r) for r in _roots) and os.path.exists(tp):
-            t, text = _last_user_msg(tp)
-            title = _clean_title(text)[:60]
-            if t:
-                duration = time.time() - t
+        tp = _valid_claude_transcript_path(body.get("transcript_path") or "", sid, cwd)
+        if not tp:
+            return {"ok": True, "skipped": "invalid_claude_transcript"}
+        t, text = _last_user_msg(tp, sid, cwd)
+        title = _clean_title(text)[:60]
+        if t:
+            duration = time.time() - t
         if duration is not None and duration < s["notify_done_min_secs"]:
             return {"ok": True, "skipped": "short"}
     elif body.get("type") == "agent-turn-complete":
