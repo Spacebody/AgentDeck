@@ -1376,6 +1376,40 @@ def _pid_cwd(pid):
     return ""
 
 
+def _pid_codex_rollout_mtime(pid):
+    """Codex CLI 会长时间 resume 旧 rollout 文件；仅按文件名扫描最近 N 个会漏掉。
+    直接读取该 pid 当前打开的 rollout-*.jsonl，取最近写入时间作为工作状态信号。"""
+    try:
+        out = subprocess.run(["lsof", "-p", str(pid), "-Fn"],
+                             capture_output=True, text=True, timeout=8).stdout
+    except Exception:
+        return 0.0
+    try:
+        roots = [os.path.realpath(src["path"] / "sessions") + os.sep
+                 for src in codex_sources()]
+    except Exception:
+        roots = []
+    best = 0.0
+    for line in out.splitlines():
+        if not line.startswith("n"):
+            continue
+        raw = line[1:]
+        name = os.path.basename(raw)
+        if not (name.startswith("rollout-") and name.endswith(".jsonl")):
+            continue
+        try:
+            rp = os.path.realpath(raw)
+        except (OSError, ValueError):
+            continue
+        if roots and not any(rp.startswith(r) for r in roots):
+            continue
+        try:
+            best = max(best, os.path.getmtime(rp))
+        except OSError:
+            pass
+    return best
+
+
 def _iter_claude_pidfiles():
     """所有 Claude 源的 per-PID 索引文件（多账号合并）。"""
     for src in claude_sources():
@@ -1483,6 +1517,11 @@ def api_active():
                     except OSError:
                         pass
             for e in codex_entries:
+                mt = _pid_codex_rollout_mtime(e["pid"])
+                if mt:
+                    e["status"] = "busy" if now - mt < 30 else ""
+                    if e["status"]:
+                        continue
                 # Codex 桌面端 rollout cwd 可能是进程 cwd 的子目录，前缀匹配
                 cands = [mt for c, mt in cwd_mtime.items()
                          if c == e["cwd"] or c.startswith(e["cwd"] + "/")
@@ -1556,7 +1595,7 @@ def api_active():
 
         active.sort(key=lambda a: (a["tool"], a["pid"]))
         return {"active": active, "ts": time.time()}
-    return cached("active", 10, build)
+    return cached("active", 3, build)
 
 
 _rollout_meta_cache = {}
