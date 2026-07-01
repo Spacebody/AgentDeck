@@ -10,6 +10,7 @@
 
 ## 历史
 
+- **2.1.2** 修 Codex CLI 会话工作状态延迟与误判：长时间 `codex resume` 会继续写入文件名较旧的 rollout，旧逻辑只扫按文件名最新的少量 rollout，导致仍在输出的会话可能被判成「空闲」。现对每个正在运行的 Codex CLI 进程读取其当前打开的 `rollout-*.jsonl` 的真实写入时间，并限定在 Codex sessions 目录下只取 mtime，不读内容；仍在写入的旧 rollout 可即时判为「工作中」。同时 `/api/active` 缓存从 10 秒降到 3 秒，保留 30 秒 busy/idle 写入阈值，降低面板状态刷新延迟并避免短暂停顿时闪烁。
 - **2.1.1** 修会话完成弹丸归属重复：Codex 会话结束时不再被旧 Stop hook 误识别成 Claude 完成通知，从而避免同一会话先弹 Claude、再弹 Codex 的双通知。daemon 现在只接受带可信 Claude transcript 的 Claude Stop 事件，并校验 transcript 路径位于 Claude 数据源下、文件名匹配 session id、内容包含同 session/cwd 的用户消息；Codex 继续走 notify 事件源。另补充清理历史 AgentDeck Codex Stop wrapper 的多种旧路径写法，并保留用户自定义 hook。
 - **2.1.0** 新版更新横幅升级为本地自动下载安装：点击「下载并安装」后 daemon 直接从受控 GitHub Release DMG 下载到临时目录，面板显示下载/准备/安装进度条；下载包挂载后校验 bundle id 与 Developer ID Team ID，安装前备份旧版 App，失败自动恢复旧版并清理临时 DMG/挂载/staging，成功替换 `/Applications/AgentDeck.app` 后自动重启并移除安装包。并包含 2.0.3 后的完成弹丸去重加固、Codex notify 旧脚本迁移去重、额度告警 warn/crit/reset 配色与品牌图标修正，以及公开文档同步至 SwiftPM + AppKit/SwiftUI 架构。
 - **2.0.3** 修面板额度与菜单栏「节奏不一致」+ 手动刷新失灵——根因同一处，皆来自 2.0.2 的「开面板智能强刷」。菜单栏图标(main.swift)与面板读的是 daemon **同一份额度缓存**（key=`claude_quota`/`codex_quota`，TTL=`quota_interval`），理应永远一致。但开面板强刷(force)会去打 Anthropic，引出两个副作用：① **开面板看着「还没更新」**——强刷是数秒级出站，期间面板仍显示上一轮旧值、要等返回才跳；且强刷拿到的实时值常高于菜单栏的缓存值，两者数字对不上（即「没保持一致节奏」）。② **手动 🔄 点了没反应**——开面板的自动强刷吃掉了 daemon 的 **10s 防连点闸**，紧接着用户点 🔄 的那次 force 被去重、只回读缓存 → 看似「刷新无效」。现**开面板只做本地缓存快刷**（<50ms，与菜单栏即时对齐、不再出站闪旧值），**实时最新值由 🔄 显式触发**（force 成为唯一强刷入口，不再被自动强刷抢占 → 必定真重拉并在转圈停下时刷新到位）。
