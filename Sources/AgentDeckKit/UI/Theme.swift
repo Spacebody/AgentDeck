@@ -184,7 +184,7 @@ struct AuroraBackground: View {
     @State private var drift = false
 
     private struct Blob: Identifiable {
-        let id = UUID()
+        let id: Int
         let color: Color
         let size: CGFloat        // 占较短边比例
         let x: CGFloat; let y: CGFloat   // 锚点（0~1）
@@ -193,18 +193,18 @@ struct AuroraBackground: View {
     }
 
     // b1 红 / b2 蓝 / b3 棕 / b4 绿，与 CSS 的 4 团对应（位置/尺寸近似）
-    private let blobs: [Blob] = [
-        .init(color: Color(hex: 0xb03a5b), size: 0.56, x: -0.08, y: -0.12, dx: 0.09, dy: 0.07, period: 26),
-        .init(color: Color(hex: 0x2d3a8c), size: 0.48, x: 0.90, y: 0.16, dx: -0.07, dy: 0.09, period: 32),
-        .init(color: Color(hex: 0x8c5a2d), size: 0.44, x: 0.12, y: 1.10, dx: 0.06, dy: -0.08, period: 38),
-        .init(color: Color(hex: 0x1f6e63), size: 0.30, x: 0.82, y: 0.96, dx: 0.07, dy: 0.05, period: 44),
+    private static let blobs: [Blob] = [
+        .init(id: 0, color: Color(hex: 0xb03a5b), size: 0.56, x: -0.08, y: -0.12, dx: 0.09, dy: 0.07, period: 26),
+        .init(id: 1, color: Color(hex: 0x2d3a8c), size: 0.48, x: 0.90, y: 0.16, dx: -0.07, dy: 0.09, period: 32),
+        .init(id: 2, color: Color(hex: 0x8c5a2d), size: 0.44, x: 0.12, y: 1.10, dx: 0.06, dy: -0.08, period: 38),
+        .init(id: 3, color: Color(hex: 0x1f6e63), size: 0.30, x: 0.82, y: 0.96, dx: 0.07, dy: 0.05, period: 44),
     ]
 
     var body: some View {
         GeometryReader { geo in
             let minSide = min(geo.size.width, geo.size.height)
             ZStack {
-                ForEach(blobs) { b in
+                ForEach(Self.blobs) { b in
                     let d = max(geo.size.width, geo.size.height) * b.size
                     Circle()
                         // v1 每团 opacity .72（容器再 .18），核心实色到 ~55% 再淡出（透明 65%）。

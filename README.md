@@ -92,7 +92,7 @@ git clone https://github.com/Spacebody/AgentDeck.git && cd AgentDeck
 完成提醒依赖 Claude / Codex 的事件回调。当前版本在 daemon 启动时会**幂等自动接入**，并只合并 / 移除带 AgentDeck 标记的配置：
 
 - Claude Code：向 `~/.claude/settings.json` 的 `hooks.Stop` 合并一个指向 `~/Library/Application Support/AgentDeck/claude-stop-hook.sh` 的 Stop hook。
-- Codex：把 `~/.codex/config.toml` 的 `notify` 指向 `~/Library/Application Support/AgentDeck/codex-notify.sh`。如果原本已有 notify，会链式转发回原命令。
+- Codex：默认由 `~/Library/Application Support/AgentDeck/codex-notify.sh` 占用根 `notify` 并顺序转发原命令；若 Computer Use 等外部工具已持有根槽并通过 `--previous-notify` 链入 AgentDeck，则保留外部 owner，AgentDeck 不再反向转发，避免形成通知环。
 - 集成状态记录在 `~/Library/Application Support/AgentDeck/integration.json`；`./build.sh uninstall` 会调用 daemon 的 `--remove-integration` 仅还原 AgentDeck 自己安装的条目。
 
 仓库内仍保留手动调试用脚本 `scripts/codex-notify.sh`，但正常安装使用 App Support 中自动生成的 wrapper。
@@ -138,21 +138,22 @@ scripts/             图标与 DMG 背景生成、Codex notify 包装、CSRF 回
 | Codex 额度 / 用量 / 会话 | 解析本地 `~/.codex/sessions` rollout 文件 | 同上 |
 | 完成事件 | AgentDeck 自动安装的 Claude Stop hook / Codex notify wrapper 回调（见会话完成提醒集成） | 完成提醒与事件流 |
 
-运行时产物：数据目录 `~/Library/Application Support/AgentDeck/`，日志 `~/Library/Logs/AgentDeck.log`。
+运行时产物：数据目录 `~/Library/Application Support/AgentDeck/`，日志 `~/Library/Logs/AgentDeck.log`。其中 `claude_usage_cache.json` 与 `codex_usage_cache.json` 是按文件 inode/大小校验的可重建增量缓存，删除后只会触发下一次全量统计。
 
 ## 安全设计
 
 - daemon 仅绑定回环地址 `127.0.0.1`，不对局域网暴露
-- 全部 POST 接口设有 CSRF 屏障：Content-Type 精确匹配、Origin 结构化校验、Host 白名单（防 DNS rebinding）；附回归测试 `scripts/test-csrf.sh`
+- 全部 `/api/*` GET 及 POST 接口校验本机 Host；POST 额外要求 Content-Type 精确匹配及 Origin 结构化同源校验，封锁 DNS rebinding / 浏览器 CSRF；附回归测试 `scripts/test-csrf.sh`
 - 「按请求参数读取文件」的路径统一收口至已发现的 Claude 配置目录内（realpath 校验）
-- 账号诊断接口 `/api/diag` 含凭据指纹与本机路径，单独加 Host 校验封 DNS rebinding；输出全程脱敏（token 仅留末 4 位）
+- 账号诊断接口 `/api/diag` 输出全程脱敏（token 仅留末 4 位）
+- 自动更新仅接受固定 GitHub Release 路径，安装前核对 bundle ID、清单版本、完整代码签名、Team ID 与 Gatekeeper assessment；复制或复验失败会原子恢复旧 App
 - 健康检查带身份校验，避免端口被其他进程占用时误判
 
 ## 统计口径
 
 - **Claude**：usage 记录按 `(message.id, requestId)` 去重；cache 写入按 ephemeral 5m / 1h 两档分别计价；单价表按模型版本前缀匹配
-- **Codex**：采用 `total_token_usage.total_tokens`（cached 为 input 子集、reasoning 为 output 子集，避免重复累加）；订阅制下提供 API 等值参考
-- 与 [ccusage](https://github.com/ryoppippi/ccusage) 交叉校准，偏差约 ±4%（差额来自 cache 分档精度）
+- **Codex**：按每条 `total_token_usage` 累计快照的正增量归入事件发生小时；跳过会完整重放父历史的 subagent rollout，只统计顶层累计流，cached input 不重复计入 input
+- 金额为静态模型单价表换算的 API 等值估算，不代表订阅实际账单；未知 Codex 模型按当前默认档估算
 - 面板内各 ⓘ 入口提供对应视图的逐项口径说明
 
 ## 致谢

@@ -66,7 +66,7 @@ let kStrings: [String: [String: String]] = [
         "alert.warn": "残量警告", "alert.crit": "残量重大", "alert.reset": "残量回復",
     ],
 ]
-func L(_ key: String) -> String {
+@MainActor func L(_ key: String) -> String {
     return kStrings[appLocale]?[key] ?? kStrings["en"]?[key] ?? key
 }
 
@@ -281,6 +281,7 @@ final class HostController: NSViewController {
 }
 
 // MARK: - 灵动岛式完成提醒
+@MainActor
 final class IslandController {
     static let shared = IslandController()
     typealias Event = (tool: String, title: String, project: String,
@@ -439,13 +440,16 @@ final class IslandController {
             p.animator().setFrame(f, display: true)
             p.animator().alphaValue = 0
         }, completionHandler: { [weak self] in
-            p.orderOut(nil)
-            self?.showing = false
-            self?.maybeShow()
+            Task { @MainActor in
+                p.orderOut(nil)
+                self?.showing = false
+                self?.maybeShow()
+            }
         })
     }
 }
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// 界面缩放系数（随「字体大小」设置）。UserDefaults 持久化保证启动即生效；
     /// 窗口尺寸的存取均以「未缩放基准值」为准（存÷取×），避免缩放系数复利叠加。
@@ -541,6 +545,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var eventTimer: Timer?
     var lastEventId = 0
     var eventsPrimed = false
+    var eventBootId: String?
+    var retiredEventBootIds = Set<String>()
     var loaded = false
     // 菜单栏明暗变化 → 重绘混色图标，改用系统主题分布式通知（见 didFinishLaunching），不再 KVO 自激
 
@@ -612,7 +618,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // 改听系统主题切换分布式通知：只在用户真正切浅/深色时发，绝不被自身绘制触发。
             DistributedNotificationCenter.default().addObserver(
                 forName: Notification.Name("AppleInterfaceThemeChangedNotification"),
-                object: nil, queue: .main) { [weak self] _ in self?.updateIconState() }
+                object: nil, queue: .main) { [weak self] _ in
+                    Task { @MainActor in self?.updateIconState() }
+                }
         }
 
         // 设置变更 → 即时重绘菜单栏（语言/常显用量/告警阈值等，等价 v1 "sync" 桥消息）
@@ -634,7 +642,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         // 省电：菜单栏图标刷新 15→20s + 大 tolerance，让系统合并唤醒（避免进「能耗显著」列表）。
         pollTimer = Timer.scheduledTimer(withTimeInterval: 20, repeats: true) { [weak self] _ in
-            self?.updateIconState()
+            Task { @MainActor in self?.updateIconState() }
         }
         pollTimer?.tolerance = 8
         DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
@@ -647,7 +655,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         // 省电：完成事件轮询 2.5→5s + tolerance，唤醒减半且可被系统合并（完成提醒晚几秒可接受）。
         eventTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
-            self?.pollEvents()
+            Task { @MainActor in self?.pollEvents() }
         }
         eventTimer?.tolerance = 1.5
     }
@@ -678,6 +686,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let events = json["events"] as? [[String: Any]] else { return }
             DispatchQueue.main.async {
+                if let boot = json["boot_id"] as? String {
+                    if self.retiredEventBootIds.contains(boot) { return }
+                    if let previous = self.eventBootId, previous != boot {
+                        self.retiredEventBootIds.insert(previous)
+                        self.eventBootId = boot
+                        self.lastEventId = 0
+                        // daemon 已过滤 replayed 事件；重新从 0 拉取时只会得到本次启动后
+                        // 真正发生的完成事件，因此可直接推送而无需再次静默 prime。
+                        self.eventsPrimed = true
+                        self.pollEvents()
+                        return
+                    }
+                    self.eventBootId = boot
+                }
                 if let secs = json["island_secs"] as? Double {
                     IslandController.shared.dwellSecs = secs
                 } else if let secs = json["island_secs"] as? Int {
@@ -1098,7 +1120,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         backend?.terminate()
         backend = nil
         killStaleBackend()
-        DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             self?.spawnBackend()
         }
     }
@@ -1138,7 +1160,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func waitHealthy(retries: Int, then done: @escaping () -> Void) {
         healthCheck { [weak self] alive, _ in
             if alive || retries <= 0 { done(); return }
-            DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 self?.waitHealthy(retries: retries - 1, then: done)
             }
         }
@@ -1152,7 +1174,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let obj = data.flatMap {
                 try? JSONSerialization.jsonObject(with: $0) as? [String: Any]
             }
-            cb(obj?["ok"] as? Bool ?? false, obj?["version"] as? String)
+            DispatchQueue.main.async {
+                cb(obj?["ok"] as? Bool ?? false, obj?["version"] as? String)
+            }
         }.resume()
     }
 
@@ -1251,7 +1275,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 rotateTimer?.invalidate()
                 rotateTimer = Timer.scheduledTimer(withTimeInterval: Double(rotateSecs),
                                                    repeats: true) { [weak self] _ in
-                    self?.advanceRotation()
+                    Task { @MainActor in self?.advanceRotation() }
                 }
             }
             if rotateIdx >= mbFull.count { rotateIdx = 0 }
@@ -1276,8 +1300,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 }
 
-let app = NSApplication.shared
-let delegate = AppDelegate()
-app.delegate = delegate
-app.setActivationPolicy(.accessory)   // 菜单栏常驻，不出现在 Dock
-app.run()
+MainActor.assumeIsolated {
+    let app = NSApplication.shared
+    let delegate = AppDelegate()
+    app.delegate = delegate
+    app.setActivationPolicy(.accessory)   // 菜单栏常驻，不出现在 Dock
+    app.run()
+}

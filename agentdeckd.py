@@ -42,6 +42,8 @@ if not DATA_DIR.exists() and _LEGACY_DATA.is_dir():
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 HISTORY_FILE = DATA_DIR / "quota_history.jsonl"
 PINS_FILE = DATA_DIR / "pins.json"
+CODEX_USAGE_CACHE_FILE = DATA_DIR / "codex_usage_cache.json"
+CLAUDE_USAGE_CACHE_FILE = DATA_DIR / "claude_usage_cache.json"
 PORT = 7777
 try:
     VERSION = (Path(__file__).resolve().parent / "VERSION").read_text().strip()
@@ -60,6 +62,8 @@ UPDATE_MANIFEST_URL = "https://agentdeck.yilin.dev/version.json"
 # GitHub Releases 基址：清单未显式给 dmg 直链时，按固定命名（tag=v{ver}、资产=AgentDeck-{ver}.dmg，
 # 由 build.sh 强制）从版本号推导最新 DMG 直链，发版无需额外维护字段。
 GITHUB_RELEASES = "https://github.com/Spacebody/AgentDeck/releases"
+_UPDATE_VERSION_RE = r"[0-9]+[.][0-9]+[.][0-9]+(?:[-+][A-Za-z0-9.-]+)?"
+_MAX_UPDATE_DMG_BYTES = 1_500_000_000
 
 # 模型单价 (USD / MTok): (input, output, cache_read, cache_write)
 MODEL_PRICES = {   # $/Mtok: input, output, cache_read, cache_write_5m, cache_write_1h
@@ -77,6 +81,31 @@ CODEX_PRICES = {   # $/Mtok: input, output, cached_input（缓存读 -90%）
     "gpt-5.5": (5.0, 30.0, 0.50),
     "gpt-5": (1.25, 10.0, 0.125),
 }
+
+
+def _atomic_write_text(path, text, mode=None):
+    """Write text without exposing a truncated destination to concurrent readers."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if mode is None:
+        try:
+            mode = path.stat().st_mode & 0o777
+        except OSError:
+            mode = 0o600
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp_name, mode)
+        os.replace(tmp_name, path)
+    except Exception:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
 
 def _codex_price(model):
@@ -213,8 +242,26 @@ def api_settings_save(body):
         except (OSError, ValueError):
             cur = {}
         cur.update(clean)
-        SETTINGS_FILE.parent.mkdir(exist_ok=True)
-        SETTINGS_FILE.write_text(json.dumps(cur, ensure_ascii=False, indent=1))
+        # 即使旧文件被手工写入越界值，也先恢复各自范围，再保持严格有序；
+        # 否则 warn=100/crit=100 这类损坏状态无法靠 min/max 分支自愈。
+        try:
+            warn = int(cur.get("notify_warn", DEFAULT_SETTINGS["notify_warn"]))
+        except (TypeError, ValueError):
+            warn = DEFAULT_SETTINGS["notify_warn"]
+        try:
+            crit = int(cur.get("notify_crit", DEFAULT_SETTINGS["notify_crit"]))
+        except (TypeError, ValueError):
+            crit = DEFAULT_SETTINGS["notify_crit"]
+        warn = max(50, min(99, warn))
+        crit = max(60, min(100, crit))
+        if warn >= crit:
+            if "notify_crit" in clean and "notify_warn" not in clean:
+                warn = max(50, crit - 1)
+            else:
+                crit = min(100, warn + 1)
+        cur["notify_warn"], cur["notify_crit"] = warn, crit
+        _atomic_write_text(SETTINGS_FILE,
+                           json.dumps(cur, ensure_ascii=False, indent=1))
         _settings_cache = None   # 失效设置缓存，下次 get_settings 重读
     with _cache_lock:
         _ttl_cache.pop("sessions", None)   # 数量类设置立即生效
@@ -234,7 +281,6 @@ def api_settings_save(body):
 
 _cache_lock = threading.Lock()
 _ttl_cache = {}        # key -> (expire_ts, value)，接口级 TTL 缓存
-_file_agg_cache = {}   # path -> (mtime, size, parsed)，文件级解析缓存
 _compute_locks = {}    # key -> Lock，防缓存击穿：同 key 到期时只放一个线程算 fn
 
 
@@ -559,7 +605,10 @@ def _safe_update_url(url):
     host = (p.hostname or "").lower()
     if host != "github.com":
         return False
-    return re.fullmatch(r"/Spacebody/AgentDeck/releases/download/v[^/]+/AgentDeck-[^/]+[.]dmg", p.path) is not None
+    m = re.fullmatch(
+        rf"/Spacebody/AgentDeck/releases/download/v({_UPDATE_VERSION_RE})/"
+        rf"AgentDeck-({_UPDATE_VERSION_RE})[.]dmg", p.path)
+    return bool(m and m.group(1) == m.group(2))
 
 
 def _codesign_team(app_path):
@@ -567,6 +616,25 @@ def _codesign_team(app_path):
     blob = (r.stderr or "") + (r.stdout or "")
     m = re.search(r"^TeamIdentifier=(.+)$", blob, re.M)
     return (m.group(1).strip() if m else "")
+
+
+def _verify_update_app(app_path, version):
+    """Verify bundle identity, version and the complete sealed code signature."""
+    try:
+        info = plistlib.loads((Path(app_path) / "Contents" / "Info.plist").read_bytes())
+    except Exception as exc:
+        raise RuntimeError(f"invalid app bundle: {exc}")
+    if info.get("CFBundleIdentifier") != "com.agentdeck.app":
+        raise RuntimeError("DMG does not contain AgentDeck")
+    short_version = str(info.get("CFBundleShortVersionString") or "")
+    bundle_version = str(info.get("CFBundleVersion") or "")
+    if short_version != version or bundle_version != version:
+        raise RuntimeError("AgentDeck version does not match update manifest")
+    _run_checked(["codesign", "--verify", "--deep", "--strict", str(app_path)], timeout=60)
+    _run_checked(["spctl", "--assess", "--type", "execute", "--verbose=2",
+                  str(app_path)], timeout=60)
+    if _codesign_team(app_path) != "2E56T94S33":
+        raise RuntimeError("AgentDeck signature team mismatch")
 
 
 def _run_checked(cmd, **kw):
@@ -587,6 +655,8 @@ def _update_install_worker(job_id, dmg_url, version):
         req = urllib.request.Request(dmg_url, headers={"User-Agent": f"agentdeck/{VERSION}"})
         with urllib.request.urlopen(req, timeout=30) as resp, open(dmg_path, "wb") as f:
             total = int(resp.headers.get("Content-Length") or 0)
+            if total > _MAX_UPDATE_DMG_BYTES:
+                raise RuntimeError("update DMG is too large")
             got = 0
             while True:
                 chunk = resp.read(1024 * 256)
@@ -594,6 +664,8 @@ def _update_install_worker(job_id, dmg_url, version):
                     break
                 f.write(chunk)
                 got += len(chunk)
+                if got > _MAX_UPDATE_DMG_BYTES:
+                    raise RuntimeError("update DMG is too large")
                 if total:
                     _set_update_job(progress=min(0.72, 0.02 + 0.70 * got / total))
                 else:
@@ -612,50 +684,47 @@ def _update_install_worker(job_id, dmg_url, version):
             if not matches:
                 raise RuntimeError("AgentDeck.app not found in DMG")
             app = matches[0]
-        try:
-            info = plistlib.loads((app / "Contents" / "Info.plist").read_bytes())
-        except Exception as exc:
-            raise RuntimeError(f"invalid app bundle: {exc}")
-        if info.get("CFBundleIdentifier") != "com.agentdeck.app":
-            raise RuntimeError("DMG does not contain AgentDeck")
-        team = _codesign_team(app)
-        if team != "2E56T94S33":
-            raise RuntimeError("AgentDeck signature team mismatch")
+        _verify_update_app(app, version)
 
         _set_update_job(stage="staging", progress=0.86, message="staging")
         stage.mkdir()
         _run_checked(["cp", "-R", str(app), str(stage / "AgentDeck.app")], timeout=120)
 
         helper = tmp / "install-agentdeck.sh"
-        helper.write_text(f'''#!/bin/sh
+        _atomic_write_text(helper, f'''#!/bin/sh
 set -eu
 APP="/Applications/AgentDeck.app"
 NEW={shlex.quote(str(stage / "AgentDeck.app"))}
 MOUNT={shlex.quote(str(mount))}
 TMP={shlex.quote(str(tmp))}
+DAEMON_PID={os.getpid()}
 OLD="$TMP/AgentDeck.old.app"
 cleanup() {{
   /usr/bin/hdiutil detach "$MOUNT" >/dev/null 2>&1 || true
   /bin/rm -rf "$TMP"
 }}
 restore() {{
-  if [ -d "$OLD" ] && [ ! -d "$APP" ]; then /bin/mv "$OLD" "$APP"; fi
+  if [ -d "$OLD" ]; then
+    /bin/rm -rf "$APP"
+    /bin/mv "$OLD" "$APP"
+  fi
   cleanup
   [ -d "$APP" ] && /usr/bin/open "$APP" || true
 }}
 trap restore ERR INT TERM
 /usr/bin/osascript -e 'tell application "AgentDeck" to quit' >/dev/null 2>&1 || true
 sleep 1
-/usr/bin/pkill -f agentdeckd.py >/dev/null 2>&1 || true
+/bin/kill "$DAEMON_PID" >/dev/null 2>&1 || true
 if [ -d "$APP" ]; then /bin/mv "$APP" "$OLD"; fi
 /bin/cp -R "$NEW" "$APP"
+/usr/bin/codesign --verify --deep --strict "$APP"
+/usr/sbin/spctl --assess --type execute "$APP"
 /bin/rm -rf "$OLD"
 /usr/bin/xattr -dr com.apple.quarantine "$APP" >/dev/null 2>&1 || true
 trap - ERR INT TERM
 cleanup
 /usr/bin/open "$APP"
-''')
-        helper.chmod(0o755)
+''', mode=0o755)
         _set_update_job(stage="installing", progress=0.95, message="installing")
         subprocess.Popen(["/bin/sh", str(helper)], stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL, start_new_session=True)
@@ -681,7 +750,8 @@ def api_update_install(body):
     latest = str(info.get("latest") or "")
     if not version:
         version = latest
-    if version != latest or not info.get("available"):
+    if (not re.fullmatch(_UPDATE_VERSION_RE, version)
+            or version != latest or not info.get("available")):
         return {"ok": False, "error": "no matching update available"}
     dmg = info.get("dmg") or ""
     if not dmg or not _safe_update_url(dmg):
@@ -870,12 +940,13 @@ def _iter_codex_files(limit=60, base=None):
     base=None 聚合所有 Codex 源；指定 base（codex home 目录）则只扫该账号。"""
     bases = [base] if base is not None else [s["path"] for s in codex_sources()]
     if len(bases) == 1:
-        return _codex_file_index(bases[0])[:limit]
+        files = _codex_file_index(bases[0])
+        return files if limit is None else files[:limit]
     files = []
     for b in bases:
         files.extend(_codex_file_index(b))
     files.sort(reverse=True)
-    return files[:limit]
+    return files if limit is None else files[:limit]
 
 
 def _tail_lines(path, size=262144):
@@ -950,33 +1021,39 @@ def _codex_quota_accounts(ttl=CODEX_QUOTA_TTL):
 
 
 _last_good = {}        # key -> 最近一次成功结果（失败时降级返回）
+_last_good_lock = threading.Lock()
 LAST_GOOD_FILE = None  # 延迟初始化，DATA_DIR 定义在前文
 
 
 def _resilient(key, ttl, fn):
     """失败时回退到最近一次成功值；429 限流额外退避 10 分钟。"""
     global LAST_GOOD_FILE
-    if LAST_GOOD_FILE is None:
-        LAST_GOOD_FILE = DATA_DIR / "last_good.json"
-        try:  # 进程重启后恢复降级数据，避免重启风暴打爆接口
-            _last_good.update(json.loads(LAST_GOOD_FILE.read_text()))
-        except (OSError, ValueError):
-            pass
+    with _last_good_lock:
+        if LAST_GOOD_FILE is None:
+            LAST_GOOD_FILE = DATA_DIR / "last_good.json"
+            try:  # 进程重启后恢复降级数据，避免重启风暴打爆接口
+                _last_good.update(json.loads(LAST_GOOD_FILE.read_text()))
+            except (OSError, ValueError):
+                pass
     try:
         val = cached(key, ttl, fn)
         # 只把「真正成功」的结果存为降级值：ok=False（如网关无额度 / 钥匙串抖动）
         # 不得污染兜底，否则真额度 429 时拿不回上一次的好数据
-        if val.get("ok") and not val.get("stale") and _last_good.get(key) != val:
-            _last_good[key] = val
-            try:
-                DATA_DIR.mkdir(exist_ok=True)
-                LAST_GOOD_FILE.write_text(json.dumps(_last_good, ensure_ascii=False))
-            except OSError:
-                pass
+        if val.get("ok") and not val.get("stale"):
+            with _last_good_lock:
+                if _last_good.get(key) != val:
+                    _last_good[key] = val
+                    try:
+                        _atomic_write_text(
+                            LAST_GOOD_FILE,
+                            json.dumps(_last_good, ensure_ascii=False))
+                    except OSError:
+                        pass
         return val
     except Exception as exc:
         err = str(exc)
-        stale = _last_good.get(key)
+        with _last_good_lock:
+            stale = _last_good.get(key)
         out = dict(stale, stale=True, error=err) if stale \
             else {"ok": False, "error": err}
         backoff = 600 if "429" in err else 60
@@ -1277,8 +1354,7 @@ def _load_pins():
 
 
 def _save_pins(pins):
-    DATA_DIR.mkdir(exist_ok=True)
-    PINS_FILE.write_text(json.dumps(pins, ensure_ascii=False, indent=1))
+    _atomic_write_text(PINS_FILE, json.dumps(pins, ensure_ascii=False, indent=1))
 
 
 def api_pin(body):
@@ -1376,20 +1452,20 @@ def _pid_cwd(pid):
     return ""
 
 
-def _pid_codex_rollout_mtime(pid):
+def _pid_codex_rollout_info(pid):
     """Codex CLI 会长时间 resume 旧 rollout 文件；仅按文件名扫描最近 N 个会漏掉。
-    直接读取该 pid 当前打开的 rollout-*.jsonl，取最近写入时间作为工作状态信号。"""
+    直接读取该 pid 当前打开的 rollout-*.jsonl，并返回该会话的稳定身份。"""
     try:
         out = subprocess.run(["lsof", "-p", str(pid), "-Fn"],
                              capture_output=True, text=True, timeout=8).stdout
     except Exception:
-        return 0.0
+        return None
     try:
         roots = [os.path.realpath(src["path"] / "sessions") + os.sep
                  for src in codex_sources()]
     except Exception:
         roots = []
-    best = 0.0
+    best = None
     for line in out.splitlines():
         if not line.startswith("n"):
             continue
@@ -1404,9 +1480,16 @@ def _pid_codex_rollout_mtime(pid):
         if roots and not any(rp.startswith(r) for r in roots):
             continue
         try:
-            best = max(best, os.path.getmtime(rp))
+            mt = os.path.getmtime(rp)
         except OSError:
-            pass
+            continue
+        meta = _rollout_meta(Path(rp))
+        if meta.get("subagent"):
+            continue
+        if best is None or mt > best["mtime"]:
+            fm = re.search(r"-([0-9a-f-]{36})[.]jsonl$", name)
+            best = {"mtime": mt, "id": meta.get("id") or (fm.group(1) if fm else ""),
+                    "cwd": meta.get("cwd") or ""}
     return best
 
 
@@ -1517,11 +1600,15 @@ def api_active():
                     except OSError:
                         pass
             for e in codex_entries:
-                mt = _pid_codex_rollout_mtime(e["pid"])
-                if mt:
-                    e["status"] = "busy" if now - mt < 30 else ""
-                    if e["status"]:
-                        continue
+                info = _pid_codex_rollout_info(e["pid"])
+                if info:
+                    e["id"] = info["id"] or e["id"]
+                    e["cwd"] = e["cwd"] or info["cwd"]
+                    e["project"] = Path(e["cwd"]).name if e["cwd"] else "—"
+                    # 当前进程已明确打开某个 rollout 后，该文件的新旧就是该会话的
+                    # 结论；不得再按 cwd 回退到同项目另一会话的最近写入时间。
+                    e["status"] = "busy" if now - info["mtime"] < 30 else "idle"
+                    continue
                 # Codex 桌面端 rollout cwd 可能是进程 cwd 的子目录，前缀匹配
                 cands = [mt for c, mt in cwd_mtime.items()
                          if c == e["cwd"] or c.startswith(e["cwd"] + "/")
@@ -1564,7 +1651,7 @@ def api_active():
         # Codex 桌面端会话：宿主是常驻 app-server（被进程扫描排除），
         # 改按 rollout 近期写入 + originator == "Codex Desktop" 识别
         now = time.time()
-        term_cwds = [e["cwd"] for e in active if e["tool"] == "codex" and e["cwd"]]
+        term_ids = {e["id"] for e in active if e["tool"] == "codex" and e["id"]}
         for f in _iter_codex_files(20):
             try:
                 mt = f.stat().st_mtime
@@ -1574,15 +1661,15 @@ def api_active():
                 continue
             meta = _rollout_meta(f)
             cwd = meta["cwd"]
-            if meta["originator"] != "Codex Desktop":
+            if meta.get("subagent") or meta["originator"] != "Codex Desktop":
                 continue
-            if any(cwd == c or cwd.startswith(c + "/") or c.startswith(cwd + "/")
-                   for c in term_cwds):
-                continue              # 已由终端进程行覆盖
             fm = re.match(r"rollout-(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2})"
                           r"-([0-9a-f-]{36})\.jsonl$", f.name)
             if not fm:
                 continue
+            sid = meta.get("id") or fm.group(2)
+            if sid in term_ids:
+                continue              # 同一 session 已由终端进程行覆盖
             try:
                 start = time.mktime(time.strptime(fm.group(1), "%Y-%m-%dT%H-%M-%S"))
             except ValueError:
@@ -1590,7 +1677,7 @@ def api_active():
             active.append({"tool": "codex", "pid": 0, "host": "app",
                            "runtime": _fmt_secs(now - start),
                            "status": "busy" if now - mt < 30 else "idle",
-                           "id": fm.group(2), "cwd": cwd,
+                           "id": sid, "cwd": cwd,
                            "project": Path(cwd).name if cwd else "—"})
 
         active.sort(key=lambda a: (a["tool"], a["pid"]))
@@ -1602,11 +1689,11 @@ _rollout_meta_cache = {}
 
 
 def _rollout_meta(path):
-    """rollout 文件 → session_meta {cwd, originator}（每文件恒定，永久缓存）。"""
+    """rollout 文件 → 首个 session_meta（每文件恒定，永久缓存）。"""
     key = str(path)
     if key in _rollout_meta_cache:
         return _rollout_meta_cache[key]
-    meta = {"cwd": "", "originator": ""}
+    meta = {"cwd": "", "originator": "", "id": "", "subagent": False}
     try:
         with open(path, encoding="utf-8", errors="replace") as f:
             for _ in range(5):
@@ -1621,6 +1708,9 @@ def _rollout_meta(path):
                     p = evt.get("payload") or {}
                     meta["cwd"] = p.get("cwd") or ""
                     meta["originator"] = p.get("originator") or ""
+                    meta["id"] = p.get("id") or ""
+                    source = p.get("source")
+                    meta["subagent"] = isinstance(source, dict) and "subagent" in source
                     break
     except OSError:
         pass
@@ -1683,7 +1773,9 @@ def api_preview(query):
 
 _events = deque(maxlen=50)
 _events_lock = threading.Lock()
+_events_file_lock = threading.Lock()
 _event_seq = 0
+_event_boot_id = uuid.uuid4().hex
 EVENTS_FILE = DATA_DIR / "events.jsonl"
 _event_keys = deque()
 _event_key_set = set()
@@ -1718,13 +1810,13 @@ def _remember_event_key(key):
         old = _event_keys.popleft()
         _event_key_set.discard(old)
     return True
-    return True
 
 
 # ------------------------------------------------- 完成事件钩子：自动配置 / 干净移除
 # 目标：装上即用、卸载即净。只「合并」不覆盖用户已有配置；只删「我们打了标记的那条」。
 # 改动记录在 INTEGRATION_FILE，供 --remove-integration（build.sh uninstall 调）或关开关时还原。
 INTEGRATION_FILE = DATA_DIR / "integration.json"
+_integration_lock = threading.Lock()
 _CLAUDE_SETTINGS = Path.home() / ".claude" / "settings.json"
 _HOOK_WRAPPER = DATA_DIR / "claude-stop-hook.sh"   # 放 app-support：App 删了也在 → 可自清理
 # 识别「我们装的」Stop 钩子：新版指向 wrapper；旧版是裸 curl（兼容迁移，一并清掉）
@@ -1743,7 +1835,7 @@ printf '%s' "$BODY" | curl -sf -m 3 -X POST http://127.0.0.1:7777/api/event \\
 # POST 失败=daemon 没跑。仅当 App 也不在了（=已卸载，区别于「临时退出」）才自清理。
 [ -d "$APP" ] && exit 0
 python3 - "$HOME/.claude/settings.json" >/dev/null 2>&1 <<'PY'
-import json,sys
+import json,sys,os,tempfile
 p=sys.argv[1]
 try: d=json.load(open(p))
 except Exception: raise SystemExit
@@ -1755,7 +1847,10 @@ if isinstance(st,list):
     else:
         h.pop("Stop",None)
         if not h: d.pop("hooks",None)
-    json.dump(d,open(p,"w"),ensure_ascii=False,indent=2)
+    fd,tmp=tempfile.mkstemp(prefix='.settings.json.',dir=os.path.dirname(p))
+    with os.fdopen(fd,'w') as f:
+        json.dump(d,f,ensure_ascii=False,indent=2); f.flush(); os.fsync(f.fileno())
+    os.replace(tmp,p)
 PY
 rm -f "$SELF/claude-stop-hook.sh" "$SELF/integration.json" 2>/dev/null
 exit 0
@@ -1771,8 +1866,8 @@ def _integration_state():
 
 def _integration_state_save(st):
     try:
-        INTEGRATION_FILE.parent.mkdir(parents=True, exist_ok=True)
-        INTEGRATION_FILE.write_text(json.dumps(st, ensure_ascii=False, indent=2))
+        _atomic_write_text(INTEGRATION_FILE,
+                           json.dumps(st, ensure_ascii=False, indent=2))
     except OSError:
         pass
 
@@ -1786,10 +1881,18 @@ def _hook_is_ours(grp):
 
 def _write_hook_wrapper():
     try:
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
-        _HOOK_WRAPPER.write_text(_HOOK_WRAPPER_SH.replace("__SELFDIR__", str(DATA_DIR)))
-        _HOOK_WRAPPER.chmod(0o755)
+        _atomic_write_text(_HOOK_WRAPPER,
+                           _HOOK_WRAPPER_SH.replace("__SELFDIR__", str(DATA_DIR)),
+                           mode=0o755)
         return True
+    except OSError:
+        return False
+
+
+def _hook_wrapper_is_current():
+    try:
+        expected = _HOOK_WRAPPER_SH.replace("__SELFDIR__", str(DATA_DIR))
+        return _HOOK_WRAPPER.read_text() == expected
     except OSError:
         return False
 
@@ -1806,7 +1909,7 @@ def _install_claude_hook():
     hooks = d.get("hooks")
     stop = hooks.get("Stop") if isinstance(hooks, dict) else None
     ours = [g for g in stop if _hook_is_ours(g)] if isinstance(stop, list) else []
-    already = (len(ours) == 1 and _HOOK_WRAPPER.exists()
+    already = (len(ours) == 1 and _hook_wrapper_is_current()
                and (ours[0].get("hooks") or [{}])[0].get("command") == _HOOK_CMD)
     if already:
         return False
@@ -1822,8 +1925,8 @@ def _install_claude_hook():
     stop[:] = [g for g in stop if not _hook_is_ours(g)]
     stop.append({"hooks": [{"type": "command", "command": _HOOK_CMD, "timeout": 5}]})
     try:
-        _CLAUDE_SETTINGS.parent.mkdir(parents=True, exist_ok=True)
-        _CLAUDE_SETTINGS.write_text(json.dumps(d, ensure_ascii=False, indent=2))
+        _atomic_write_text(_CLAUDE_SETTINGS,
+                           json.dumps(d, ensure_ascii=False, indent=2))
         return True
     except OSError:
         return False
@@ -1849,7 +1952,8 @@ def _remove_claude_hook():
         if not hooks:
             d.pop("hooks", None)
     try:
-        _CLAUDE_SETTINGS.write_text(json.dumps(d, ensure_ascii=False, indent=2))
+        _atomic_write_text(_CLAUDE_SETTINGS,
+                           json.dumps(d, ensure_ascii=False, indent=2))
     except OSError:
         pass
 
@@ -1872,8 +1976,10 @@ def _codex_read_notify(text):
         v = tomllib.loads(text).get("notify")
         return v if isinstance(v, list) else None
     except Exception:
-        # 注意用 [ \t]* 而非 \s*：\s 含换行，会把上一空行也吃掉
-        m = re.search(r'^[ \t]*notify[ \t]*=[ \t]*(\[.*\])[ \t]*$', text, re.M)
+        # notify 是根键；只检查首个 TOML table 之前，避免误改 [profiles.*].notify。
+        table = re.search(r'^[ \t]*\[', text, re.M)
+        root = text[:table.start()] if table else text
+        m = re.search(r'^[ \t]*notify[ \t]*=[ \t]*(\[.*\])[ \t]*$', root, re.M)
         if not m:
             return None
         try:
@@ -1886,11 +1992,19 @@ def _codex_set_notify(text, arr):
     """把 config.toml 文本里的 notify 行替换/插入为 arr（仅动 notify 单行，其余原样）。
     arr=None 表示删除 notify 行。返回新文本。用 [ \t]* 避免误吃上一空行。"""
     line = None if arr is None else "notify = " + json.dumps(arr, ensure_ascii=False)
-    if re.search(r'^[ \t]*notify[ \t]*=', text, re.M):
+    table = re.search(r'^[ \t]*\[', text, re.M)
+    cut = table.start() if table else len(text)
+    root, rest = text[:cut], text[cut:]
+    if re.search(r'^[ \t]*notify[ \t]*=', root, re.M):
         if line is None:
-            return re.sub(r'^[ \t]*notify[ \t]*=.*\n?', '', text, count=1, flags=re.M)
-        return re.sub(r'^[ \t]*notify[ \t]*=.*$', line, text, count=1, flags=re.M)
-    return (text.rstrip("\n") + "\n" + line + "\n") if line else text
+            root = re.sub(r'^[ \t]*notify[ \t]*=.*\n?', '', root, count=1, flags=re.M)
+        else:
+            root = re.sub(r'^[ \t]*notify[ \t]*=.*$', line, root, count=1, flags=re.M)
+        return root + rest
+    if not line:
+        return text
+    separator = "" if not root or root.endswith("\n") else "\n"
+    return root + separator + line + "\n" + rest
 
 
 def _codex_notify_is_ours(arr):
@@ -1905,10 +2019,44 @@ def _codex_notify_is_ours(arr):
     return any(mark in joined for mark in _CODEX_OUR_MARKS)
 
 
-def _write_codex_wrapper(orig):
-    """生成 codex wrapper：POST 给 daemon → 转发回原 notify（orig 烘进脚本）→ App 没了则还原+自删。"""
-    fwd = (" ".join(shlex.quote(x) for x in orig) + ' "$@"') if orig else 'true'
-    restore = json.dumps(orig, ensure_ascii=False) if orig is not None else "null"
+def _codex_notify_direct_is_ours(arr):
+    if not isinstance(arr, list) or not arr:
+        return False
+    command = str(arr[0])
+    return any(mark in command for mark in _CODEX_OUR_MARKS)
+
+
+def _codex_notify_without_ours(arr):
+    """Remove AgentDeck from an external --previous-notify chain."""
+    if not isinstance(arr, list):
+        return arr
+    if _codex_notify_direct_is_ours(arr):
+        return None
+    out, i = list(arr), 0
+    while i < len(out):
+        if out[i] != "--previous-notify" or i + 1 >= len(out):
+            i += 1
+            continue
+        try:
+            nested = json.loads(out[i + 1])
+        except (TypeError, ValueError):
+            i += 2
+            continue
+        cleaned = _codex_notify_without_ours(nested)
+        if cleaned is None:
+            del out[i:i + 2]
+        else:
+            out[i + 1] = json.dumps(cleaned, ensure_ascii=False)
+            i += 2
+    return out
+
+
+def _write_codex_wrapper(restore_notify, forward_notify=None):
+    """Generate wrapper with separate forwarding and uninstall restoration targets."""
+    fwd = (" ".join(shlex.quote(x) for x in forward_notify) + ' "$@"') \
+        if forward_notify else 'true'
+    restore = json.dumps(restore_notify, ensure_ascii=False) \
+        if restore_notify is not None else "null"
     sh = f'''#!/bin/sh
 # AgentDeck Codex notify wrapper（自动安装/链式转发/自清理，勿手改）
 APP="/Applications/AgentDeck.app"
@@ -1919,23 +2067,26 @@ curl -sf -m 3 -X POST http://127.0.0.1:7777/api/event \\
 [ -d "$APP" ] && exit 0
 # App 已卸载 → 还原 config.toml 的 notify、删 wrapper（drag-trash 也能净；不破坏原工具）
 python3 - "$HOME/.codex/config.toml" >/dev/null 2>&1 <<'PY'
-import re,sys,json
+import re,sys,json,os,tempfile
 p=sys.argv[1]
 try: t=open(p).read()
 except Exception: raise SystemExit
 orig={restore}
 line=None if orig is None else "notify = "+json.dumps(orig,ensure_ascii=False)
-if re.search(r'^[ \\t]*notify[ \\t]*=',t,re.M):
-    t=re.sub(r'^[ \\t]*notify[ \\t]*=.*\\n?','',t,count=1,flags=re.M) if line is None else re.sub(r'^[ \\t]*notify[ \\t]*=.*$',line,t,count=1,flags=re.M)
-open(p,"w").write(t)
+table=re.search(r'^[ \\t]*\\[',t,re.M); cut=table.start() if table else len(t)
+root,rest=t[:cut],t[cut:]
+if re.search(r'^[ \\t]*notify[ \\t]*=',root,re.M):
+    root=re.sub(r'^[ \\t]*notify[ \\t]*=.*\\n?','',root,count=1,flags=re.M) if line is None else re.sub(r'^[ \\t]*notify[ \\t]*=.*$',line,root,count=1,flags=re.M)
+t=root+rest
+fd,tmp=tempfile.mkstemp(prefix='.config.toml.',dir=os.path.dirname(p))
+with os.fdopen(fd,'w') as f: f.write(t); f.flush(); os.fsync(f.fileno())
+os.replace(tmp,p)
 PY
 rm -f "$SELF/codex-notify.sh"
 exit 0
 '''
     try:
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
-        _CODEX_WRAPPER.write_text(sh)
-        _CODEX_WRAPPER.chmod(0o755)
+        _atomic_write_text(_CODEX_WRAPPER, sh, mode=0o755)
         return True
     except OSError:
         return False
@@ -1954,32 +2105,31 @@ def _install_codex_notify():
     st = _integration_state()
     prev = st.get("codex_prev_notify")
 
-    # 如果历史状态里已经把旧 AgentDeck notify 备份成“原 notify”，先清掉；
-    # 否则新版 wrapper 会 POST 一次后再转发旧脚本，又 POST 一次。
-    changed_state = False
     if _codex_notify_is_ours(prev):
-        st["codex_prev_notify"] = None
-        changed_state = True
-        prev = None
-    if changed_state:
+        prev = _codex_notify_without_ours(prev)
+        st["codex_prev_notify"] = prev
         _integration_state_save(st)
 
-    if cur == [wrapper] and _CODEX_WRAPPER.exists() and not _codex_notify_is_ours(prev):
-        return False   # 已是我们的，且 wrapper 在
+    # Computer Use 等外部 owner 可能已把 AgentDeck 放进自己的 previous-notify。
+    # 此时保留外部 owner 为根，AgentDeck wrapper 不再反向调用 owner，彻底断开环。
+    if (_codex_notify_is_ours(cur) and not _codex_notify_direct_is_ours(cur)):
+        cleaned = _codex_notify_without_ours(cur)
+        st["codex_prev_notify"] = cleaned
+        _integration_state_save(st)
+        return _write_codex_wrapper(cleaned, forward_notify=None)
 
-    # 仅首次备份真正的外部 notify；AgentDeck 旧脚本/旧 wrapper 不当作原工具转发
-    if cur != [wrapper] and "codex_prev_notify" not in st:
-        st["codex_prev_notify"] = None if _codex_notify_is_ours(cur) else cur
+    # AgentDeck 自己持有根槽时，wrapper 在 POST 后顺序调用原外部 notify。
+    if not _codex_notify_direct_is_ours(cur):
+        st["codex_prev_notify"] = cur
         _integration_state_save(st)
-    orig = st.get("codex_prev_notify")
-    if _codex_notify_is_ours(orig):
-        orig = None
-        st["codex_prev_notify"] = None
-        _integration_state_save(st)
-    if not _write_codex_wrapper(orig):
+    prev = st.get("codex_prev_notify")
+    if not _write_codex_wrapper(prev, forward_notify=prev):
         return False
     try:
-        _CODEX_CONFIG.write_text(_codex_set_notify(text, [wrapper]))
+        updated = _codex_set_notify(text, [wrapper])
+        if updated == text:
+            return False
+        _atomic_write_text(_CODEX_CONFIG, updated)
         return True
     except OSError:
         return False
@@ -1992,9 +2142,13 @@ def _remove_codex_notify():
         try:
             text = _CODEX_CONFIG.read_text()
             cur = _codex_read_notify(text)
-            # 只在当前确实指向我们 wrapper 时才还原（别覆盖用户后来手改的值）
-            if cur == [str(_CODEX_WRAPPER)] or (cur and any(_CODEX_MARK in str(x) for x in cur)):
-                _CODEX_CONFIG.write_text(_codex_set_notify(text, st.get("codex_prev_notify")))
+            if _codex_notify_direct_is_ours(cur):
+                updated = _codex_set_notify(text, st.get("codex_prev_notify"))
+                _atomic_write_text(_CODEX_CONFIG, updated)
+            elif _codex_notify_is_ours(cur):
+                # 外部 owner 的链中只摘掉 AgentDeck，保留 owner 及其它 previous notify。
+                updated = _codex_set_notify(text, _codex_notify_without_ours(cur))
+                _atomic_write_text(_CODEX_CONFIG, updated)
         except OSError:
             pass
     try:
@@ -2054,7 +2208,8 @@ def _remove_legacy_codex_stop_hook():
                     if not hooks:
                         d.pop("hooks", None)
                 try:
-                    _CODEX_HOOKS.write_text(json.dumps(d, ensure_ascii=False, indent=2) + "\n")
+                    _atomic_write_text(_CODEX_HOOKS,
+                                       json.dumps(d, ensure_ascii=False, indent=2) + "\n")
                 except OSError:
                     pass
     try:
@@ -2066,23 +2221,25 @@ def _remove_legacy_codex_stop_hook():
 def install_integration():
     """启动时调用（幂等）：自动接好完成事件钩子（Claude Stop + Codex notify 链式转发）。
     每步各自重读 state 再加标记，避免覆盖 _install_codex_notify 写入的原值备份。"""
-    _remove_legacy_codex_stop_hook()
-    if _install_claude_hook():
-        st = _integration_state(); st["claude_hook"] = True; _integration_state_save(st)
-    if _install_codex_notify():
-        st = _integration_state(); st["codex_notify"] = True; _integration_state_save(st)
+    with _integration_lock:
+        _remove_legacy_codex_stop_hook()
+        if _install_claude_hook():
+            st = _integration_state(); st["claude_hook"] = True; _integration_state_save(st)
+        if _install_codex_notify():
+            st = _integration_state(); st["codex_notify"] = True; _integration_state_save(st)
 
 
 def remove_integration():
     """卸载 / 关开关时调用：还原我们的所有改动。"""
-    _remove_claude_hook()
-    _remove_codex_notify()
-    _remove_legacy_codex_stop_hook()
-    for f in (_HOOK_WRAPPER, INTEGRATION_FILE):
-        try:
-            f.unlink()
-        except OSError:
-            pass
+    with _integration_lock:
+        _remove_claude_hook()
+        _remove_codex_notify()
+        _remove_legacy_codex_stop_hook()
+        for f in (_HOOK_WRAPPER, INTEGRATION_FILE):
+            try:
+                f.unlink()
+            except OSError:
+                pass
 
 
 def _events_load():
@@ -2106,15 +2263,16 @@ def _events_load():
 
 
 def _events_persist(evt):
-    try:
-        EVENTS_FILE.parent.mkdir(exist_ok=True)
-        with open(EVENTS_FILE, "a", encoding="utf-8") as f:
-            f.write(json.dumps(evt, ensure_ascii=False) + "\n")
-        if EVENTS_FILE.stat().st_size > 256 * 1024:    # 防膨胀：超限保尾部
-            tail = EVENTS_FILE.read_text().splitlines()[-100:]
-            EVENTS_FILE.write_text("\n".join(tail) + "\n")
-    except OSError:
-        pass
+    with _events_file_lock:
+        try:
+            EVENTS_FILE.parent.mkdir(exist_ok=True)
+            with open(EVENTS_FILE, "a", encoding="utf-8") as f:
+                f.write(json.dumps(evt, ensure_ascii=False) + "\n")
+            if EVENTS_FILE.stat().st_size > 256 * 1024:    # 防膨胀：超限保尾部
+                tail = EVENTS_FILE.read_text().splitlines()[-100:]
+                _atomic_write_text(EVENTS_FILE, "\n".join(tail) + "\n")
+        except OSError:
+            pass
 
 
 def _last_user_msg(transcript_path, sid="", cwd=""):
@@ -2282,12 +2440,13 @@ def api_events(query):
         recent = int(query.get("recent", ["0"])[0])
         if recent:        # 「最近完成」卡：取末尾 N 条（新→旧）；排除额度告警事件（kind=alert）
             done = [e for e in _events if e.get("kind") != "alert"]
-            return {"events": done[-recent:][::-1], "last": _event_seq}
+            return {"events": done[-recent:][::-1], "last": _event_seq,
+                    "boot_id": _event_boot_id}
         since = int(query.get("since", ["0"])[0])
         # 灵动岛通道：排除重启回灌的历史事件，只推真正新发生的
         evs = [e for e in _events if e["id"] > since and not e.get("replayed")]
         # locale 随该通道下发给 Swift 壳（菜单 / 灵动岛 / 通知本地化）
-        return {"events": evs, "last": _event_seq,
+        return {"events": evs, "last": _event_seq, "boot_id": _event_boot_id,
                 "island_secs": get_settings()["island_dwell_secs"],
                 "locale": _effective_locale()}
 
@@ -2537,7 +2696,7 @@ def api_focus(body):
 
 # ------------------------------------------------- 额度采样 / 告警 / 历史曲线
 
-_alert_state = {}   # (tool, window_id) -> "normal" | "warn" | "crit"
+_alert_state = {}   # (tool, account_id, window_id) -> "normal" | "warn" | "crit"
 ALERT_STATE_FILE = DATA_DIR / "alert_state.json"
 
 
@@ -2545,17 +2704,23 @@ def _alert_state_load():
     """告警状态跨重启持久化：同一次越阈只通知一次，重启不重发。"""
     try:
         for k, v in json.loads(ALERT_STATE_FILE.read_text()).items():
-            tool, _, win = k.partition("|")
-            _alert_state[(tool, win)] = v
+            parts = k.split("|", 2)
+            if len(parts) == 2:   # v2.1.2 及更早：仅主账号
+                tool, win = parts
+                account = "default"
+            elif len(parts) == 3:
+                tool, account, win = parts
+            else:
+                continue
+            _alert_state[(tool, account, win)] = v
     except (OSError, ValueError):
         pass
 
 
 def _alert_state_save():
     try:
-        ALERT_STATE_FILE.parent.mkdir(exist_ok=True)
-        ALERT_STATE_FILE.write_text(json.dumps(
-            {f"{t}|{w}": v for (t, w), v in _alert_state.items()}))
+        _atomic_write_text(ALERT_STATE_FILE, json.dumps(
+            {f"{t}|{a}|{w}": v for (t, a, w), v in _alert_state.items()}))
     except OSError:
         pass
 
@@ -2573,7 +2738,8 @@ def _push_alert(tool, msg, level, sound=False):
     _events_persist(evt)
 
 
-def _check_alerts(tool_name, windows):
+def _check_alerts(tool_name, windows, account_id="default", account_label="",
+                  show_account=False):
     s = get_settings()
     if not s["notify_enabled"]:
         return
@@ -2581,8 +2747,11 @@ def _check_alerts(tool_name, windows):
     loc = _effective_locale()
     strs = NOTIFY_STRINGS.get(loc, NOTIFY_STRINGS["en"])
     labels = WINDOW_LABELS.get(loc, WINDOW_LABELS["en"])
+    display_tool = tool_name
+    if show_account and account_label:
+        display_tool = f"{tool_name} · {account_label}"
     for w in windows:
-        key = (tool_name, w.get("id") or w.get("label"))
+        key = (tool_name, account_id or "default", w.get("id") or w.get("label"))
         pct = w.get("used_percent") or 0
         prev = _alert_state.get(key, "normal")
         cur = "crit" if pct >= crit_th else "warn" if pct >= warn_th else "normal"
@@ -2590,11 +2759,11 @@ def _check_alerts(tool_name, windows):
         label = labels.get(w.get("id") or "", w.get("label", ""))
         if cur != prev:
             if cur == "crit":
-                _push_alert(tool_name, strs["crit"].format(tool=tool_name, label=label, pct=pct), "crit", sound)
+                _push_alert(tool_name, strs["crit"].format(tool=display_tool, label=label, pct=pct), "crit", sound)
             elif cur == "warn" and prev == "normal":
-                _push_alert(tool_name, strs["warn"].format(tool=tool_name, label=label, pct=pct), "warn")
+                _push_alert(tool_name, strs["warn"].format(tool=display_tool, label=label, pct=pct), "warn")
             elif cur == "normal" and prev in ("warn", "crit") and s["notify_reset"]:
-                _push_alert(tool_name, strs["reset"].format(tool=tool_name, label=label, pct=pct), "reset", sound)
+                _push_alert(tool_name, strs["reset"].format(tool=display_tool, label=label, pct=pct), "reset", sound)
             _alert_state[key] = cur
             _alert_state_save()
 
@@ -2609,14 +2778,21 @@ def _sample_once():
                 sample["c5h"] = w["used_percent"]
             elif w.get("id") == "seven_day":
                 sample["c7d"] = w["used_percent"]
-        _check_alerts("Claude", cl.get("windows", []))
     if cx.get("ok"):
         ws = cx.get("windows", [])
         if ws:
             sample["x5h"] = ws[0]["used_percent"]
         if len(ws) > 1:
             sample["x7d"] = ws[1]["used_percent"]
-        _check_alerts("Codex", ws)
+    account_groups = q.get("accounts") or {}
+    for key, tool_name, primary in (("claude", "Claude", cl), ("codex", "Codex", cx)):
+        accounts = account_groups.get(key) or ([primary] if primary.get("ok") else [])
+        show_account = len(accounts) > 1
+        for account in accounts:
+            if account.get("ok"):
+                _check_alerts(tool_name, account.get("windows", []),
+                              str(account.get("account_id") or "default"),
+                              str(account.get("account") or ""), show_account)
     if len(sample) > 1:
         DATA_DIR.mkdir(exist_ok=True)
         with open(HISTORY_FILE, "a") as f:
@@ -2630,7 +2806,7 @@ def _trim_history():
         cutoff = time.time() - HISTORY_KEEP
         lines = [l for l in HISTORY_FILE.read_text().splitlines()
                  if json.loads(l).get("ts", 0) > cutoff]
-        HISTORY_FILE.write_text("\n".join(lines) + "\n")
+        _atomic_write_text(HISTORY_FILE, "\n".join(lines) + "\n")
     except (OSError, ValueError):
         pass
 
@@ -2709,17 +2885,27 @@ def api_history(query):
 
 # ----------------------------------------------------------------- 用量统计
 
-def _parse_claude_file_usage(path):
-    """返回 {hour: {model: [in, out, cache_read, cache_write_5m, cache_write_1h]}}
+_CLAUDE_USAGE_CACHE_VERSION = 1
 
-    同一条 API 响应会按 content block 拆成多行（usage 为相同快照），
-    必须按 (message.id, requestId) 去重，否则 token/成本翻倍（实测重复率 55%）。
-    cache 写入 5m/1h 单价不同（实测 91% 走 1h 档），按 cache_creation 细分。
-    """
-    agg = {}
-    seen = set()
-    with open(path, encoding="utf-8", errors="replace") as f:
-        for line in f:
+
+def _claude_usage_key(msg, evt):
+    mid, rid = msg.get("id"), evt.get("requestId")
+    if mid is None and rid is None:
+        return None
+    raw = f"{mid or ''}\0{rid or ''}".encode("utf-8", "replace")
+    return hashlib.blake2s(raw, digest_size=8).hexdigest()
+
+
+def _parse_claude_usage_state(path, state=None):
+    """Incrementally aggregate Claude usage while preserving response de-duplication."""
+    state = dict(state or {})
+    agg = state.get("agg") or {}
+    seen = set(state.get("seen") or [])
+    offset = int(state.get("offset") or 0)
+    with open(path, "rb") as f:
+        f.seek(offset)
+        for raw in f:
+            line = raw.decode("utf-8", "replace")
             if '"usage"' not in line:
                 continue
             try:
@@ -2730,8 +2916,8 @@ def _parse_claude_file_usage(path):
             usage = msg.get("usage")
             if not usage or evt.get("type") != "assistant":
                 continue
-            key = (msg.get("id"), evt.get("requestId"))
-            if key != (None, None):
+            key = _claude_usage_key(msg, evt)
+            if key is not None:
                 if key in seen:
                     continue
                 seen.add(key)
@@ -2748,7 +2934,42 @@ def _parse_claude_file_usage(path):
                 slot[4] += cc.get("ephemeral_1h_input_tokens", 0)
             else:   # 老格式无细分，按 5m 档保守计
                 slot[3] += usage.get("cache_creation_input_tokens", 0)
-    return agg
+        offset = f.tell()
+    return {"agg": agg, "seen": sorted(seen), "offset": offset}
+
+
+def _parse_claude_file_usage(path):
+    return _parse_claude_usage_state(path)["agg"]
+
+
+def _load_claude_usage_cache():
+    try:
+        data = json.loads(CLAUDE_USAGE_CACHE_FILE.read_text())
+        if data.get("version") == _CLAUDE_USAGE_CACHE_VERSION \
+                and isinstance(data.get("files"), dict):
+            return data["files"]
+    except (OSError, ValueError, AttributeError):
+        pass
+    return {}
+
+
+def _cached_claude_file_usage(path, disk_cache):
+    stat = path.stat()
+    key = str(path)
+    entry = disk_cache.get(key)
+    if isinstance(entry, dict) and entry.get("version") == _CLAUDE_USAGE_CACHE_VERSION:
+        same_file = entry.get("inode") == stat.st_ino
+        if (same_file and entry.get("size") == stat.st_size
+                and entry.get("mtime_ns") == stat.st_mtime_ns):
+            return entry.get("agg") or {}, False
+        state = entry if same_file and stat.st_size >= int(entry.get("offset") or 0) else None
+    else:
+        state = None
+    parsed = _parse_claude_usage_state(path, state)
+    parsed.update({"version": _CLAUDE_USAGE_CACHE_VERSION, "inode": stat.st_ino,
+                   "size": stat.st_size, "mtime_ns": stat.st_mtime_ns})
+    disk_cache[key] = parsed
+    return parsed["agg"], True
 
 
 _claude_cwd_cache = {}
@@ -2780,51 +3001,104 @@ def _claude_file_cwd(path):
     return cwd
 
 
-def _cached_file_agg(path, parser):
-    st = path.stat()
-    key = str(path)
-    with _cache_lock:
-        hit = _file_agg_cache.get(key)
-        if hit and hit[0] == st.st_mtime and hit[1] == st.st_size:
-            return hit[2]
-    parsed = parser(path)
-    with _cache_lock:
-        _file_agg_cache[key] = (st.st_mtime, st.st_size, parsed)
-    return parsed
+_CODEX_USAGE_CACHE_VERSION = 1
 
 
-def _parse_codex_file_usage(path):
-    """取该会话最后一条 token_count 的累计值，归属到文件 mtime 的 UTC 小时。
-
-    返回 {hour: (tokens, api_cost)}；cached_input ⊂ input、reasoning ⊂ output，
-    相加会翻倍，total_tokens 即 in+out。成本按官方 API 价折算（缓存读 -90%）。
-    """
-    total, cost, tu, model = 0, 0.0, None, ""
-    for line in reversed(_tail_lines(path)):
-        if tu is None and '"total_token_usage"' in line:
+def _parse_codex_usage_state(path, state=None):
+    """Incrementally parse a rollout and return serializable aggregation state."""
+    state = dict(state or {})
+    agg = {hour: [int(value[0]), float(value[1])]
+           for hour, value in (state.get("agg") or {}).items()}
+    previous = state.get("previous")
+    model = str(state.get("model") or "")
+    offset = int(state.get("offset") or 0)
+    stat = path.stat()
+    if state.get("subagent") or (offset == 0 and _rollout_meta(path).get("subagent")):
+        return {"agg": {}, "previous": None, "model": "", "offset": stat.st_size,
+                "subagent": True}
+    fallback_hour = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc) \
+        .strftime("%Y-%m-%dT%H")
+    with open(path, "rb") as lines:
+        lines.seek(offset)
+        for raw in lines:
+            line = raw.decode("utf-8", "replace")
+            if '"total_token_usage"' not in line and '"model"' not in line:
+                continue
             try:
                 evt = json.loads(line)
             except ValueError:
                 continue
-            info = (evt.get("payload") or {}).get("info") or {}
-            tu = info.get("total_token_usage") or {}
-            continue
-        if not model:
-            m = re.search(r'"model":"([^"]+)"', line)
-            if m:
-                model = m.group(1)
-        if tu is not None and model:
-            break
-    if tu:
-        inp = tu.get("input_tokens", 0)
-        cached = min(tu.get("cached_input_tokens", 0), inp)
-        out = tu.get("output_tokens", 0)
-        total = tu.get("total_tokens") or (inp + out)
-        p = _codex_price(model)
-        cost = ((inp - cached) * p[0] + out * p[1] + cached * p[2]) / 1e6
-    hour = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc) \
-        .strftime("%Y-%m-%dT%H")
-    return {hour: (total, cost)}
+            payload = evt.get("payload") or {}
+            if evt.get("type") == "turn_context" and payload.get("model"):
+                model = str(payload["model"])
+            info = payload.get("info") or {}
+            usage = info.get("total_token_usage")
+            if not isinstance(usage, dict):
+                continue
+            current = {
+                "input": max(0, int(usage.get("input_tokens") or 0)),
+                "cached": max(0, int(usage.get("cached_input_tokens") or 0)),
+                "output": max(0, int(usage.get("output_tokens") or 0)),
+            }
+            reset = previous is None or any(current[k] < previous[k] for k in current)
+            base = {k: 0 for k in current} if reset else previous
+            inp = current["input"] - base["input"]
+            cached = min(current["cached"] - base["cached"], inp)
+            out = current["output"] - base["output"]
+            previous = current
+            total = inp + out
+            if total <= 0:
+                continue
+            prices = _codex_price(model)
+            cost = ((inp - cached) * prices[0] + out * prices[1]
+                    + cached * prices[2]) / 1e6
+            stamp = str(evt.get("timestamp") or "")
+            hour = stamp[:13] if re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}", stamp) \
+                else fallback_hour
+            prev_total, prev_cost = agg.get(hour, (0, 0.0))
+            agg[hour] = [prev_total + total, prev_cost + cost]
+        offset = lines.tell()
+    return {"agg": agg, "previous": previous, "model": model, "offset": offset,
+            "subagent": False}
+
+
+def _parse_codex_file_usage(path):
+    """Aggregate positive cumulative deltas by event hour for one top-level rollout."""
+    state = _parse_codex_usage_state(path)
+    return {hour: (value[0], value[1]) for hour, value in state["agg"].items()}
+
+
+def _load_codex_usage_cache():
+    try:
+        data = json.loads(CODEX_USAGE_CACHE_FILE.read_text())
+        if data.get("version") == _CODEX_USAGE_CACHE_VERSION \
+                and isinstance(data.get("files"), dict):
+            return data["files"]
+    except (OSError, ValueError, AttributeError):
+        pass
+    return {}
+
+
+def _cached_codex_file_usage(path, disk_cache):
+    stat = path.stat()
+    key = str(path)
+    entry = disk_cache.get(key)
+    if isinstance(entry, dict) and entry.get("version") == _CODEX_USAGE_CACHE_VERSION:
+        same_file = entry.get("inode") == stat.st_ino
+        same_content = (same_file and entry.get("size") == stat.st_size
+                        and entry.get("mtime_ns") == stat.st_mtime_ns)
+        if same_content:
+            return ({hour: (value[0], value[1])
+                     for hour, value in (entry.get("agg") or {}).items()}, False)
+        appendable = same_file and stat.st_size >= int(entry.get("offset") or 0)
+        state = entry if appendable else None
+    else:
+        state = None
+    parsed = _parse_codex_usage_state(path, state)
+    parsed.update({"version": _CODEX_USAGE_CACHE_VERSION, "inode": stat.st_ino,
+                   "size": stat.st_size, "mtime_ns": stat.st_mtime_ns})
+    disk_cache[key] = parsed
+    return ({hour: (value[0], value[1]) for hour, value in parsed["agg"].items()}, True)
 
 
 def _model_short(model):
@@ -2863,13 +3137,20 @@ def api_usage():
         hourly = {}   # epoch_hour -> {"c": tokens, "x": tokens}
         projects = {}  # cwd -> {"tokens": n, "cost": $}（近 7 天）
 
-        _claude_usage_files = (p for src in claude_sources()
-                               for p in (src["path"] / "projects").glob("*/*.jsonl"))
-        for path in _claude_usage_files:
+        claude_usage_files = [p for src in claude_sources()
+                              for p in (src["path"] / "projects").glob("*/*.jsonl")]
+        claude_cache = _load_claude_usage_cache()
+        valid_claude_paths = {str(path) for path in claude_usage_files}
+        claude_cache_dirty = False
+        for stale_key in set(claude_cache) - valid_claude_paths:
+            claude_cache.pop(stale_key, None)
+            claude_cache_dirty = True
+        for path in claude_usage_files:
             try:
                 if path.stat().st_mtime < cutoff:
                     continue
-                agg = _cached_file_agg(path, _parse_claude_file_usage)
+                agg, changed = _cached_claude_file_usage(path, claude_cache)
+                claude_cache_dirty = claude_cache_dirty or changed
             except OSError:
                 continue
             fcwd = None   # 懒读：仅当文件有周内用量时才解析 cwd
@@ -2897,13 +3178,29 @@ def api_usage():
                     if ep and ep >= hour_cut:
                         hourly.setdefault(ep, {"c": 0, "x": 0})["c"] += sum(tk)
 
+        if claude_cache_dirty:
+            try:
+                _atomic_write_text(CLAUDE_USAGE_CACHE_FILE, json.dumps({
+                    "version": _CLAUDE_USAGE_CACHE_VERSION, "files": claude_cache},
+                    ensure_ascii=False, separators=(",", ":")))
+            except OSError:
+                pass
+
         codex_daily = {d: 0 for d in days}
         xcost_30d = xcost_7d = 0.0
-        for path in _iter_codex_files(200):
+        codex_files = _iter_codex_files(None)
+        codex_cache = _load_codex_usage_cache()
+        valid_codex_paths = {str(path) for path in codex_files}
+        cache_dirty = False
+        for stale_key in set(codex_cache) - valid_codex_paths:
+            codex_cache.pop(stale_key, None)
+            cache_dirty = True
+        for path in codex_files:
             try:
                 if path.stat().st_mtime < cutoff:
                     continue
-                agg = _cached_file_agg(path, _parse_codex_file_usage)
+                agg, changed = _cached_codex_file_usage(path, codex_cache)
+                cache_dirty = cache_dirty or changed
             except OSError:
                 continue
             for hour, (total, cost) in agg.items():
@@ -2922,6 +3219,14 @@ def api_usage():
                             p["cost"] += cost
                 if ep and ep >= hour_cut:
                     hourly.setdefault(ep, {"c": 0, "x": 0})["x"] += total
+
+        if cache_dirty:
+            try:
+                _atomic_write_text(CODEX_USAGE_CACHE_FILE, json.dumps({
+                    "version": _CODEX_USAGE_CACHE_VERSION, "files": codex_cache},
+                    ensure_ascii=False, separators=(",", ":")))
+            except OSError:
+                pass
 
         top = sorted(projects.items(), key=lambda kv: -kv[1]["tokens"])[:6]
         projects_7d = [{"cwd": cwd, "name": Path(cwd).name or cwd,
@@ -3004,14 +3309,15 @@ def api_data(body):
             ct = sum(sum(v) for v in (u["claude_daily"].get(d) or {}).values())
             rows.append(f"{d},{ct},{u['codex_daily'].get(d, 0)},"
                         f"{u['cost_daily'].get(d, 0)}")
-        out.write_text("\n".join(rows) + "\n")
+        _atomic_write_text(out, "\n".join(rows) + "\n")
         subprocess.run(["open", "-R", str(out)], timeout=10)   # Finder 中显示
         return {"ok": True, "path": str(out)}
     if act == "clear_events":
         with _events_lock:
             _events.clear()
         try:
-            EVENTS_FILE.write_text("")
+            with _events_file_lock:
+                _atomic_write_text(EVENTS_FILE, "")
         except OSError:
             pass
         return {"ok": True}
@@ -3096,6 +3402,13 @@ def api_resume(body):
 
 # ----------------------------------------------------------------- HTTP 层
 
+_LOCAL_HTTP_HOSTS = {f"127.0.0.1:{PORT}", f"localhost:{PORT}"}
+
+
+def _local_http_host(headers):
+    """Only the loopback origin may address daemon APIs (DNS-rebinding barrier)."""
+    return headers.get("Host", "").strip().lower() in _LOCAL_HTTP_HOSTS
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "agentdeck/1.0"
 
@@ -3113,6 +3426,8 @@ class Handler(BaseHTTPRequestHandler):
         from urllib.parse import urlparse, parse_qs
         parsed = urlparse(self.path)
         path, query = parsed.path, parse_qs(parsed.query)
+        if path.startswith("/api/") and not _local_http_host(self.headers):
+            return self._send(403, {"error": "forbidden"})
         try:
             if path == "/api/health":
                 self._send(200, {"ok": True, "pid": os.getpid(),
@@ -3121,12 +3436,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, api_quota(
                     force=query.get("force", ["0"])[0] in ("1", "true")))
             elif path == "/api/diag":
-                # 含凭据指纹 + 本机路径，比其他 GET 敏感：加 Host 校验封 DNS rebinding
-                if self.headers.get("Host", "") not in (
-                        f"127.0.0.1:{PORT}", f"localhost:{PORT}"):
-                    self._send(403, {"error": "forbidden"})
-                else:
-                    self._send(200, api_diag())
+                self._send(200, api_diag())
             elif path == "/api/sessions":
                 self._send(200, api_sessions(query.get("q", [""])[0]))
             elif path == "/api/usage":
@@ -3173,14 +3483,12 @@ class Handler(BaseHTTPRequestHandler):
             .split(";", 1)[0].strip().lower()
         if ctype != "application/json":
             return False
-        allowed = {f"127.0.0.1:{PORT}", f"localhost:{PORT}"}
         origin = self.headers.get("Origin", "")
         if origin:
             p = urlparse(origin)
-            if p.scheme != "http" or p.netloc not in allowed:
+            if p.scheme != "http" or p.netloc.lower() not in _LOCAL_HTTP_HOSTS:
                 return False
-        host = self.headers.get("Host", "")
-        return host in allowed
+        return _local_http_host(self.headers)
 
     def do_POST(self):
         if not self._csrf_ok():

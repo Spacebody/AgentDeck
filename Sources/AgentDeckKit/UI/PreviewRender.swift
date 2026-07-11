@@ -56,8 +56,11 @@ public enum PreviewRender {
 
     /// 整壳（顶栏 + 更新横幅 + 双 tab + 概览）。验证 #4+#10 组装。
     public static func rootPNG(scale: CGFloat = 2) -> Data? {
-        png(AgentDeckRootView(previewStore: mockStore(), version: "1.26.0")
-            .frame(width: 420, height: 1040), scale: scale)
+        // mock 使用 120% 字体；真实窗口也会同步放大，预览必须匹配外框尺寸，
+        // 否则 ScaledContainer 会被固定 420pt 画布裁掉左右边缘。
+        let fontScale: CGFloat = 1.2
+        return png(AgentDeckRootView(previewStore: mockStore(), version: "1.26.0")
+            .frame(width: 420 * fontScale, height: 1040 * fontScale), scale: scale)
     }
 
     /// 小组件整壳（store 驱动）。

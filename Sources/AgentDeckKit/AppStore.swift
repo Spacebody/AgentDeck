@@ -57,6 +57,8 @@ public final class AppStore: ObservableObject {
     private let api = APIClient.shared
     private var pollTask: Task<Void, Never>?
     private var searchTask: Task<Void, Never>?
+    private var pendingSettingValues: [String: SettingValue] = [:]
+    private var settingsSaveTask: Task<Void, Never>?
 
     private var refreshInterval: Double { Double(max(5, settings["refresh_interval"]?.intVal ?? 30)) }
 
@@ -96,16 +98,19 @@ public final class AppStore: ObservableObject {
         async let sessionsR: SessionsResponse? = needSessions ? (try? await api.get("/api/sessions")) : nil
         async let updateR:   UpdateInfo?       = try? await api.get("/api/update")
 
-        // 本地快接口先落地渲染（概览卡/会话即时出来），出站慢接口(quota/update)随后补上。
-        if let u = await usageR { usage = u }
-        if let a = await activeR { active = a.active }
-        if let e = await eventsR {
+        // 本地快接口合成一批后同步落地，ObservableObjectPublisher 可在同一主线程周期
+        // 合并视图失效；出站较慢的 quota/update 再作为第二批补上。
+        let (u, a, e, s) = await (usageR, activeR, eventsR, sessionsR)
+        if let u { usage = u }
+        if let a { active = a.active }
+        if let e {
             let cutoff = Date().timeIntervalSince1970 - 86400
             done = e.events.filter { $0.ts > cutoff }
         }
-        if needSessions, let s = await sessionsR { sessions = s.sessions }
-        if let q = await quotaR { quota = q; online = true } else { online = false }
-        if let up = await updateR { update = up }
+        if needSessions, let s { sessions = s.sessions }
+        let (q, up) = await (quotaR, updateR)
+        if let q { quota = q; online = true } else { online = false }
+        if let up { update = up }
     }
 
     // MARK: 设置
@@ -137,29 +142,90 @@ public final class AppStore: ObservableObject {
 
     func setSetting(_ key: String, _ value: SettingValue) {
         settings[key] = value
+        pendingSettingValues[key] = value
+        normalizeNotificationThresholds(changed: key)
         applyCustomColors()
         if key == "language" { I18N.locale = I18N.resolve(value.stringVal) }
         onSettingsChanged?()   // 即时刷新菜单栏（语言/常显用量/告警阈值等）
-        Task {
-            var body: [String: Any] = [:]
-            switch value {
-            case .bool(let b): body[key] = b
-            case .int(let i): body[key] = i
-            case .double(let d): body[key] = d
-            case .string(let s): body[key] = s
-            }
-            _ = try? await api.postJSON("/api/settings", body: body)
-        }
+        scheduleSettingsSave()
     }
 
     /// 恢复默认配色：单请求清两色（避免两次 setSetting 竞态），后端回填空串=用默认。
     func resetColors() {
         settings["color_claude"] = .string("")
         settings["color_codex"] = .string("")
+        pendingSettingValues["color_claude"] = .string("")
+        pendingSettingValues["color_codex"] = .string("")
         applyCustomColors()
-        Task {
-            _ = try? await api.postJSON("/api/settings", body: ["color_claude": "", "color_codex": ""])
-            await loadSettings()
+        onSettingsChanged?()
+        scheduleSettingsSave()
+    }
+
+    private func normalizeNotificationThresholds(changed key: String) {
+        guard key == "notify_warn" || key == "notify_crit" else { return }
+        var warn = min(max(settings["notify_warn"]?.intVal ?? 80, 50), 99)
+        var crit = min(max(settings["notify_crit"]?.intVal ?? 95, 60), 100)
+        if warn >= crit {
+            if key == "notify_crit" { warn = max(50, crit - 1) }
+            else { crit = min(100, warn + 1) }
+        }
+        for (settingKey, normalized) in [("notify_warn", warn), ("notify_crit", crit)] {
+            let value = SettingValue.int(normalized)
+            if settings[settingKey] != value {
+                settings[settingKey] = value
+                pendingSettingValues[settingKey] = value
+            }
+        }
+    }
+
+    private func scheduleSettingsSave() {
+        guard settingsSaveTask == nil else { return }
+        settingsSaveTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 100_000_000)
+            guard let self else { return }
+            if Task.isCancelled {
+                self.settingsSaveTask = nil
+                return
+            }
+            var consecutiveFailures = 0
+            while !self.pendingSettingValues.isEmpty {
+                let snapshot = self.pendingSettingValues
+                self.pendingSettingValues.removeAll()
+                var body: [String: Any] = [:]
+                for (key, value) in snapshot {
+                    switch value {
+                    case .bool(let b): body[key] = b
+                    case .int(let i): body[key] = i
+                    case .double(let d): body[key] = d
+                    case .string(let s): body[key] = s
+                    }
+                }
+                do {
+                    _ = try await self.api.postJSON("/api/settings", body: body)
+                    consecutiveFailures = 0
+                } catch {
+                    // 不覆盖失败期间产生的更新值；旧批次只补回仍无更新的键。
+                    for (key, value) in snapshot where self.pendingSettingValues[key] == nil {
+                        self.pendingSettingValues[key] = value
+                    }
+                    consecutiveFailures += 1
+                    if consecutiveFailures < 3 {
+                        try? await Task.sleep(nanoseconds: 500_000_000)
+                        continue
+                    }
+                    let stillPending = self.pendingSettingValues
+                    await self.loadSettings()
+                    for (key, value) in stillPending { self.settings[key] = value }
+                    self.applyCustomColors()
+                    if let language = stillPending["language"]?.stringVal {
+                        I18N.locale = I18N.resolve(language)
+                    }
+                    self.onSettingsChanged?()
+                    self.settingsSaveTask = nil
+                    return
+                }
+            }
+            self.settingsSaveTask = nil
         }
     }
 
@@ -239,14 +305,33 @@ public final class AppStore: ObservableObject {
     }
 
     func pollUpdateInstall() async {
-        for _ in 0..<240 {
-            guard let raw = try? await api.getJSON("/api/update/install") else { return }
+        var transientFailures = 0
+        for _ in 0..<1200 {
+            guard let raw = try? await api.getJSON("/api/update/install") else {
+                transientFailures += 1
+                if transientFailures >= 10 {
+                    let current = updateInstall
+                    updateInstall = UpdateInstallStatus(
+                        ok: false, running: false, id: current?.id, stage: "error",
+                        progress: current?.progress, version: current?.version,
+                        error: "Lost connection to update service", message: "error")
+                    return
+                }
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                continue
+            }
+            transientFailures = 0
             let st = Self.updateInstallStatus(raw)
             updateInstall = st
             if st.running != true { return }
             if st.stage == "installing" { return }
             try? await Task.sleep(nanoseconds: 500_000_000)
         }
+        let current = updateInstall
+        updateInstall = UpdateInstallStatus(
+            ok: false, running: false, id: current?.id, stage: "error",
+            progress: current?.progress, version: current?.version,
+            error: "Update timed out", message: "error")
     }
 
     private static func updateInstallStatus(_ raw: [String: Any]) -> UpdateInstallStatus {

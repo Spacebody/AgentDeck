@@ -8,7 +8,7 @@ enum InfoKind: Equatable { case today; case usage(UsageMode) }
 
 // MARK: - 主内容自然高度（驱动面板高度自适应，消除底部空隙）
 private struct ContentHeightKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
+    static let defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
 }
 

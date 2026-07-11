@@ -15,7 +15,7 @@ BUNDLE_ID="com.agentdeck.app"
 MIN_MACOS="13.0"   # 部署目标：不显式指定时 swiftc 会按构建机系统版本打 minos，
                    # 在更低系统上直接拒绝启动（实测 macOS 26 上构建会要求 26）。
 
-# ── 签名 / 公证（可选，仅 dmg 分发用）──────────────────────────────────────
+# ── 签名 / 公证（本地 install 可回退 ad-hoc；dmg 分发必须完整通过）──────────
 # SIGN_ID：Developer ID Application 证书名；不设则自动探测本机第一张。缺证书时
 #   回退 ad-hoc 签名（本机可跑，但他人下载会被 Gatekeeper 拦）。
 # NOTARY_PROFILE：notarytool 钥匙串凭证 profile 名，一次性配好后 dmg 目标自动公证：
@@ -39,27 +39,26 @@ sign_app() {
   fi
 }
 
-# 公证并装订票据（仅对已签名的 DMG 调用；Apple 公证 DMG 时会一并覆盖内部 .app）。
-# 缺证书或未配 profile 时跳过；--wait 因网络中断时不掐断构建（提交多半已在 Apple 端
-# 继续处理，DMG 已生成只是未装订），打印补救步骤后照常返回。
+# 公证并装订票据（仅对 DMG 调用；Apple 公证 DMG 时会一并覆盖内部 .app）。
+# 分发产物必须 fail closed：自动更新器会做 Gatekeeper assessment，未公证 DMG 不可发布。
 notarize() {
   local target="$1"
   if [ -z "$SIGN_ID" ]; then
-    echo "  ⚠️ 无 Developer ID 证书，跳过公证: $(basename "$target")"; return 0
+    echo "✗ DMG 分发需要 Developer ID Application 证书" >&2; return 1
   fi
   if ! xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" >/dev/null 2>&1; then
-    echo "  ⚠️ 未配置 notarytool 凭证 profile「$NOTARY_PROFILE」，跳过公证"
+    echo "✗ 未配置 notarytool 凭证 profile「$NOTARY_PROFILE」" >&2
     echo "     一次性配置: xcrun notarytool store-credentials $NOTARY_PROFILE \\"
     echo "                   --apple-id <AppleID> --team-id <TeamID> --password <App专用密码>"
-    return 0
+    return 1
   fi
   echo "▸ 提交公证（--wait，可能数分钟）: $(basename "$target")"
   if ! xcrun notarytool submit "$target" --keychain-profile "$NOTARY_PROFILE" --wait; then
-    echo "  ⚠️ 公证未在本地等到结果（多为网络中断）。DMG 已签名生成但未装订。"
-    echo "     提交可能仍在 Apple 端处理；确认 Accepted 后手动装订即可，无需重新构建："
+    echo "✗ 公证未确认 Accepted，拒绝把未验证 DMG 当作发布产物" >&2
+    echo "     若提交仍在 Apple 端处理，确认 Accepted 后手动装订："
     echo "       xcrun notarytool history --keychain-profile $NOTARY_PROFILE   # 查最近提交状态"
     echo "       xcrun stapler staple \"$target\""
-    return 0
+    return 1
   fi
   echo "▸ 装订票据（stapler）: $(basename "$target")"
   xcrun stapler staple "$target"
@@ -77,14 +76,16 @@ build() {
   local ARCHS=(--arch arm64 --arch x86_64)
   # --package-path 锁定仓库根：从任意目录调用 build.sh 也对本包构建（不依赖调用方 cwd）。
   local PROD=(--product AgentDeck --package-path "$ROOT")
-  if ! swift build -c release "${PROD[@]}" "${ARCHS[@]}" 2>"$DIST/.swiftbuild.err"; then
+  # 发布构建使用自己的 scratch，避免仓库搬家后通用 .build 仍引用旧 checkout 绝对路径。
+  local SPM=(--scratch-path "$DIST/.swiftpm")
+  if ! swift build -c release "${PROD[@]}" "${ARCHS[@]}" "${SPM[@]}" 2>"$DIST/.swiftbuild.err"; then
     echo "  ⚠️ x86_64 交叉构建失败，回退 arm64-only（仍适配 ${MIN_MACOS}+ 的 Apple Silicon）"
     cat "$DIST/.swiftbuild.err" | tail -5
     ARCHS=(--arch arm64)
-    swift build -c release "${PROD[@]}" "${ARCHS[@]}"
+    swift build -c release "${PROD[@]}" "${ARCHS[@]}" "${SPM[@]}"
   fi
   rm -f "$DIST/.swiftbuild.err"
-  local BIN; BIN="$(swift build -c release "${PROD[@]}" "${ARCHS[@]}" --show-bin-path)"
+  local BIN; BIN="$(swift build -c release "${PROD[@]}" "${ARCHS[@]}" "${SPM[@]}" --show-bin-path)"
   cp "$BIN/AgentDeck" "$APP/Contents/MacOS/AgentDeck"
 
   # AgentDeckKit 资源包（Claude/Codex 官方品牌字形）：Bundle.module 需在 .app 内找到它，

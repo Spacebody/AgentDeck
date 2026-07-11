@@ -139,7 +139,7 @@ struct WindowRow: View {
 // MARK: - 多账号 carousel（对应 renderQuotaTool）：单账号→单卡；多账号→横向翻页 + 圆点。
 // macOS 13 无 scrollTargetBehavior，手写 offset + 拖拽翻页（宽度经 PreferenceKey 量取）。
 private struct CarouselWidthKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
+    static let defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
 }
 
@@ -157,16 +157,18 @@ struct QuotaCarousel: View {
         if accounts.count <= 1 {
             QuotaCardView(brand: brand, node: accounts.first, compact: compact, fillHeight: fillHeight)
         } else {
+            let safePage = min(max(page, 0), accounts.count - 1)
             VStack(spacing: 8) {
-                HStack(spacing: 0) {
-                    ForEach(Array(accounts.enumerated()), id: \.offset) { _, node in
+                ZStack(alignment: .topLeading) {
+                    ForEach(accounts) { node in
+                        let index = accounts.firstIndex { $0.id == node.id } ?? 0
                         QuotaCardView(brand: brand, node: node, accountLabel: node.account,
                                       compact: compact, fillHeight: fillHeight)
-                            .frame(width: width > 0 ? width : nil)
+                            .opacity(index == safePage ? 1 : 0)
+                            .offset(x: index == safePage ? dragX : 0)
+                            .allowsHitTesting(false)
                     }
                 }
-                .frame(width: width > 0 ? width : nil, alignment: .leading)
-                .offset(x: -CGFloat(page) * width + dragX)
                 .clipped()
                 .contentShape(Rectangle())
                 .gesture(
@@ -174,24 +176,32 @@ struct QuotaCarousel: View {
                         .updating($dragX) { v, s, _ in s = v.translation.width }
                         .onEnded { v in
                             let t = max(40, width * 0.2)
-                            if v.translation.width < -t, page < accounts.count - 1 { page += 1 }
-                            else if v.translation.width > t, page > 0 { page -= 1 }
+                            withAnimation(.spring(response: 0.35, dampingFraction: 0.86)) {
+                                if v.translation.width < -t, safePage < accounts.count - 1 {
+                                    page = safePage + 1
+                                } else if v.translation.width > t, safePage > 0 {
+                                    page = safePage - 1
+                                }
+                            }
                         })
-                .animation(.spring(response: 0.35, dampingFraction: 0.86), value: page)
-                .animation(.interactiveSpring(), value: dragX)
                 dots
             }
             .background(GeometryReader { p in
                 Color.clear.preference(key: CarouselWidthKey.self, value: p.size.width)
             })
             .onPreferenceChange(CarouselWidthKey.self) { width = $0 }
+            .onChange(of: accounts.map(\.id)) { _ in
+                page = min(page, max(0, accounts.count - 1))
+            }
         }
     }
 
     private var dots: some View {
         HStack(spacing: 5) {
             ForEach(accounts.indices, id: \.self) { i in
-                Button { page = i } label: {
+                Button {
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) { page = i }
+                } label: {
                     Capsule()
                         .fill(i == page ? brand.accent : Color.white.opacity(0.22))
                         .frame(width: i == page ? 15 : 6, height: 6)

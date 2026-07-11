@@ -1,5 +1,5 @@
 #!/bin/bash
-# CSRF 屏障回归测试：对运行中的 agentdeckd (127.0.0.1:7777) 跑攻击/合法矩阵
+# 本机 API 边界回归测试：对运行中的 agentdeckd 跑 DNS rebinding / CSRF 攻击与合法矩阵
 # 用法: ./scripts/test-csrf.sh   （全部通过输出 PASS，任一失败退出码 1）
 set -u
 BASE=http://127.0.0.1:7777
@@ -12,7 +12,7 @@ chk() {  # chk <期望码> <描述> <curl 参数...>
   if [ "$got" = "$want" ]; then
     echo "  ok   [$got] $desc"
   else
-    echo "  FAIL [$got≠$want] $desc"; fail=1
+    echo "  FAIL [${got} != ${want}] $desc"; fail=1
   fi
 }
 
@@ -25,8 +25,11 @@ chk 403 "外域 Origin"                -X POST "$BASE/api/settings" -H 'Content-
 chk 403 "Origin 前缀绕过"            -X POST "$BASE/api/settings" -H 'Content-Type: application/json' -H 'Origin: http://127.0.0.1:7777.evil.com' -d '{}'
 chk 403 "Origin scheme 混淆"         -X POST "$BASE/api/settings" -H 'Content-Type: application/json' -H 'Origin: https://127.0.0.1:7777' -d '{}'
 chk 403 "DNS rebinding Host"         -X POST "$BASE/api/settings" -H 'Content-Type: application/json' -H 'Host: rebind.evil.com' -d '{}'
+chk 403 "GET DNS rebinding Host"     "$BASE/api/sessions" -H 'Host: rebind.evil.com'
+chk 403 "GET Host 前缀绕过"         "$BASE/api/usage" -H 'Host: 127.0.0.1:7777.evil.com'
 
 echo "合法调用（应 200）:"
+chk 200 "本机 GET"                   "$BASE/api/health"
 chk 200 "标准 JSON"                  -X POST "$BASE/api/settings" -H 'Content-Type: application/json' -d '{}'
 chk 200 "大小写+charset 参数"        -X POST "$BASE/api/settings" -H 'Content-Type: Application/JSON; charset=utf-8' -d '{}'
 chk 200 "同源 Origin"                -X POST "$BASE/api/settings" -H 'Content-Type: application/json' -H 'Origin: http://127.0.0.1:7777' -d '{}'
