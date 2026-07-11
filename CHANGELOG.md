@@ -10,6 +10,7 @@
 
 ## 历史
 
+- **2.1.3** 完成一轮安全、数据准确性与动效性能加固：自动更新只接受 AgentDeck 官方 GitHub Release，严格校验版本、包体上限、Bundle ID、Developer ID Team ID、签名与 Gatekeeper，安装失败自动回滚；分发时 App 与 DMG 容器均做 Developer ID 签名，公证失败即终止。daemon 所有关键状态改为原子写入，GET/POST API 统一 Host 防护，设置保存串行合并并带重试，避免并发覆盖。用量统计改为 Claude/Codex 增量缓存，Codex 按事件差量归属小时并排除子 agent 重放，显著降低首次后的扫描耗时；活跃会话按进程实际打开的 rollout 与 cwd 判断，过滤子 agent/guardian，修复状态错漏。完成事件增加 daemon 启动标识，通知安装器可升级旧 wrapper，并修正 Computer Use notify 链式配置的递归风险；多账号额度告警按账号独立去重。额度轮播改为稳定叠层切换，极光粒子身份固定，减少布局溢出与无效重绘；补充 14 项后端回归测试、GET DNS rebinding/CSRF 用例，并修复大字体预览裁切。
 - **2.1.2** 修 Codex CLI 会话工作状态延迟与误判：长时间 `codex resume` 会继续写入文件名较旧的 rollout，旧逻辑只扫按文件名最新的少量 rollout，导致仍在输出的会话可能被判成「空闲」。现对每个正在运行的 Codex CLI 进程读取其当前打开的 `rollout-*.jsonl` 的真实写入时间，并限定在 Codex sessions 目录下只取 mtime，不读内容；仍在写入的旧 rollout 可即时判为「工作中」。同时 `/api/active` 缓存从 10 秒降到 3 秒，保留 30 秒 busy/idle 写入阈值，降低面板状态刷新延迟并避免短暂停顿时闪烁。
 - **2.1.1** 修会话完成弹丸归属重复：Codex 会话结束时不再被旧 Stop hook 误识别成 Claude 完成通知，从而避免同一会话先弹 Claude、再弹 Codex 的双通知。daemon 现在只接受带可信 Claude transcript 的 Claude Stop 事件，并校验 transcript 路径位于 Claude 数据源下、文件名匹配 session id、内容包含同 session/cwd 的用户消息；Codex 继续走 notify 事件源。另补充清理历史 AgentDeck Codex Stop wrapper 的多种旧路径写法，并保留用户自定义 hook。
 - **2.1.0** 新版更新横幅升级为本地自动下载安装：点击「下载并安装」后 daemon 直接从受控 GitHub Release DMG 下载到临时目录，面板显示下载/准备/安装进度条；下载包挂载后校验 bundle id 与 Developer ID Team ID，安装前备份旧版 App，失败自动恢复旧版并清理临时 DMG/挂载/staging，成功替换 `/Applications/AgentDeck.app` 后自动重启并移除安装包。并包含 2.0.3 后的完成弹丸去重加固、Codex notify 旧脚本迁移去重、额度告警 warn/crit/reset 配色与品牌图标修正，以及公开文档同步至 SwiftPM + AppKit/SwiftUI 架构。

@@ -52,6 +52,9 @@ notarize() {
     echo "                   --apple-id <AppleID> --team-id <TeamID> --password <App专用密码>"
     return 1
   fi
+  echo "▸ Developer ID 签名 DMG 容器: $SIGN_ID"
+  codesign --force --timestamp --sign "$SIGN_ID" "$target"
+  codesign --verify --strict --verbose=2 "$target"
   echo "▸ 提交公证（--wait，可能数分钟）: $(basename "$target")"
   if ! xcrun notarytool submit "$target" --keychain-profile "$NOTARY_PROFILE" --wait; then
     echo "✗ 公证未确认 Accepted，拒绝把未验证 DMG 当作发布产物" >&2
@@ -63,6 +66,8 @@ notarize() {
   echo "▸ 装订票据（stapler）: $(basename "$target")"
   xcrun stapler staple "$target"
   xcrun stapler validate "$target"
+  echo "▸ Gatekeeper 验证: $(basename "$target")"
+  spctl --assess --type open --context context:primary-signature --verbose=2 "$target"
 }
 
 build() {
@@ -196,7 +201,7 @@ EOF
     hdiutil convert "$RW" -format UDZO -o "$FINAL" >/dev/null
     rm -f "$RW"
     rm -rf "$STAGE"
-    notarize "$FINAL"   # 公证+装订 DMG，用户下载首次打开不再被 Gatekeeper 拦
+    notarize "$FINAL"   # 签名+公证+装订+Gatekeeper 验证，任一步失败都拒绝发布
     echo "✓ $FINAL"
     ;;
   uninstall)
