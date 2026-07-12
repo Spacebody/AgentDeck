@@ -146,6 +146,207 @@ class ClaudeUsageTests(unittest.TestCase):
             self.assertEqual(usage["2026-07-10T11"]["claude-sonnet-4-6"][0], 20)
 
 
+class SessionIndexTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.db = self.root / "session-index.sqlite3"
+        self.pins = self.root / "pins.json"
+        self.claude_sources = []
+        self.codex_sources = []
+        self.patches = [
+            mock.patch.object(daemon, "SESSION_INDEX_FILE", self.db),
+            mock.patch.object(daemon, "PINS_FILE", self.pins),
+            mock.patch.object(daemon, "claude_sources",
+                              side_effect=lambda: self.claude_sources),
+            mock.patch.object(daemon, "codex_sources",
+                              side_effect=lambda: self.codex_sources),
+        ]
+        for patcher in self.patches:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        daemon._session_schema_paths.discard(os.path.realpath(self.db))
+        daemon._rollout_meta_cache.clear()
+        daemon._session_state(indexing=False, indexed_at=0.0, total_files=0,
+                              processed_files=0, error="")
+
+    def source(self, name="default"):
+        base = self.root / name
+        (base / "sessions" / "2026" / "07" / "12").mkdir(parents=True)
+        source = {"id": name, "label": name.title(), "path": base}
+        self.codex_sources.append(source)
+        return base
+
+    @staticmethod
+    def session_id(index):
+        return f"00000000-0000-0000-0000-{index:012d}"
+
+    def write_codex(self, base, index, title, sid=None, mtime=None, source="cli"):
+        sid = sid or self.session_id(index)
+        folder = base / "sessions" / "2026" / "07" / "12"
+        path = folder / f"rollout-2026-07-12T00-{index // 60:02d}-{index % 60:02d}-{sid}.jsonl"
+        _jsonl(path, [
+            {"type": "session_meta", "payload": {
+                "id": sid, "source": source, "cwd": f"/work/project-{index}"}},
+            {"type": "event_msg", "payload": {
+                "type": "user_message", "message": title}},
+        ])
+        stamp = float(index + 1 if mtime is None else mtime)
+        os.utime(path, (stamp, stamp))
+        return path
+
+    def test_search_finds_session_older_than_legacy_240_file_window(self):
+        base = self.source()
+        for index in range(260):
+            title = "unique historical needle" if index == 0 else f"session {index}"
+            self.write_codex(base, index, title)
+        daemon._session_index_scan()
+        result = daemon._query_session_index("historical needle", limit=10)
+        self.assertEqual(result["total"], 1)
+        self.assertEqual(result["sessions"][0]["id"], self.session_id(0))
+
+    def test_unchanged_and_growing_files_are_not_reparsed(self):
+        base = self.source()
+        paths = [self.write_codex(base, i, f"session {i}") for i in range(3)]
+        original = daemon._session_file_info
+        with mock.patch.object(daemon, "_session_file_info", wraps=original) as parse:
+            daemon._session_index_scan()
+            self.assertEqual(parse.call_count, 3)
+            daemon._session_index_scan()
+            self.assertEqual(parse.call_count, 3)
+            with paths[0].open("a") as handle:
+                handle.write(json.dumps({"type": "event_msg", "payload": {
+                    "type": "agent_message", "message": "later"}}) + "\n")
+            daemon._session_index_scan()
+            self.assertEqual(parse.call_count, 3)
+
+    def test_keyset_pagination_returns_every_session_once(self):
+        base = self.source()
+        for index in range(75):
+            self.write_codex(base, index, f"session {index}")
+        daemon._session_index_scan()
+        cursor, seen = "", []
+        while True:
+            page = daemon._query_session_index(limit=17, cursor=cursor)
+            seen.extend((item["tool"], item["account_id"], item["id"])
+                        for item in page["sessions"])
+            if not page["has_more"]:
+                break
+            cursor = page["next_cursor"]
+        self.assertEqual(len(seen), 75)
+        self.assertEqual(len(set(seen)), 75)
+
+    def test_same_session_id_isolated_by_account_for_pin_and_preview(self):
+        default = self.source("default")
+        work = self.source("work")
+        sid = self.session_id(1)
+        self.write_codex(default, 1, "default account message", sid=sid, mtime=10)
+        self.write_codex(work, 2, "work account message", sid=sid, mtime=20)
+        daemon._session_index_scan()
+        result = daemon._query_session_index(limit=10)
+        self.assertEqual(result["total"], 2)
+
+        work_item = next(item for item in result["sessions"] if item["account_id"] == "work")
+        daemon.api_pin({"pinned": True, "session": work_item})
+        pinned = daemon._query_session_index(limit=10)["sessions"]
+        self.assertTrue(next(item for item in pinned if item["account_id"] == "work")["pinned"])
+        self.assertFalse(next(item for item in pinned if item["account_id"] == "default")["pinned"])
+        self.assertIn(daemon._pin_key("codex", "work", sid), json.loads(self.pins.read_text()))
+
+        preview = daemon.api_preview({"tool": ["codex"], "id": [sid],
+                                      "account_id": ["default"]})
+        self.assertEqual(preview["messages"][-1]["text"], "default account message")
+        work_preview = daemon.api_preview({"tool": ["codex"], "id": [sid],
+                                           "account_id": ["work"]})
+        self.assertEqual(work_preview["messages"][-1]["text"], "work account message")
+
+    def test_corrupt_derived_database_is_recreated(self):
+        self.db.write_bytes(b"not a sqlite database")
+        daemon._session_schema_paths.discard(os.path.realpath(self.db))
+        conn = daemon._session_db_connect()
+        try:
+            tables = {row[0] for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+        finally:
+            conn.close()
+        self.assertIn("session_index", tables)
+        self.assertTrue(daemon._session_status()["indexing"])
+
+    def test_legacy_pin_key_migrates_without_losing_pin(self):
+        base = self.source("default")
+        sid = self.session_id(7)
+        self.write_codex(base, 7, "legacy pinned session", sid=sid)
+        self.pins.write_text(json.dumps({sid: {
+            "tool": "codex", "id": sid, "title": "legacy pinned session",
+            "cwd": "/work/project-7", "mtime": 8,
+        }}))
+        daemon._session_index_scan()
+        result = daemon._query_session_index(limit=10)
+        self.assertTrue(result["sessions"][0]["pinned"])
+        pins = json.loads(self.pins.read_text())
+        self.assertIn(daemon._pin_key("codex", "default", sid), pins)
+        self.assertNotIn(sid, pins)
+
+    def test_subagent_rollout_is_not_indexed(self):
+        base = self.source()
+        self.write_codex(base, 1, "top level")
+        self.write_codex(base, 2, "hidden child", source={"subagent": {"other": "guardian"}})
+        daemon._session_index_scan()
+        result = daemon._query_session_index(limit=10)
+        self.assertEqual(result["total"], 1)
+        self.assertEqual(result["sessions"][0]["title"], "top level")
+
+    def test_non_object_json_lines_do_not_abort_index_or_preview(self):
+        base = self.source()
+        sid = self.session_id(9)
+        path = (base / "sessions" / "2026" / "07" / "12"
+                / f"rollout-2026-07-12T00-00-09-{sid}.jsonl")
+        _jsonl(path, [
+            [],
+            {"type": "session_meta", "payload": []},
+            {"type": "event_msg", "payload": {
+                "type": "user_message", "message": []}},
+            {"type": "session_meta", "payload": {
+                "id": sid, "source": "cli", "cwd": "/work/resilient"}},
+            {"type": "event_msg", "payload": {
+                "type": "user_message", "message": "valid after malformed rows"}},
+        ])
+        daemon._session_index_scan()
+        result = daemon._query_session_index("malformed rows", limit=10)
+        self.assertEqual(result["total"], 1)
+        preview = daemon.api_preview({"tool": ["codex"], "id": [sid],
+                                      "account_id": ["default"]})
+        self.assertEqual(preview["messages"][-1]["text"],
+                         "valid after malformed rows")
+
+    def test_duplicate_session_in_one_account_keeps_newest_copy(self):
+        base = self.source()
+        sid = self.session_id(9)
+        newest = self.write_codex(base, 1, "newest copy", sid=sid, mtime=20)
+        self.write_codex(base, 2, "older copy", sid=sid, mtime=10)
+        daemon._session_index_scan()
+        result = daemon._query_session_index(limit=10)
+        self.assertEqual(result["total"], 1)
+        self.assertEqual(result["sessions"][0]["title"], "newest copy")
+        newest.unlink()
+        daemon._session_index_scan()
+        fallback = daemon._query_session_index(limit=10)
+        self.assertEqual(fallback["total"], 1)
+        self.assertEqual(fallback["sessions"][0]["title"], "older copy")
+
+    def test_malformed_cursor_falls_back_to_first_page(self):
+        base = self.source()
+        self.write_codex(base, 1, "first")
+        daemon._session_index_scan()
+        malformed = daemon.base64.urlsafe_b64encode(json.dumps({
+            "v": 1, "scope": daemon._cursor_scope("", "all")
+        }).encode()).decode().rstrip("=")
+        result = daemon._query_session_index(limit=10, cursor=malformed)
+        self.assertEqual(result["total"], 1)
+        self.assertEqual(len(result["sessions"]), 1)
+
+
 class ActiveSessionTests(unittest.TestCase):
     def test_open_subagent_rollout_cannot_replace_parent_identity(self):
         with tempfile.TemporaryDirectory() as td:
@@ -171,6 +372,36 @@ class ActiveSessionTests(unittest.TestCase):
                 info = daemon._pid_codex_rollout_info(123)
             self.assertEqual(info["id"], parent_id)
             self.assertEqual(info["cwd"], "/parent")
+
+
+class ResumeCommandTests(unittest.TestCase):
+    def test_account_scoped_resume_pins_the_matching_config_directory(self):
+        sid = "11111111-1111-1111-1111-111111111111"
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = root / "codex-work"
+            source.mkdir()
+            with mock.patch.object(daemon, "codex_sources", return_value=[{
+                    "id": "work", "label": "Work", "path": source}]):
+                result = daemon.api_resume({
+                    "tool": "codex", "id": sid, "cwd": td,
+                    "account_id": "work", "copy_only": True,
+                })
+            self.assertTrue(result["ok"])
+            self.assertIn(f"CODEX_HOME={daemon._shell_quote(str(source))}",
+                          result["command"])
+            self.assertIn(f"codex resume {daemon._shell_quote(sid)}",
+                          result["command"])
+
+    def test_unknown_resume_account_is_rejected(self):
+        sid = "11111111-1111-1111-1111-111111111111"
+        with mock.patch.object(daemon, "claude_sources", return_value=[]):
+            result = daemon.api_resume({
+                "tool": "claude", "id": sid, "account_id": "missing",
+                "copy_only": True,
+            })
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "account not found")
 
 
 class PersistenceAndUpdateTests(unittest.TestCase):

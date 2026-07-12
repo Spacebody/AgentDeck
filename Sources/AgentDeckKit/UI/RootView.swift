@@ -365,9 +365,15 @@ public struct AgentDeckRootView: View {
             // scrollable:false → 会话列表按自然高展开，由外层 ScrollView 统一滚动（避免嵌套滚动）
             SessionsView(
                 sessions: store.sessionsShown, scrollable: false,
+                query: store.sessionQuery, filter: store.sessionFilter,
+                total: store.sessionsTotal, hasMore: store.sessionsHasMore,
+                loading: store.sessionsLoading, indexing: store.sessionsIndexing,
+                loadFailed: store.sessionsLoadFailed,
                 onResume: resume, onCopy: copyCommand, onPin: pin,
                 loadPreview: { await store.preview($0) },
-                onSearch: { store.search($0) })
+                onSearch: { store.search($0) },
+                onFilter: { store.setSessionFilter($0) },
+                onLoadMore: { store.loadMoreSessions() })
         }
         .padding(.horizontal, 14).padding(.vertical, 12)
         .frame(maxWidth: .infinity, alignment: .top)
@@ -521,7 +527,10 @@ public struct AgentDeckRootView: View {
         Task {
             let r = await store.resume(s)
             if r?.ok == true, r?.copy == true {
-                copyText(r?.command ?? s.resumeCommand)
+                guard let command = r?.command else {
+                    showToast(L("session.resumeFailed")); return
+                }
+                copyText(command)
                 showToast(r?.paste == true ? L("session.openedPaste", ["app": r?.app ?? ""]) : L("session.cmdCopied"))
                 if r?.paste == true, r?.autoPaste == true { onHidePanel(); onPasteEnter() }
             } else {
@@ -530,7 +539,16 @@ public struct AgentDeckRootView: View {
             }
         }
     }
-    private func copyCommand(_ s: SessionItem) { copyText(s.resumeCommand); showToast(L("session.cmdCopied")) }
+    private func copyCommand(_ s: SessionItem) {
+        Task {
+            let r = await store.resume(s, copyOnly: true)
+            guard r?.ok == true, let command = r?.command else {
+                showToast(L("session.copyFailed")); return
+            }
+            copyText(command)
+            showToast(L("session.cmdCopied"))
+        }
+    }
     private func pin(_ s: SessionItem) {
         let wasPinned = s.pinned == true
         Task { await store.pin(s); showToast(L(wasPinned ? "session.unpinned" : "session.pinned")) }

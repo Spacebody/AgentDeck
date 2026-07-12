@@ -37,7 +37,13 @@ public final class AppStore: ObservableObject {
     @Published var settings: [String: SettingValue] = [:]
     @Published var update: UpdateInfo?
     @Published var updateInstall: UpdateInstallStatus?
-    @Published var searchResults: [SessionItem]?   // 搜索态（nil=用周期列表）
+    @Published var sessionQuery = ""
+    @Published var sessionFilter = "all"
+    @Published var sessionsTotal = 0
+    @Published var sessionsHasMore = false
+    @Published var sessionsLoading = false
+    @Published var sessionsIndexing = false
+    @Published var sessionsLoadFailed = false
     @Published var online = true                   // 后端健康（驱动顶栏 live 点）
 
     @Published var terminals: [TerminalOption] = []   // /api/terminals 已安装终端（恢复方式选项）
@@ -50,13 +56,17 @@ public final class AppStore: ObservableObject {
     var showActive: Bool { settings["show_active"]?.boolVal ?? true }
 
     // 列表按 show_claude/show_codex 过滤（daemon 不过滤这几个，对齐 v1 客户端 agentOn）。
-    var sessionsShown: [SessionItem] { (searchResults ?? sessions).filter { agentOn($0.tool) } }
+    var sessionsShown: [SessionItem] { sessions.filter { agentOn($0.tool) } }
     var activeShown: [ActiveSession] { active.filter { agentOn($0.tool) } }
     var doneShown: [DoneEvent] { done.filter { agentOn($0.tool) } }
 
     private let api = APIClient.shared
     private var pollTask: Task<Void, Never>?
     private var searchTask: Task<Void, Never>?
+    private var sessionIndexRetryTask: Task<Void, Never>?
+    private var sessionCursor: String?
+    private var sessionRequestGeneration = 0
+    private var sessionPageCount = 0
     private var pendingSettingValues: [String: SettingValue] = [:]
     private var settingsSaveTask: Task<Void, Never>?
 
@@ -75,7 +85,11 @@ public final class AppStore: ObservableObject {
             }
         }
     }
-    public func stop() { pollTask?.cancel(); pollTask = nil }
+    public func stop() {
+        pollTask?.cancel(); pollTask = nil
+        searchTask?.cancel(); searchTask = nil
+        sessionIndexRetryTask?.cancel(); sessionIndexRetryTask = nil
+    }
 
     /// 开面板时调用：只走缓存做一次「即时同步」，不强刷。
     /// 关键——菜单栏图标(main.swift)与面板读的是 daemon 同一份额度缓存（key=claude_quota/codex_quota，
@@ -90,12 +104,18 @@ public final class AppStore: ObservableObject {
     public func refresh(force: Bool = false) async {
         // 6 个接口并发拉取（旧实现串行 → 启动/手动刷新要等全部之和；quota 还出站打 Anthropic 最慢，
         // 串行时它把整屏都拖住）。APIClient 是 actor，并发 get 在各自 await 网络处挂起、互不阻塞。
-        let needSessions = searchResults == nil
+        // 只在默认列表仍处于第一页时参与周期刷新；用户已加载更多时不把长列表
+        // 突然替换回第一页。搜索由独立 generation 管理，轮询绝不覆盖搜索结果。
+        let sessionGeneration = sessionRequestGeneration
+        let needSessions = sessionQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && sessionPageCount <= 1 && !sessionsLoading
+        let sessionParams = sessionRequestParams(cursor: nil)
         async let quotaR:    QuotaResponse?    = try? await api.get("/api/quota", query: force ? ["force": "1"] : [:])
         async let usageR:    UsageResponse?    = try? await api.get("/api/usage")
         async let activeR:   ActiveResponse?   = try? await api.get("/api/active")
         async let eventsR:   EventsResponse?   = try? await api.get("/api/events", query: ["recent": "4"])
-        async let sessionsR: SessionsResponse? = needSessions ? (try? await api.get("/api/sessions")) : nil
+        async let sessionsR: SessionsResponse? = needSessions
+            ? (try? await api.get("/api/sessions", query: sessionParams)) : nil
         async let updateR:   UpdateInfo?       = try? await api.get("/api/update")
 
         // 本地快接口合成一批后同步落地，ObservableObjectPublisher 可在同一主线程周期
@@ -107,7 +127,12 @@ public final class AppStore: ObservableObject {
             let cutoff = Date().timeIntervalSince1970 - 86400
             done = e.events.filter { $0.ts > cutoff }
         }
-        if needSessions, let s { sessions = s.sessions }
+        if needSessions, let s,
+           sessionGeneration == sessionRequestGeneration,
+           sessionQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           sessionPageCount <= 1, !sessionsLoading {
+            applySessionPage(s, reset: true, generation: sessionGeneration)
+        }
         let (q, up) = await (quotaR, updateR)
         if let q { quota = q; online = true } else { online = false }
         if let up { update = up }
@@ -148,6 +173,15 @@ public final class AppStore: ObservableObject {
         if key == "language" { I18N.locale = I18N.resolve(value.stringVal) }
         onSettingsChanged?()   // 即时刷新菜单栏（语言/常显用量/告警阈值等）
         scheduleSettingsSave()
+        if key == "show_claude" || key == "show_codex" || key == "sessions_limit" {
+            sessionRequestGeneration += 1
+            let generation = sessionRequestGeneration
+            searchTask?.cancel()
+            sessionIndexRetryTask?.cancel()
+            searchTask = Task { [weak self] in
+                await self?.loadSessionPage(reset: true, generation: generation)
+            }
+        }
     }
 
     /// 恢复默认配色：单请求清两色（避免两次 setSetting 竞态），后端回填空串=用默认。
@@ -244,8 +278,11 @@ public final class AppStore: ObservableObject {
 
     // MARK: 动作
     @discardableResult
-    func resume(_ s: SessionItem) async -> ResumeResult? {
-        try? await api.post("/api/resume", body: ["tool": s.tool, "id": s.id, "cwd": s.cwd ?? ""])
+    func resume(_ s: SessionItem, copyOnly: Bool = false) async -> ResumeResult? {
+        let request = SessionResumeRequest(
+            tool: s.tool, id: s.id, cwd: s.cwd ?? "",
+            accountId: s.accountId, copyOnly: copyOnly)
+        return try? await api.post("/api/resume", body: request)
     }
 
     func pin(_ s: SessionItem) async {
@@ -255,7 +292,10 @@ public final class AppStore: ObservableObject {
             "account": s.account ?? "", "account_id": s.accountId ?? "",
         ]
         _ = try? await api.postJSON("/api/pin", body: ["pinned": !(s.pinned ?? false), "session": session])
-        if let r: SessionsResponse = try? await api.get("/api/sessions") { sessions = r.sessions }
+        sessionRequestGeneration += 1
+        let generation = sessionRequestGeneration
+        searchTask?.cancel()
+        await loadSessionPage(reset: true, generation: generation)
     }
 
     @discardableResult
@@ -265,21 +305,125 @@ public final class AppStore: ObservableObject {
     }
 
     func preview(_ s: SessionItem) async -> [PreviewMsg] {
-        let r: PreviewResponse? = try? await api.get("/api/preview", query: ["tool": s.tool, "id": s.id])
+        var query = ["tool": s.tool, "id": s.id]
+        if let accountId = s.accountId, !accountId.isEmpty { query["account_id"] = accountId }
+        let r: PreviewResponse? = try? await api.get("/api/preview", query: query)
         return r?.messages ?? []
     }
 
-    // MARK: 搜索（250ms debounce；服务端全量匹配）
+    // MARK: 会话索引 / 搜索 / 分页
     func search(_ q: String) {
+        sessionQuery = q
+        sessionRequestGeneration += 1
+        let generation = sessionRequestGeneration
         searchTask?.cancel()
-        let query = q.trimmingCharacters(in: .whitespaces)
-        if query.isEmpty { searchResults = nil; return }
+        sessionIndexRetryTask?.cancel()
+        let query = q.trimmingCharacters(in: .whitespacesAndNewlines)
+        if query.isEmpty {
+            searchTask = Task { [weak self] in
+                await self?.loadSessionPage(reset: true, generation: generation)
+            }
+            return
+        }
         searchTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 250_000_000)
             if Task.isCancelled { return }
-            if let r: SessionsResponse = try? await self?.api.get("/api/sessions", query: ["q": query]) {
-                self?.searchResults = r.sessions
+            await self?.loadSessionPage(reset: true, generation: generation)
+        }
+    }
+
+    func setSessionFilter(_ filter: String) {
+        let normalized = ["all", "claude", "codex"].contains(filter) ? filter : "all"
+        guard normalized != sessionFilter else { return }
+        sessionFilter = normalized
+        sessionRequestGeneration += 1
+        let generation = sessionRequestGeneration
+        searchTask?.cancel()
+        sessionIndexRetryTask?.cancel()
+        searchTask = Task { [weak self] in
+            await self?.loadSessionPage(reset: true, generation: generation)
+        }
+    }
+
+    func loadMoreSessions() {
+        guard sessionsHasMore, !sessionsLoading, sessionCursor != nil else { return }
+        sessionsLoading = true
+        let generation = sessionRequestGeneration
+        Task { [weak self] in
+            await self?.loadSessionPage(reset: false, generation: generation)
+        }
+    }
+
+    private func sessionRequestParams(cursor: String?) -> [String: String] {
+        var params: [String: String] = [:]
+        let query = sessionQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !query.isEmpty { params["q"] = query }
+        var effectiveTool = "all"
+        if sessionFilter != "all" {
+            effectiveTool = sessionFilter
+        } else {
+            let claude = agentOn("claude"), codex = agentOn("codex")
+            if claude != codex { effectiveTool = claude ? "claude" : "codex" }
+        }
+        if effectiveTool != "all" { params["tool"] = effectiveTool }
+        let perTool = min(100, max(5, settings["sessions_limit"]?.intVal ?? 15))
+        params["limit"] = String(perTool * (effectiveTool == "all" ? 2 : 1))
+        if let cursor, !cursor.isEmpty { params["cursor"] = cursor }
+        return params
+    }
+
+    private func loadSessionPage(reset: Bool, generation: Int) async {
+        guard generation == sessionRequestGeneration else { return }
+        if sessionFilter == "all" && !agentOn("claude") && !agentOn("codex") {
+            sessions = []; sessionsTotal = 0; sessionsHasMore = false
+            sessionsLoading = false; sessionsIndexing = false; sessionsLoadFailed = false
+            sessionCursor = nil; sessionPageCount = 1
+            return
+        }
+        sessionsLoading = true
+        sessionsLoadFailed = false
+        let cursor = reset ? nil : sessionCursor
+        do {
+            let response: SessionsResponse = try await api.get(
+                "/api/sessions", query: sessionRequestParams(cursor: cursor))
+            guard generation == sessionRequestGeneration, !Task.isCancelled else { return }
+            applySessionPage(response, reset: reset, generation: generation)
+        } catch {
+            guard generation == sessionRequestGeneration, !Task.isCancelled else { return }
+            sessionsLoading = false
+            sessionsLoadFailed = true
+        }
+    }
+
+    private func applySessionPage(_ response: SessionsResponse, reset: Bool, generation: Int) {
+        guard generation == sessionRequestGeneration else { return }
+        if reset {
+            sessions = response.sessions
+            sessionPageCount = 1
+        } else {
+            var seen = Set(sessions.map(\.rowKey))
+            for session in response.sessions where seen.insert(session.rowKey).inserted {
+                sessions.append(session)
             }
+            sessionPageCount += 1
+        }
+        sessionsTotal = response.total ?? sessions.count
+        sessionsHasMore = response.hasMore ?? false
+        sessionCursor = response.nextCursor
+        sessionsIndexing = response.indexing ?? false
+        sessionsLoading = false
+        sessionsLoadFailed = response.indexError != nil
+        scheduleSessionIndexRetry(generation: generation)
+    }
+
+    private func scheduleSessionIndexRetry(generation: Int) {
+        sessionIndexRetryTask?.cancel()
+        guard sessionsIndexing else { sessionIndexRetryTask = nil; return }
+        sessionIndexRetryTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 800_000_000)
+            guard !Task.isCancelled, let self,
+                  generation == self.sessionRequestGeneration else { return }
+            await self.loadSessionPage(reset: true, generation: generation)
         }
     }
 

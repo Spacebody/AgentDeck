@@ -4,6 +4,19 @@ import Foundation
 struct SessionsResponse: Decodable {
     let sessions: [SessionItem]
     let query: String?
+    let tool: String?
+    let total: Int?
+    let hasMore: Bool?
+    let nextCursor: String?
+    let indexing: Bool?
+    let indexedAt: Double?
+    let indexProgress: SessionIndexProgress?
+    let indexError: String?
+}
+
+struct SessionIndexProgress: Decodable {
+    let processed: Int?
+    let total: Int?
 }
 
 struct SessionItem: Decodable, Identifiable {
@@ -18,34 +31,37 @@ struct SessionItem: Decodable, Identifiable {
     let accountId: String?
     var pinned: Bool?
 
-    /// ForEach 复合键（同 id 可能跨工具）。
-    var rowKey: String { "\(tool):\(id)" }
-
-    /// 恢复命令（与前端一致）：cd "cwd" && claude --resume <id> / codex resume <id>
-    var resumeCommand: String {
-        let dir = cwd ?? "~"
-        let cmd = tool == "claude" ? "claude --resume" : "codex resume"
-        return "cd \(quoted(dir)) && \(cmd) \(id)"
-    }
-    private func quoted(_ s: String) -> String {
-        "\"" + s.replacingOccurrences(of: "\"", with: "\\\"") + "\""
-    }
+    /// ForEach / 预览 / 置顶复合键；同一会话可被复制到不同账号目录。
+    var rowKey: String { "\(tool):\(accountId ?? "default"):\(id)" }
 }
 
-// /api/preview?tool=&id= → {ok, messages:[{role, text}]}
+// /api/preview?tool=&id=&account_id= → {ok, messages:[{role, text}]}
 struct PreviewResponse: Decodable {
     let ok: Bool
     let messages: [PreviewMsg]?
 }
-struct PreviewMsg: Decodable, Identifiable {
+struct PreviewMsg: Decodable {
     let role: String   // user / assistant
     let text: String
-    var id: String { role + text.prefix(24) }
 }
 
 // /api/terminals → {terminals:[{mode, name}]}（已安装终端，恢复方式选项）
 struct TerminalsResponse: Decodable { let terminals: [TerminalOption] }
 struct TerminalOption: Decodable { let mode: String; let name: String }
+
+struct SessionResumeRequest: Encodable {
+    let tool: String
+    let id: String
+    let cwd: String
+    let accountId: String?
+    let copyOnly: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case tool, id, cwd
+        case accountId = "account_id"
+        case copyOnly = "copy_only"
+    }
+}
 
 // /api/resume 应答（仅复制 / 唤起粘贴模式）
 struct ResumeResult: Decodable {

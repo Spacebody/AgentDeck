@@ -9,12 +9,16 @@ API:
   POST /api/resume    在终端中恢复指定会话
 """
 
+import base64
+import binascii
+import concurrent.futures
 import hashlib
 import json
 import os
 import plistlib
 import re
 import shlex
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -42,6 +46,7 @@ if not DATA_DIR.exists() and _LEGACY_DATA.is_dir():
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 HISTORY_FILE = DATA_DIR / "quota_history.jsonl"
 PINS_FILE = DATA_DIR / "pins.json"
+SESSION_INDEX_FILE = DATA_DIR / "session_index.sqlite3"
 CODEX_USAGE_CACHE_FILE = DATA_DIR / "codex_usage_cache.json"
 CLAUDE_USAGE_CACHE_FILE = DATA_DIR / "claude_usage_cache.json"
 PORT = 7777
@@ -264,7 +269,6 @@ def api_settings_save(body):
                            json.dumps(cur, ensure_ascii=False, indent=1))
         _settings_cache = None   # 失效设置缓存，下次 get_settings 重读
     with _cache_lock:
-        _ttl_cache.pop("sessions", None)   # 数量类设置立即生效
         if "quota_interval" in clean:
             # 间隔变更立即生效：把现有「成功」额度缓存的到期改为 now+新间隔（调大即刻
             # 延长静默、不强制立刻重拉）。退避/降级条目(stale/error)不动，让其跑完退避，
@@ -276,6 +280,8 @@ def api_settings_save(body):
                     _ttl_cache[key] = (now + clean["quota_interval"], val)
     if "keep_awake" in clean:   # 立即生效，不阻塞响应
         threading.Thread(target=_update_keepawake, daemon=True).start()
+    if "claude_dirs" in clean or "codex_dirs" in clean:
+        _request_session_index_scan()
     return {"ok": True, "settings": _settings_response()}
 
 
@@ -1185,91 +1191,179 @@ def _clean_title(text):
     return text[:120] if text else ""
 
 
-def _claude_file_index(src_path):
-    # 磁盘索引：(mtime, path) 按时间倒序，短 TTL 缓存。
-    # 搜索时连续按键会反复进 _claude_sessions，否则每次都要 glob+对全部文件 stat
-    # （O(N) 系统调用，上万会话时成主要开销）；缓存 5s 让一串按键复用同一份索引。
-    def build():
-        entries = []
-        for p in (src_path / "projects").glob("*/*.jsonl"):
-            try:
-                entries.append((p.stat().st_mtime, p))
-            except OSError:
-                continue
-        entries.sort(key=lambda e: e[0], reverse=True)
-        return entries
-    return cached(f"fidx:claude:{src_path}", 5, build)
+_SESSION_INDEX_SCHEMA = 2
+_SESSION_INDEX_INTERVAL = 30
+_SESSION_PAGE_MAX = 200
+_session_schema_lock = threading.Lock()
+_session_schema_paths = set()
+_session_index_write_lock = threading.Lock()
+_session_index_start_lock = threading.Lock()
+_session_index_state_lock = threading.Lock()
+_session_index_wake = threading.Event()
+_session_index_started = False
+_session_index_state = {
+    "indexing": False, "indexed_at": 0.0, "total_files": 0,
+    "processed_files": 0, "error": "",
+}
 
 
-def _claude_sessions(limit=15, query=None):
-    # query 为空：取「跨全部项目按 mtime 最近 limit 条」（默认列表）。
-    # query 非空：全量磁盘搜索——目录名编码了完整 cwd，路径命中可零读直接入选；
-    # 对路径未命中的文件仅在读取预算内读首部做标题匹配，结果上限 SEARCH_CAP。
-    q = (query or "").lower()
-    SEARCH_CAP, READ_BUDGET = 60, 240
-    out = []
-    for src in claude_sources():
-        taken = reads = 0
-        for mtime, path in _claude_file_index(src["path"]):
-            if not q and taken >= limit:
-                break
-            if q and len(out) >= SEARCH_CAP:
-                break
-            if path.name.startswith("agent-"):   # subagent 旁链
-                continue
-            path_hit = bool(q) and q in path.parent.name.lower()
-            if q and not path_hit:
-                if reads >= READ_BUDGET:
+def _session_db_connect_once():
+    """每个 HTTP 线程使用独立连接；WAL 允许后台单写与前台并发读。"""
+    path = Path(SESSION_INDEX_FILE)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(path), timeout=5)
+    try:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        key = os.path.realpath(path)
+        with _session_schema_lock:
+            if key not in _session_schema_paths:
+                conn.execute("PRAGMA journal_mode=WAL")
+                version = conn.execute("PRAGMA user_version").fetchone()[0]
+                if version not in (0, _SESSION_INDEX_SCHEMA):
+                    conn.executescript(
+                        "DROP TABLE IF EXISTS session_file_state; "
+                        "DROP TABLE IF EXISTS session_index; DROP TABLE IF EXISTS session_meta;")
+                conn.executescript("""
+                    CREATE TABLE IF NOT EXISTS session_file_state (
+                        path TEXT PRIMARY KEY,
+                        tool TEXT NOT NULL,
+                        account_id TEXT NOT NULL,
+                        account TEXT NOT NULL DEFAULT '',
+                        inode INTEGER NOT NULL DEFAULT 0,
+                        size INTEGER NOT NULL DEFAULT 0,
+                        mtime REAL NOT NULL DEFAULT 0,
+                        status TEXT NOT NULL,
+                        session_id TEXT NOT NULL DEFAULT '',
+                        title TEXT NOT NULL DEFAULT '',
+                        cwd TEXT NOT NULL DEFAULT '',
+                        project TEXT NOT NULL DEFAULT '',
+                        branch TEXT NOT NULL DEFAULT '',
+                        title_folded TEXT NOT NULL DEFAULT '',
+                        project_folded TEXT NOT NULL DEFAULT '',
+                        search_text TEXT NOT NULL DEFAULT ''
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_session_file_identity
+                        ON session_file_state (tool, account_id, session_id, mtime DESC);
+                    CREATE TABLE IF NOT EXISTS session_index (
+                        tool TEXT NOT NULL,
+                        account_id TEXT NOT NULL,
+                        account TEXT NOT NULL DEFAULT '',
+                        session_id TEXT NOT NULL,
+                        path TEXT NOT NULL UNIQUE,
+                        inode INTEGER NOT NULL DEFAULT 0,
+                        size INTEGER NOT NULL DEFAULT 0,
+                        mtime REAL NOT NULL DEFAULT 0,
+                        title TEXT NOT NULL DEFAULT '',
+                        cwd TEXT NOT NULL DEFAULT '',
+                        project TEXT NOT NULL DEFAULT '',
+                        branch TEXT NOT NULL DEFAULT '',
+                        title_folded TEXT NOT NULL DEFAULT '',
+                        project_folded TEXT NOT NULL DEFAULT '',
+                        search_text TEXT NOT NULL DEFAULT '',
+                        pinned INTEGER NOT NULL DEFAULT 0,
+                        source_present INTEGER NOT NULL DEFAULT 1,
+                        PRIMARY KEY (tool, account_id, session_id)
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_session_recent
+                        ON session_index (pinned DESC, mtime DESC);
+                    CREATE INDEX IF NOT EXISTS idx_session_tool_recent
+                        ON session_index (tool, pinned DESC, mtime DESC);
+                    CREATE TABLE IF NOT EXISTS session_meta (
+                        key TEXT PRIMARY KEY,
+                        value TEXT NOT NULL
+                    );
+                """)
+                conn.execute(f"PRAGMA user_version={_SESSION_INDEX_SCHEMA}")
+                conn.commit()
+                try:
+                    os.chmod(path, 0o600)
+                except OSError:
+                    pass
+                _session_schema_paths.add(key)
+        return conn
+    except Exception:
+        conn.close()
+        raise
+
+
+def _session_db_connect():
+    conn = None
+    try:
+        conn = _session_db_connect_once()
+        conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
+        return conn
+    except sqlite3.DatabaseError as exc:
+        if conn:
+            conn.close()
+        message = str(exc).lower()
+        if not any(marker in message for marker in
+                   ("malformed", "not a database", "file is encrypted")):
+            raise
+        path = Path(SESSION_INDEX_FILE)
+        key = os.path.realpath(path)
+        with _session_schema_lock:
+            _session_schema_paths.discard(key)
+            for candidate in (path, Path(str(path) + "-wal"), Path(str(path) + "-shm")):
+                try:
+                    candidate.unlink()
+                except FileNotFoundError:
+                    pass
+        _session_state(indexing=True, indexed_at=0.0,
+                       error="session index rebuilt after corruption")
+        fresh = _session_db_connect_once()
+        _request_session_index_scan()
+        return fresh
+
+
+def _session_state(**updates):
+    with _session_index_state_lock:
+        _session_index_state.update(updates)
+
+
+def _session_status():
+    with _session_index_state_lock:
+        return dict(_session_index_state)
+
+
+def _fold_session_text(*parts):
+    return " ".join(str(p or "") for p in parts).casefold()
+
+
+_SESSION_IGNORED = object()
+
+
+def _claude_session_info(path):
+    title, cwd, branch = "", "", ""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for _ in range(80):
+                line = f.readline()
+                if not line:
+                    break
+                try:
+                    evt = json.loads(line)
+                except ValueError:
                     continue
-                reads += 1
-            title, cwd, branch = "", "", ""
-            try:
-                with open(path, encoding="utf-8", errors="replace") as f:
-                    for _ in range(80):
-                        line = f.readline()
-                        if not line:
-                            break
-                        try:
-                            evt = json.loads(line)
-                        except ValueError:
-                            continue
-                        if evt.get("isSidechain"):
-                            title = None
-                            break
-                        cwd = evt.get("cwd") or cwd
-                        branch = evt.get("gitBranch") or branch
-                        if evt.get("type") == "user":
-                            text = _msg_text((evt.get("message") or {}).get("content"))
-                            if text and not text.lstrip().startswith(_SKIP_PREFIXES):
-                                title = _clean_title(text)
-                                break
-            except OSError:
-                continue
-            if not title:
-                continue
-            if q:
-                hay = (title + " " + (cwd or "") + " " + (branch or "")).lower()
-                if q not in hay and not path_hit:
+                if not isinstance(evt, dict):
                     continue
-            else:
-                taken += 1
-            try:                                 # 索引最长 5s 旧，文件可能已被删
-                size = path.stat().st_size
-            except OSError:
-                continue
-            out.append({
-                "tool": "claude",
-                "id": path.stem,
-                "title": title,
-                "cwd": cwd,
-                "project": Path(cwd).name if cwd else path.parent.name,
-                "branch": branch,
-                "mtime": mtime,
-                "size": size,
-                "account": src["label"],
-                "account_id": src["id"],
-            })
-    return out
+                if evt.get("isSidechain"):
+                    return _SESSION_IGNORED
+                cwd = evt.get("cwd") or cwd
+                branch = evt.get("gitBranch") or branch
+                if evt.get("type") == "user":
+                    message = evt.get("message")
+                    text = _msg_text(message.get("content")) \
+                        if isinstance(message, dict) else ""
+                    if text and not text.lstrip().startswith(_SKIP_PREFIXES):
+                        title = _clean_title(text)
+                        break
+    except OSError:
+        return None
+    if not title:
+        return None
+    return path.stem, cwd, title, branch
 
 
 def _codex_session_info(path):
@@ -1284,13 +1378,16 @@ def _codex_session_info(path):
                     evt = json.loads(line)
                 except ValueError:
                     continue
-                payload = evt.get("payload") or {}
+                if not isinstance(evt, dict):
+                    continue
+                payload = evt.get("payload")
+                payload = payload if isinstance(payload, dict) else {}
                 if evt.get("type") == "session_meta":
                     sid = payload.get("id")
                     cwd = payload.get("cwd") or ""
                 text = ""
                 if payload.get("type") == "user_message":
-                    text = payload.get("message", "")
+                    text = _msg_text(payload.get("message"))
                 elif payload.get("role") == "user":
                     text = _msg_text(payload.get("content"))
                 if text and not text.lstrip().startswith(_SKIP_PREFIXES):
@@ -1303,42 +1400,115 @@ def _codex_session_info(path):
     return sid, cwd, title
 
 
-def _codex_sessions(limit=15, query=None):
-    # query 非空：扩大扫描窗口、读首部做标题/cwd 匹配（Codex 文件名不含 cwd，须读）。
-    q = (query or "").lower()
-    SEARCH_CAP = 60
-    scan = 240 if q else 40
-    out = []
-    for src in codex_sources():
-        taken = 0
-        for path in _iter_codex_files(scan, base=src["path"]):
-            if not q and taken >= limit:
-                break
-            if q and len(out) >= SEARCH_CAP:
-                break
-            info = _codex_session_info(path)
-            if not info:
-                continue
-            sid, cwd, title = info
-            if q:
-                if q not in (title + " " + (cwd or "")).lower():
+def _session_file_info(tool, path):
+    if tool == "claude":
+        info = _claude_session_info(path)
+        if info is _SESSION_IGNORED:
+            return "ignored", None
+        if not info:
+            return "incomplete", None
+        sid, cwd, title, branch = info
+    else:
+        _rollout_meta_cache.pop(str(path), None)
+        if _rollout_meta(path).get("subagent"):
+            return "ignored", None
+        info = _codex_session_info(path)
+        if not info:
+            return "incomplete", None
+        sid, cwd, title = info
+        branch = ""
+    project = Path(cwd).name if cwd else (path.parent.name if tool == "claude" else "")
+    return "indexed", {
+        "session_id": sid, "cwd": cwd or "", "title": title,
+        "project": project, "branch": branch or "",
+    }
+
+
+def _session_source_files():
+    entries = []
+    specs = (
+        ("claude", claude_sources(), "projects", "*/*.jsonl"),
+        ("codex", codex_sources(), "sessions", "*/*/*/rollout-*.jsonl"),
+    )
+    for tool, sources, folder, pattern in specs:
+        for src in sources:
+            for path in (src["path"] / folder).glob(pattern):
+                if tool == "claude" and path.name.startswith("agent-"):
                     continue
-            else:
-                taken += 1
-            st = path.stat()
-            out.append({
-                "tool": "codex",
-                "id": sid,
-                "title": title,
-                "cwd": cwd,
-                "project": Path(cwd).name if cwd else "",
-                "branch": "",
-                "mtime": st.st_mtime,
-                "size": st.st_size,
-                "account": src["label"],
-                "account_id": src["id"],
-            })
-    return out
+                try:
+                    st = path.stat()
+                except OSError:
+                    continue
+                entries.append({
+                    "tool": tool, "account_id": src["id"], "account": src["label"],
+                    "path": path, "inode": int(getattr(st, "st_ino", 0)),
+                    "size": st.st_size, "mtime": st.st_mtime,
+                })
+    # 首次建库先产出最近会话，前端可在后台索引未完成时逐步得到可用结果。
+    entries.sort(key=lambda e: e["mtime"], reverse=True)
+    return entries
+
+
+def _session_file_state_upsert(conn, entry, status, info):
+    info = info or {}
+    title = info.get("title", "")
+    project = info.get("project", "")
+    conn.execute("""
+        INSERT INTO session_file_state (
+            path, tool, account_id, account, inode, size, mtime, status,
+            session_id, title, cwd, project, branch, title_folded,
+            project_folded, search_text
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(path) DO UPDATE SET
+            tool=excluded.tool, account_id=excluded.account_id,
+            account=excluded.account, inode=excluded.inode, size=excluded.size,
+            mtime=excluded.mtime, status=excluded.status,
+            session_id=excluded.session_id, title=excluded.title,
+            cwd=excluded.cwd, project=excluded.project, branch=excluded.branch,
+            title_folded=excluded.title_folded,
+            project_folded=excluded.project_folded,
+            search_text=excluded.search_text
+    """, (str(entry["path"]), entry["tool"], entry["account_id"], entry["account"],
+          entry["inode"], entry["size"], entry["mtime"], status,
+          info.get("session_id", ""), title, info.get("cwd", ""), project,
+          info.get("branch", ""), title.casefold(), project.casefold(),
+          _fold_session_text(title, info.get("cwd", ""), project,
+                             info.get("branch", ""))))
+
+
+def _rebuild_session_rows(conn):
+    """每个复合身份只展示 mtime 最新的文件；旧副本仍留在 file_state 供回退。"""
+    conn.execute("DELETE FROM session_index WHERE source_present=1")
+    conn.execute("""
+        INSERT INTO session_index (
+            tool, account_id, account, session_id, path, inode, size, mtime,
+            title, cwd, project, branch, title_folded, project_folded,
+            search_text, source_present
+        )
+        SELECT tool, account_id, account, session_id, path, inode, size, mtime,
+               title, cwd, project, branch, title_folded, project_folded,
+               search_text, 1
+        FROM (
+            SELECT *, ROW_NUMBER() OVER (
+                PARTITION BY tool, account_id, session_id
+                ORDER BY mtime DESC, path DESC
+            ) AS row_num
+            FROM session_file_state
+            WHERE status='indexed' AND session_id<>''
+        )
+        WHERE row_num=1
+        ON CONFLICT(tool, account_id, session_id) DO UPDATE SET
+            account=excluded.account, path=excluded.path, inode=excluded.inode,
+            size=excluded.size, mtime=excluded.mtime, title=excluded.title,
+            cwd=excluded.cwd, project=excluded.project, branch=excluded.branch,
+            title_folded=excluded.title_folded,
+            project_folded=excluded.project_folded,
+            search_text=excluded.search_text, source_present=1
+    """)
+
+
+def _pin_key(tool, account_id, sid):
+    return f"{tool}|{account_id or 'default'}|{sid}"
 
 
 # ----------------------------------------------------------------- 收藏置顶
@@ -1348,7 +1518,8 @@ _pins_lock = threading.Lock()
 
 def _load_pins():
     try:
-        return json.loads(PINS_FILE.read_text())
+        data = json.loads(PINS_FILE.read_text())
+        return data if isinstance(data, dict) else {}
     except (OSError, ValueError):
         return {}
 
@@ -1357,47 +1528,347 @@ def _save_pins(pins):
     _atomic_write_text(PINS_FILE, json.dumps(pins, ensure_ascii=False, indent=1))
 
 
+def _sync_pins_to_db(conn):
+    """pins.json 是用户状态真源；SQLite 只镜像，删库重建也不会丢收藏。"""
+    with _pins_lock:
+        raw = _load_pins()
+        canonical = {}
+        for old_key, value in raw.items():
+            if not isinstance(value, dict):
+                continue
+            snap = dict(value)
+            tool = str(snap.get("tool") or "")
+            sid = str(snap.get("id") or old_key)
+            if tool not in ("claude", "codex") or not _ID_RE.match(sid):
+                continue
+            parts = old_key.split("|", 2)
+            account_id = str(snap.get("account_id") or "")
+            if len(parts) == 3 and parts[0] == tool and parts[2] == sid:
+                account_id = parts[1] or account_id
+            if not account_id:
+                row = conn.execute(
+                    "SELECT account_id, account FROM session_index "
+                    "WHERE tool=? AND session_id=? AND source_present=1 "
+                    "ORDER BY mtime DESC LIMIT 1", (tool, sid)).fetchone()
+                account_id = row["account_id"] if row else "default"
+                if row and not snap.get("account"):
+                    snap["account"] = row["account"]
+            if not re.fullmatch(r"[a-z0-9-]{1,120}", account_id):
+                account_id = "default"
+            snap.update(tool=tool, id=sid, account_id=account_id)
+            canonical[_pin_key(tool, account_id, sid)] = snap
+        if canonical != raw:
+            _save_pins(canonical)
+
+    conn.execute("UPDATE session_index SET pinned=0 WHERE pinned<>0")
+    for snap in canonical.values():
+        tool, account_id, sid = snap["tool"], snap["account_id"], snap["id"]
+        found = conn.execute(
+            "SELECT 1 FROM session_index WHERE tool=? AND account_id=? AND session_id=?",
+            (tool, account_id, sid)).fetchone()
+        if found:
+            conn.execute(
+                "UPDATE session_index SET pinned=1 WHERE tool=? AND account_id=? AND session_id=?",
+                (tool, account_id, sid))
+            continue
+        title = str(snap.get("title") or "")
+        cwd = str(snap.get("cwd") or "")
+        project = str(snap.get("project") or (Path(cwd).name if cwd else ""))
+        branch = str(snap.get("branch") or "")
+        account = str(snap.get("account") or "")
+        try:
+            mtime = float(snap.get("mtime") or 0)
+        except (TypeError, ValueError):
+            mtime = 0
+        synthetic = "pin://" + hashlib.sha256(
+            _pin_key(tool, account_id, sid).encode()).hexdigest()
+        conn.execute("""
+            INSERT OR REPLACE INTO session_index (
+                tool, account_id, account, session_id, path, mtime, title, cwd,
+                project, branch, title_folded, project_folded, search_text,
+                pinned, source_present
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0)
+        """, (tool, account_id, account, sid, synthetic, mtime, title, cwd,
+              project, branch, title.casefold(), project.casefold(),
+              _fold_session_text(title, cwd, project, branch)))
+    conn.execute("DELETE FROM session_index WHERE source_present=0 AND pinned=0")
+
+
+def _session_index_scan():
+    """枚举文件只在后台发生；已完成元数据的增长文件仅更新 stat，不重复读 JSONL。"""
+    with _session_index_write_lock:
+        _session_state(indexing=True, error="", processed_files=0)
+        conn = None
+        try:
+            conn = _session_db_connect()
+            entries = _session_source_files()
+            _session_state(total_files=len(entries))
+            existing = {row["path"]: row for row in conn.execute(
+                "SELECT path, tool, account_id, account, inode, size, mtime, status "
+                "FROM session_file_state")}
+            seen, writes, committed_writes, fast_processed = set(), 0, 0, 0
+            parse_jobs = []
+            for entry in entries:
+                path = str(entry["path"])
+                seen.add(path)
+                old = existing.get(path)
+                same_identity = old and old["tool"] == entry["tool"] \
+                    and old["account_id"] == entry["account_id"]
+                stable_file = same_identity and old["inode"] == entry["inode"]
+                complete = old and old["status"] in ("indexed", "ignored")
+                unchanged_incomplete = old and old["status"] == "incomplete" \
+                    and entry["size"] == old["size"] and entry["mtime"] == old["mtime"]
+                # 已解析/忽略的文件追加增长不改变会话头；不完整文件有变化则重试。
+                if stable_file and ((complete and entry["size"] >= old["size"])
+                                    or unchanged_incomplete):
+                    if (old["size"] != entry["size"] or old["mtime"] != entry["mtime"]
+                            or old["account"] != entry["account"]):
+                        conn.execute(
+                            "UPDATE session_file_state SET size=?, mtime=?, account=? "
+                            "WHERE path=?",
+                            (entry["size"], entry["mtime"], entry["account"], path))
+                        writes += 1
+                    fast_processed += 1
+                else:
+                    parse_jobs.append((entry, old))
+                if writes and writes % 50 == 0 and writes != committed_writes:
+                    conn.commit()
+                    committed_writes = writes
+                if fast_processed and fast_processed % 25 == 0:
+                    _session_state(processed_files=fast_processed)
+
+            def parse(job):
+                entry, old = job
+                status, info = _session_file_info(entry["tool"], entry["path"])
+                return entry, old, status, info
+
+            if parse_jobs:
+                workers = min(4, len(parse_jobs))
+                with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+                    for offset, (entry, old, status, info) in enumerate(
+                            pool.map(parse, parse_jobs), 1):
+                        _session_file_state_upsert(conn, entry, status, info)
+                        writes += 1
+                        if writes % 50 == 0 and writes != committed_writes:
+                            _rebuild_session_rows(conn)
+                            conn.commit()
+                            committed_writes = writes
+                        if offset % 25 == 0:
+                            _session_state(processed_files=fast_processed + offset)
+
+            for path in existing.keys() - seen:
+                conn.execute("DELETE FROM session_file_state WHERE path=?", (path,))
+            _rebuild_session_rows(conn)
+            _sync_pins_to_db(conn)
+            now = time.time()
+            conn.execute(
+                "INSERT OR REPLACE INTO session_meta(key, value) VALUES('indexed_at', ?)",
+                (str(now),))
+            conn.commit()
+            _session_state(indexing=False, indexed_at=now,
+                           processed_files=len(entries), error="")
+        except Exception as exc:
+            if conn:
+                conn.rollback()
+            _session_state(indexing=False, error=str(exc)[:240])
+        finally:
+            if conn:
+                conn.close()
+
+
+def _session_index_loop():
+    while True:
+        _session_index_scan()
+        _session_index_wake.wait(_SESSION_INDEX_INTERVAL)
+        _session_index_wake.clear()
+
+
+def _ensure_session_index_started():
+    global _session_index_started
+    conn = _session_db_connect()
+    if not _session_status()["indexed_at"]:
+        row = conn.execute(
+            "SELECT value FROM session_meta WHERE key='indexed_at'").fetchone()
+        if row:
+            try:
+                _session_state(indexed_at=float(row["value"]))
+            except ValueError:
+                pass
+    conn.close()
+    with _session_index_start_lock:
+        if _session_index_started:
+            return
+        _session_index_started = True
+        _session_state(indexing=True, error="")
+        threading.Thread(target=_session_index_loop, daemon=True,
+                         name="AgentDeckSessionIndex").start()
+
+
+def _request_session_index_scan():
+    if _session_index_started:
+        _session_index_wake.set()
+
+
+def _cursor_scope(query, tool):
+    return hashlib.sha256(f"{query}\0{tool}".encode()).hexdigest()[:16]
+
+
+def _encode_session_cursor(row, scope):
+    payload = {"v": 1, "scope": scope, "p": int(row["pinned"]),
+               "r": int(row["rank"]), "m": float(row["mtime"]),
+               "t": row["tool"], "a": row["account_id"], "s": row["session_id"]}
+    raw = json.dumps(payload, separators=(",", ":")).encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def _decode_session_cursor(raw, scope):
+    if not raw or len(raw) > 512:
+        return None
+    try:
+        padded = raw + "=" * (-len(raw) % 4)
+        value = json.loads(base64.urlsafe_b64decode(padded).decode())
+        if not isinstance(value, dict) or value.get("v") != 1 or value.get("scope") != scope:
+            return None
+        normalized = {
+            "p": int(value["p"]), "r": int(value["r"]), "m": float(value["m"]),
+            "t": str(value["t"]), "a": str(value["a"]), "s": str(value["s"]),
+        }
+        if normalized["p"] not in (0, 1) or not 0 <= normalized["r"] <= 3:
+            return None
+        if normalized["t"] not in ("claude", "codex"):
+            return None
+        if (not re.fullmatch(r"[a-z0-9-]{1,120}", normalized["a"])
+                or not _ID_RE.match(normalized["s"])):
+            return None
+        return normalized
+    except (ValueError, TypeError, KeyError, UnicodeDecodeError,
+            json.JSONDecodeError, binascii.Error):
+        return None
+
+
+def _session_cursor_where(cursor):
+    values = [cursor["p"], cursor["r"], cursor["m"],
+              cursor["t"], cursor["a"], cursor["s"]]
+    specs = [("pinned", "<"), ("rank", ">"), ("mtime", "<"),
+             ("tool", ">"), ("account_id", ">"), ("session_id", ">")]
+    clauses, params = [], []
+    for i, (field, op) in enumerate(specs):
+        equal = " AND ".join(f"{specs[j][0]}=?" for j in range(i))
+        clauses.append(f"({equal + ' AND ' if equal else ''}{field}{op}?)")
+        params.extend(values[:i])
+        params.append(values[i])
+    return "WHERE " + " OR ".join(clauses), params
+
+
+def _query_session_index(query="", tool="all", limit=None, cursor=""):
+    q = (query or "").strip().casefold()[:80]
+    tool = tool if tool in ("claude", "codex") else "all"
+    if limit is None:
+        # 未升级的静态客户端搜索没有分页参数：保留尽可能完整的首批结果；
+        # 原生 Swift 客户端始终显式传页大小。
+        if q:
+            limit = _SESSION_PAGE_MAX
+        else:
+            per_tool = get_settings()["sessions_limit"]
+            limit = per_tool if tool != "all" else per_tool * 2
+    try:
+        limit = min(_SESSION_PAGE_MAX, max(1, int(limit)))
+    except (TypeError, ValueError):
+        limit = 30
+
+    where, where_params = ["(source_present=1 OR pinned=1)", "title<>''"], []
+    if tool != "all":
+        where.append("tool=?")
+        where_params.append(tool)
+    terms = [part for part in q.split() if part]
+    for term in terms:
+        where.append("instr(search_text, ?) > 0")
+        where_params.append(term)
+    where_sql = " AND ".join(where)
+    if q:
+        rank_sql = ("CASE WHEN title_folded=? THEN 0 "
+                    "WHEN instr(title_folded, ?)>0 THEN 1 "
+                    "WHEN instr(project_folded, ?)>0 THEN 2 ELSE 3 END")
+        rank_params = [q, q, q]
+    else:
+        rank_sql, rank_params = "0", []
+
+    scope = _cursor_scope(q, tool)
+    decoded = _decode_session_cursor(cursor, scope)
+    cursor_sql, cursor_params = _session_cursor_where(decoded) if decoded else ("", [])
+    conn = _session_db_connect()
+    try:
+        total = conn.execute(
+            f"SELECT COUNT(*) FROM session_index WHERE {where_sql}",
+            where_params).fetchone()[0]
+        rows = conn.execute(f"""
+            WITH matches AS (
+                SELECT *, {rank_sql} AS rank
+                FROM session_index WHERE {where_sql}
+            )
+            SELECT * FROM matches
+            {cursor_sql}
+            ORDER BY pinned DESC, rank ASC, mtime DESC,
+                     tool ASC, account_id ASC, session_id ASC
+            LIMIT ?
+        """, rank_params + where_params + cursor_params + [limit + 1]).fetchall()
+    finally:
+        conn.close()
+    has_more = len(rows) > limit
+    page = rows[:limit]
+    sessions = [{
+        "tool": row["tool"], "id": row["session_id"], "title": row["title"],
+        "cwd": row["cwd"], "project": row["project"], "branch": row["branch"],
+        "mtime": row["mtime"], "size": row["size"], "account": row["account"],
+        "account_id": row["account_id"], "pinned": bool(row["pinned"]),
+    } for row in page]
+    status = _session_status()
+    return {
+        "sessions": sessions, "ts": time.time(), "query": q, "tool": tool,
+        "total": total, "has_more": has_more,
+        "next_cursor": _encode_session_cursor(page[-1], scope) if has_more and page else None,
+        # 仅首次无可用索引时要求前端轮询进度；已有快照的后台增量扫描不打扰 UI。
+        "indexing": bool(status["indexing"] and not status["indexed_at"]),
+        "indexed_at": status["indexed_at"],
+        "index_progress": {
+            "processed": status["processed_files"], "total": status["total_files"]},
+        "index_error": status["error"] or None,
+    }
+
+
 def api_pin(body):
     sess = body.get("session") or {}
-    sid = sess.get("id", "")
-    if not _ID_RE.match(sid):
+    tool = str(sess.get("tool") or "")
+    sid = str(sess.get("id") or "")
+    account_id = str(sess.get("account_id") or "default")[:120]
+    if (tool not in ("claude", "codex") or not _ID_RE.match(sid)
+            or not re.fullmatch(r"[a-z0-9-]{1,120}", account_id)):
         return {"ok": False, "error": "invalid id"}
+    key = _pin_key(tool, account_id, sid)
     with _pins_lock:
         pins = _load_pins()
         if body.get("pinned"):
-            pins[sid] = {k: sess.get(k, "") for k in
-                         ("tool", "id", "title", "cwd", "project", "branch", "mtime")}
+            pins[key] = {k: sess.get(k, "") for k in
+                         ("tool", "id", "title", "cwd", "project", "branch",
+                          "mtime", "account", "account_id")}
         else:
+            pins.pop(key, None)
+            # 兼容尚未迁移的 v2.1.3 以前单 id 键。
             pins.pop(sid, None)
         _save_pins(pins)
-    with _cache_lock:
-        _ttl_cache.pop("sessions", None)   # 立即反映到列表
+    with _session_index_write_lock:
+        conn = _session_db_connect()
+        try:
+            _sync_pins_to_db(conn)
+            conn.commit()
+        finally:
+            conn.close()
     return {"ok": True, "pinned": bool(body.get("pinned"))}
 
 
-def api_sessions(query=None):
-    q = (query or "").strip().lower()[:80]
-    def build():
-        limit = get_settings()["sessions_limit"]
-        merged = _claude_sessions(limit, q or None) + _codex_sessions(limit, q or None)
-        merged.sort(key=lambda s: s["mtime"], reverse=True)
-        pins = _load_pins()
-        seen = set()
-        for s in merged:
-            s["pinned"] = s["id"] in pins
-            seen.add(s["id"])
-        # 已置顶但滚出最近列表的会话，从快照补回（仅默认列表；搜索结果只回匹配项）
-        if not q:
-            for sid, snap in pins.items():
-                if sid not in seen and snap.get("tool"):
-                    snap = dict(snap)
-                    snap["pinned"] = True
-                    merged.append(snap)
-        merged.sort(key=lambda s: (not s["pinned"], -float(s.get("mtime") or 0)))
-        return {"sessions": merged, "ts": time.time(), "query": q}
-    if q:                       # 查询各异，不走 20s 缓存
-        return build()
-    return cached("sessions", 20, build)
+def api_sessions(query=None, tool="all", limit=None, cursor=""):
+    _ensure_session_index_started()
+    return _query_session_index(query, tool, limit, cursor)
 
 
 # ----------------------------------------------------------------- 活跃会话
@@ -1704,8 +2175,11 @@ def _rollout_meta(path):
                     evt = json.loads(line)
                 except ValueError:
                     continue
+                if not isinstance(evt, dict):
+                    continue
                 if evt.get("type") == "session_meta":
-                    p = evt.get("payload") or {}
+                    payload = evt.get("payload")
+                    p = payload if isinstance(payload, dict) else {}
                     meta["cwd"] = p.get("cwd") or ""
                     meta["originator"] = p.get("originator") or ""
                     meta["id"] = p.get("id") or ""
@@ -1732,37 +2206,64 @@ def _collect_preview(path, codex=False):
             evt = json.loads(line)
         except ValueError:
             continue
+        if not isinstance(evt, dict):
+            continue
         role, text = "", ""
         if codex:
-            payload = evt.get("payload") or {}
+            payload = evt.get("payload")
+            payload = payload if isinstance(payload, dict) else {}
             if payload.get("type") == "user_message":
-                role, text = "user", payload.get("message", "")
+                role, text = "user", _msg_text(payload.get("message"))
             elif payload.get("type") == "agent_message":
-                role, text = "assistant", payload.get("message", "")
+                role, text = "assistant", _msg_text(payload.get("message"))
             elif payload.get("role") in ("user", "assistant"):
                 role, text = payload["role"], _msg_text(payload.get("content"))
         else:
             if evt.get("type") in ("user", "assistant") and not evt.get("isSidechain"):
                 role = evt["type"]
-                text = _msg_text((evt.get("message") or {}).get("content"))
+                message = evt.get("message")
+                text = _msg_text(message.get("content")) \
+                    if isinstance(message, dict) else ""
         text = _clean_title(text or "")
         if role and text and not text.startswith(_SKIP_PREFIXES):
             msgs.append({"role": role, "text": text[:220]})
     return msgs[-4:]
 
 
+def _session_index_path(tool, sid, account_id=""):
+    conn = _session_db_connect()
+    try:
+        if account_id:
+            row = conn.execute(
+                "SELECT path FROM session_index WHERE tool=? AND account_id=? "
+                "AND session_id=? AND source_present=1",
+                (tool, account_id, sid)).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT path FROM session_index WHERE tool=? AND session_id=? "
+                "AND source_present=1 ORDER BY mtime DESC LIMIT 1",
+                (tool, sid)).fetchone()
+        return Path(row["path"]) if row else None
+    finally:
+        conn.close()
+
+
 def api_preview(query):
     tool = query.get("tool", [""])[0]
     sid = query.get("id", [""])[0]
+    account_id = query.get("account_id", [""])[0][:120]
     if tool not in ("claude", "codex") or not _ID_RE.match(sid):
         return {"ok": False, "error": "invalid args"}
-    files = []
-    if tool == "claude":
-        for src in claude_sources():
-            files += list((src["path"] / "projects").glob(f"*/{sid}.jsonl"))
-    else:
-        for src in codex_sources():
-            files += list((src["path"] / "sessions").glob(f"*/*/*/rollout-*{sid}.jsonl"))
+    indexed = _session_index_path(tool, sid, account_id)
+    files = [indexed] if indexed and indexed.is_file() else []
+    if not files:   # 索引初建/旧客户端兜底；正常路径不再全目录 glob
+        sources = claude_sources() if tool == "claude" else codex_sources()
+        pattern = f"*/{sid}.jsonl" if tool == "claude" else f"*/*/*/rollout-*{sid}.jsonl"
+        folder = "projects" if tool == "claude" else "sessions"
+        for src in sources:
+            if account_id and src["id"] != account_id:
+                continue
+            files += list((src["path"] / folder).glob(pattern))
     if not files:
         return {"ok": False, "error": "transcript not found"}
     path = max(files, key=lambda p: p.stat().st_mtime)
@@ -2432,6 +2933,7 @@ def api_event(body):
         _event_seq += 1
         _events.append({"id": _event_seq, **evt})
     _events_persist(evt)
+    _request_session_index_scan()   # 完成事件意味着对应 transcript 刚更新，尽快刷新索引 mtime
     return {"ok": True, "queued": _event_seq}
 
 
@@ -3340,8 +3842,26 @@ def api_resume(body):
         return {"ok": False, "error": "invalid args"}
     if not os.path.isdir(cwd):
         cwd = str(HOME)
+
+    # 复合身份里的账号决定 CLI 应读取哪套配置目录。显式传账号时始终固定环境变量，
+    # 包括 default：否则用户 shell 里已有的 CLAUDE_CONFIG_DIR/CODEX_HOME 会把恢复
+    # 请求悄悄导向另一账号。旧客户端不传 account_id 时保留原行为。
+    account_id = str(body.get("account_id") or "")
+    env_prefix = ""
+    if account_id:
+        if not re.fullmatch(r"[a-z0-9-]{1,120}", account_id):
+            return {"ok": False, "error": "invalid account"}
+        sources = claude_sources() if tool == "claude" else codex_sources()
+        source = next((item for item in sources if item["id"] == account_id), None)
+        if source is None:
+            return {"ok": False, "error": "account not found"}
+        env_name = "CLAUDE_CONFIG_DIR" if tool == "claude" else "CODEX_HOME"
+        env_prefix = f"/usr/bin/env {env_name}={_shell_quote(str(source['path']))} "
     binary = "claude --resume" if tool == "claude" else "codex resume"
-    cmd = f"cd {_shell_quote(cwd)} && {binary} {sid}"
+    cmd = f"cd {_shell_quote(cwd)} && {env_prefix}{binary} {_shell_quote(sid)}"
+
+    if body.get("copy_only") is True:
+        return {"ok": True, "copy": True, "command": cmd}
 
     mode = get_settings()["terminal"]
     if mode == "copy":   # 仅返回命令，由前端复制到剪贴板
@@ -3438,7 +3958,11 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/diag":
                 self._send(200, api_diag())
             elif path == "/api/sessions":
-                self._send(200, api_sessions(query.get("q", [""])[0]))
+                self._send(200, api_sessions(
+                    query.get("q", [""])[0],
+                    tool=query.get("tool", ["all"])[0],
+                    limit=query.get("limit", [None])[0],
+                    cursor=query.get("cursor", [""])[0]))
             elif path == "/api/usage":
                 self._send(200, api_usage())
             elif path == "/api/active":
@@ -3529,6 +4053,7 @@ def _parent_watchdog():
 def main():
     _events_load()
     _alert_state_load()
+    _ensure_session_index_started()
     install_integration()   # 启动即自动接好完成事件钩子（幂等、只合并不覆盖）
     threading.Thread(target=_parent_watchdog, daemon=True).start()
     threading.Thread(target=_sampler_loop, daemon=True).start()

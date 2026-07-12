@@ -50,7 +50,7 @@ AgentDeck 将 Claude Code 与 Codex 的额度监控、会话管理与用量统�
 - 点击活跃会话聚焦其所在终端：沿进程链自动识别宿主 `.app`，兼容任意终端，无需维护终端清单；iTerm2 / Terminal 精确至标签页；Codex 桌面端经 `codex://` 深链直达线程
 - 会话完成弹窗提醒，点击跳转回会话；事件去重，仅提醒一次
 - 历史会话一键恢复：iTerm2 / Terminal / Ghostty / kitty / WezTerm / Alacritty 直接注入命令启动；Warp / VS Code / Cursor / Windsurf / Hyper / Tabby / Rio / Wave 走「打开应用 + 复制命令」
-- 会话列表支持搜索、按端筛选、置顶与对话预览
+- 会话列表支持完整历史元数据搜索、按端筛选、分页加载、置顶与对话预览；SQLite 增量索引让查询不再逐次扫描 transcript
 
 **用量统计**
 - 近 7 / 30 天 token 用量与成本估算（口径见下文）
@@ -117,7 +117,7 @@ Package.swift        SwiftPM 包定义：AgentDeck 可执行目标、AgentDeckKi
 Sources/AgentDeck/   AppKit 壳：菜单栏、NSPanel、桌面小组件、灵动岛、daemon 守护
 Sources/AgentDeckKit/SwiftUI UI、API 客户端、数据模型、三语 i18n、预览渲染
 Sources/PreviewGen/  无头渲染 UI 预览图，用于开发检查
-agentdeckd.py        后端 daemon：采集 / 解析 / 聚合 / HTTP API / hook 集成（纯标准库）
+agentdeckd.py        后端 daemon：采集 / 解析 / SQLite 会话索引 / HTTP API / hook 集成（纯标准库）
 static/index.html    旧 Web UI / 浏览器 fallback；daemon 仍在 / 和 /index.html 提供
 site/                官网与更新清单（Cloudflare Pages，零依赖静态页）
 build.sh             构建 / 安装 / DMG / 卸载
@@ -134,11 +134,11 @@ scripts/             图标与 DMG 背景生成、Codex notify 包装、CSRF 回
 |------|------|------|
 | Claude 额度 | 钥匙串中 Claude Code 的 OAuth 凭据 → `api.anthropic.com/api/oauth/usage` | 以用户本人凭据查询本人额度；多账号时按配置目录各自精确取对应凭据 |
 | 版本检查 | `agentdeck.yilin.dev/version.json`（静态清单，6 小时缓存） | 仅比对版本号，不携带凭据或本机信息；可在设置中关闭 |
-| Claude 用量 / 会话 | 解析已发现的各 Claude 配置目录下 `projects/**/*.jsonl` | token 统计、成本估算、会话列表 |
-| Codex 额度 / 用量 / 会话 | 解析本地 `~/.codex/sessions` rollout 文件 | 同上 |
+| Claude 用量 / 会话 | 解析已发现的各 Claude 配置目录下 `projects/**/*.jsonl` | token 统计、成本估算；会话标题、路径等头部元数据增量写入本地 SQLite 索引 |
+| Codex 额度 / 用量 / 会话 | 解析本地 `~/.codex/sessions` rollout 文件 | 同上；搜索和分页只读元数据索引，不逐次扫描原始会话 |
 | 完成事件 | AgentDeck 自动安装的 Claude Stop hook / Codex notify wrapper 回调（见会话完成提醒集成） | 完成提醒与事件流 |
 
-运行时产物：数据目录 `~/Library/Application Support/AgentDeck/`，日志 `~/Library/Logs/AgentDeck.log`。其中 `claude_usage_cache.json` 与 `codex_usage_cache.json` 是按文件 inode/大小校验的可重建增量缓存，删除后只会触发下一次全量统计。
+运行时产物：数据目录 `~/Library/Application Support/AgentDeck/`，日志 `~/Library/Logs/AgentDeck.log`。其中 `claude_usage_cache.json`、`codex_usage_cache.json` 与 `session_index.sqlite3` 均为可重建缓存；会话索引只保存标题、项目、路径、分支、时间与文件指纹，不保存完整对话正文。`pins.json` 是置顶状态真源，删除数据库不会丢收藏，只会触发后台重建索引。
 
 ## 安全设计
 

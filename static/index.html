@@ -1483,7 +1483,9 @@ async function togglePreview(row, s) {
   if (box.dataset.loaded) return;
   box.innerHTML = `<div class="ploading">${t('session.loadingPreview')}</div>`;
   try {
-    const d = await (await fetch(`/api/preview?tool=${s.tool}&id=${s.id}`)).json();
+    const params = new URLSearchParams({tool: s.tool, id: s.id});
+    if (s.account_id) params.set('account_id', s.account_id);
+    const d = await (await fetch(`/api/preview?${params}`)).json();
     box.innerHTML = d.ok && d.messages.length
       ? d.messages.map(m => `<div class="pmsg ${m.role}">
           <span class="prole">${m.role === 'user' ? t('session.roleUser') : t('session.roleAI')}</span><span>${esc(m.text)}</span></div>`).join('')
@@ -1520,9 +1522,17 @@ $('#slist').addEventListener('click', async e => {
     } catch { toast(t('common.opFailed')); }
     return;
   }
-  const cmd = `cd ${JSON.stringify(s.cwd || '~')} && ${s.tool === 'claude' ? 'claude --resume' : 'codex resume'} ${s.id}`;
+  const resumeBody = {tool: s.tool, id: s.id, cwd: s.cwd, account_id: s.account_id};
   if (btn.dataset.act === 'copy') {
-    try { await navigator.clipboard.writeText(cmd); toast(t('session.cmdCopied')); }
+    try {
+      const r = await (await fetch('/api/resume', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({...resumeBody, copy_only: true}),
+      })).json();
+      if (!r.ok || !r.command) throw new Error(r.error || 'command unavailable');
+      await navigator.clipboard.writeText(r.command);
+      toast(t('session.cmdCopied'));
+    }
     catch { toast(t('session.copyFailed')); }
     return;
   }
@@ -1530,7 +1540,7 @@ $('#slist').addEventListener('click', async e => {
   try {
     const r = await (await fetch('/api/resume', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({tool: s.tool, id: s.id, cwd: s.cwd}),
+      body: JSON.stringify(resumeBody),
     })).json();
     if (r.ok && r.copy) {        // 设置为「仅复制」模式
       try {

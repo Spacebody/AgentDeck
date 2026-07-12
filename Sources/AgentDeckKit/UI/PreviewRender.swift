@@ -35,6 +35,7 @@ public enum PreviewRender {
         let firstKey = PreviewSamples.sessions.first!.rowKey
         return png(PanelChrome(height: 560) {
             SessionsView(sessions: PreviewSamples.sessions, scrollable: false,
+                         total: 92, hasMore: true,
                          initialExpanded: firstKey, seededPreviews: [firstKey: PreviewSamples.previewMsgs])
         }, scale: scale)
     }
