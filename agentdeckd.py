@@ -46,6 +46,7 @@ if not DATA_DIR.exists() and _LEGACY_DATA.is_dir():
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 HISTORY_FILE = DATA_DIR / "quota_history.jsonl"
 PINS_FILE = DATA_DIR / "pins.json"
+PATH_MAPPINGS_FILE = DATA_DIR / "path_mappings.json"
 SESSION_INDEX_FILE = DATA_DIR / "session_index.sqlite3"
 CODEX_USAGE_CACHE_FILE = DATA_DIR / "codex_usage_cache.json"
 CLAUDE_USAGE_CACHE_FILE = DATA_DIR / "claude_usage_cache.json"
@@ -2164,7 +2165,9 @@ def _rollout_meta(path):
     key = str(path)
     if key in _rollout_meta_cache:
         return _rollout_meta_cache[key]
-    meta = {"cwd": "", "originator": "", "id": "", "subagent": False}
+    meta = {"cwd": "", "originator": "", "id": "", "subagent": False,
+            "subagent_kind": "", "started_at": None}
+    found = False
     try:
         with open(path, encoding="utf-8", errors="replace") as f:
             for _ in range(5):
@@ -2178,17 +2181,31 @@ def _rollout_meta(path):
                 if not isinstance(evt, dict):
                     continue
                 if evt.get("type") == "session_meta":
+                    found = True
                     payload = evt.get("payload")
                     p = payload if isinstance(payload, dict) else {}
                     meta["cwd"] = p.get("cwd") or ""
                     meta["originator"] = p.get("originator") or ""
                     meta["id"] = p.get("id") or ""
                     source = p.get("source")
-                    meta["subagent"] = isinstance(source, dict) and "subagent" in source
+                    child = source.get("subagent") if isinstance(source, dict) else None
+                    meta["subagent"] = isinstance(child, dict)
+                    if isinstance(child, dict):
+                        meta["subagent_kind"] = next(iter(child), "")
+                    stamp = p.get("timestamp") or evt.get("timestamp")
+                    if isinstance(stamp, str):
+                        try:
+                            meta["started_at"] = datetime.fromisoformat(
+                                stamp.replace("Z", "+00:00")).timestamp()
+                        except ValueError:
+                            pass
                     break
     except OSError:
         pass
-    _rollout_meta_cache[key] = meta
+    # An active writer may not have completed the first JSON line yet. Empty
+    # metadata must be retried instead of becoming a permanent false top-level hit.
+    if found:
+        _rollout_meta_cache[key] = meta
     return meta
 
 
@@ -3387,7 +3404,7 @@ def api_history(query):
 
 # ----------------------------------------------------------------- 用量统计
 
-_CLAUDE_USAGE_CACHE_VERSION = 1
+_CLAUDE_USAGE_CACHE_VERSION = 2
 
 
 def _claude_usage_key(msg, evt):
@@ -3404,23 +3421,42 @@ def _parse_claude_usage_state(path, state=None):
     agg = state.get("agg") or {}
     seen = set(state.get("seen") or [])
     offset = int(state.get("offset") or 0)
+    committed_offset = offset
     with open(path, "rb") as f:
         f.seek(offset)
-        for raw in f:
+        while True:
+            raw = f.readline()
+            if not raw:
+                break
+            line_end = f.tell()
+            terminated = raw.endswith(b"\n")
             line = raw.decode("utf-8", "replace")
             if '"usage"' not in line:
+                # A writer may be between writes. Do not permanently skip a partial
+                # final JSON object merely because its interesting fields are absent.
+                if not terminated:
+                    try:
+                        json.loads(line)
+                    except ValueError:
+                        break
+                committed_offset = line_end
                 continue
             try:
                 evt = json.loads(line)
             except ValueError:
+                if not terminated:
+                    break
+                committed_offset = line_end
                 continue
             msg = evt.get("message") or {}
             usage = msg.get("usage")
             if not usage or evt.get("type") != "assistant":
+                committed_offset = line_end
                 continue
             key = _claude_usage_key(msg, evt)
             if key is not None:
                 if key in seen:
+                    committed_offset = line_end
                     continue
                 seen.add(key)
             ts = evt.get("timestamp", "")
@@ -3436,8 +3472,8 @@ def _parse_claude_usage_state(path, state=None):
                 slot[4] += cc.get("ephemeral_1h_input_tokens", 0)
             else:   # 老格式无细分，按 5m 档保守计
                 slot[3] += usage.get("cache_creation_input_tokens", 0)
-        offset = f.tell()
-    return {"agg": agg, "seen": sorted(seen), "offset": offset}
+            committed_offset = line_end
+    return {"agg": agg, "seen": sorted(seen), "offset": committed_offset}
 
 
 def _parse_claude_file_usage(path):
@@ -3503,53 +3539,138 @@ def _claude_file_cwd(path):
     return cwd
 
 
-_CODEX_USAGE_CACHE_VERSION = 1
+def _iter_claude_usage_files():
+    """Return top-level and subagent Claude transcripts without duplicates."""
+    files = set()
+    for src in claude_sources():
+        projects = src["path"] / "projects"
+        files.update(projects.glob("*/*.jsonl"))
+        files.update(projects.glob("*/**/subagents/*.jsonl"))
+    return sorted(files)
+
+
+_CODEX_USAGE_CACHE_VERSION = 5
+_CODEX_USAGE_ACTIVITY_TYPES = {
+    "user_message", "agent_message", "task_started", "task_complete",
+}
 
 
 def _parse_codex_usage_state(path, state=None):
     """Incrementally parse a rollout and return serializable aggregation state."""
     state = dict(state or {})
+    meta = _rollout_meta(path)
+    detected_kind = str(meta.get("subagent_kind") or "")
+    if detected_kind == "thread_spawn" \
+            and state.get("subagent_kind") != "thread_spawn":
+        # The first session_meta line may have been incomplete during an earlier
+        # pass. Once a fork is identified, discard any provisional top-level
+        # state and replay from byte zero so copied parent history is excluded.
+        state = {}
     agg = {hour: [int(value[0]), float(value[1])]
            for hour, value in (state.get("agg") or {}).items()}
     previous = state.get("previous")
     model = str(state.get("model") or "")
     offset = int(state.get("offset") or 0)
+    has_activity = bool(state.get("has_activity"))
+    has_usage = bool(state.get("has_usage"))
     stat = path.stat()
-    if state.get("subagent") or (offset == 0 and _rollout_meta(path).get("subagent")):
-        return {"agg": {}, "previous": None, "model": "", "offset": stat.st_size,
-                "subagent": True}
+    subagent = bool(state.get("subagent")) or bool(meta.get("subagent"))
+    subagent_kind = str(state.get("subagent_kind") or meta.get("subagent_kind") or "")
+    replay_complete = bool(state.get("replay_complete")) \
+        if "replay_complete" in state else subagent_kind != "thread_spawn"
+    session_started_at = meta.get("started_at")
     fallback_hour = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc) \
         .strftime("%Y-%m-%dT%H")
+    committed_offset = offset
     with open(path, "rb") as lines:
         lines.seek(offset)
-        for raw in lines:
+        while True:
+            raw = lines.readline()
+            if not raw:
+                break
+            line_end = lines.tell()
+            terminated = raw.endswith(b"\n")
             line = raw.decode("utf-8", "replace")
-            if '"total_token_usage"' not in line and '"model"' not in line:
+            interesting = ('"total_token_usage"' in line or '"model"' in line
+                           or any(f'"{kind}"' in line
+                                  for kind in _CODEX_USAGE_ACTIVITY_TYPES))
+            if not interesting:
+                if not terminated:
+                    try:
+                        json.loads(line)
+                    except ValueError:
+                        break
+                committed_offset = line_end
                 continue
             try:
                 evt = json.loads(line)
             except ValueError:
+                if not terminated:
+                    break
+                committed_offset = line_end
                 continue
             payload = evt.get("payload") or {}
+            payload_type = payload.get("type")
+            if not replay_complete:
+                child_start = payload.get("started_at")
+                if (payload_type == "task_started"
+                        and isinstance(child_start, (int, float))
+                        and isinstance(session_started_at, (int, float))
+                        and child_start >= int(session_started_at)):
+                    replay_complete = True
+                else:
+                    # A thread_spawn rollout starts with a physical copy of the
+                    # parent's history. Preserve its last cumulative snapshot as
+                    # the baseline, but never aggregate that replay into the child.
+                    replay_usage = (payload.get("info") or {}).get(
+                        "total_token_usage")
+                    if isinstance(replay_usage, dict):
+                        replay_input = max(
+                            0, int(replay_usage.get("input_tokens") or 0))
+                        replay_output = max(
+                            0, int(replay_usage.get("output_tokens") or 0))
+                        previous = {
+                            "input": replay_input,
+                            "cached": max(0, int(
+                                replay_usage.get("cached_input_tokens") or 0)),
+                            "output": replay_output,
+                            "total": max(
+                                replay_input + replay_output,
+                                int(replay_usage.get("total_tokens") or 0)),
+                        }
+                    committed_offset = line_end
+                    continue
+            if payload_type in _CODEX_USAGE_ACTIVITY_TYPES:
+                has_activity = True
+            elif (evt.get("type") == "response_item" and payload_type == "message"
+                  and payload.get("role") in ("user", "assistant")):
+                has_activity = True
             if evt.get("type") == "turn_context" and payload.get("model"):
                 model = str(payload["model"])
             info = payload.get("info") or {}
             usage = info.get("total_token_usage")
             if not isinstance(usage, dict):
+                committed_offset = line_end
                 continue
             current = {
                 "input": max(0, int(usage.get("input_tokens") or 0)),
                 "cached": max(0, int(usage.get("cached_input_tokens") or 0)),
                 "output": max(0, int(usage.get("output_tokens") or 0)),
             }
+            current["total"] = max(
+                current["input"] + current["output"],
+                int(usage.get("total_tokens") or 0))
+            if current["total"] > 0:
+                has_usage = True
             reset = previous is None or any(current[k] < previous[k] for k in current)
             base = {k: 0 for k in current} if reset else previous
             inp = current["input"] - base["input"]
             cached = min(current["cached"] - base["cached"], inp)
             out = current["output"] - base["output"]
             previous = current
-            total = inp + out
+            total = max(inp + out, current["total"] - base["total"])
             if total <= 0:
+                committed_offset = line_end
                 continue
             prices = _codex_price(model)
             cost = ((inp - cached) * prices[0] + out * prices[1]
@@ -3559,13 +3680,15 @@ def _parse_codex_usage_state(path, state=None):
                 else fallback_hour
             prev_total, prev_cost = agg.get(hour, (0, 0.0))
             agg[hour] = [prev_total + total, prev_cost + cost]
-        offset = lines.tell()
-    return {"agg": agg, "previous": previous, "model": model, "offset": offset,
-            "subagent": False}
+            committed_offset = line_end
+    return {"agg": agg, "previous": previous, "model": model,
+            "offset": committed_offset, "subagent": subagent,
+            "subagent_kind": subagent_kind, "replay_complete": replay_complete,
+            "has_activity": has_activity, "has_usage": has_usage}
 
 
 def _parse_codex_file_usage(path):
-    """Aggregate positive cumulative deltas by event hour for one top-level rollout."""
+    """Aggregate positive cumulative deltas by event hour for one rollout."""
     state = _parse_codex_usage_state(path)
     return {hour: (value[0], value[1]) for hour, value in state["agg"].items()}
 
@@ -3590,8 +3713,11 @@ def _cached_codex_file_usage(path, disk_cache):
         same_content = (same_file and entry.get("size") == stat.st_size
                         and entry.get("mtime_ns") == stat.st_mtime_ns)
         if same_content:
+            coverage = {"has_activity": bool(entry.get("has_activity")),
+                        "has_usage": bool(entry.get("has_usage"))}
             return ({hour: (value[0], value[1])
-                     for hour, value in (entry.get("agg") or {}).items()}, False)
+                     for hour, value in (entry.get("agg") or {}).items()},
+                    False, coverage)
         appendable = same_file and stat.st_size >= int(entry.get("offset") or 0)
         state = entry if appendable else None
     else:
@@ -3600,7 +3726,10 @@ def _cached_codex_file_usage(path, disk_cache):
     parsed.update({"version": _CODEX_USAGE_CACHE_VERSION, "inode": stat.st_ino,
                    "size": stat.st_size, "mtime_ns": stat.st_mtime_ns})
     disk_cache[key] = parsed
-    return ({hour: (value[0], value[1]) for hour, value in parsed["agg"].items()}, True)
+    coverage = {"has_activity": bool(parsed.get("has_activity")),
+                "has_usage": bool(parsed.get("has_usage"))}
+    return ({hour: (value[0], value[1]) for hour, value in parsed["agg"].items()},
+            True, coverage)
 
 
 def _model_short(model):
@@ -3625,6 +3754,17 @@ def _hour_epoch(hour_key):
         return None
 
 
+def _usage_project_cwd(cwd, mappings):
+    """Canonicalize project attribution through a user-confirmed move mapping."""
+    original = _normalize_session_cwd(cwd)
+    if not original:
+        return ""
+    target = mappings.get(original)
+    if target and os.path.isdir(target):
+        return os.path.realpath(target)
+    return os.path.realpath(original) if os.path.isdir(original) else original
+
+
 def api_usage():
     def build():
         cutoff = time.time() - 30 * 86400
@@ -3638,9 +3778,10 @@ def api_usage():
         hour_cut = now - 48 * 3600    # 48h：近 24h 画曲线，前 24h 供环比
         hourly = {}   # epoch_hour -> {"c": tokens, "x": tokens}
         projects = {}  # cwd -> {"tokens": n, "cost": $}（近 7 天）
+        with _path_mappings_lock:
+            path_mappings = _load_path_mappings()
 
-        claude_usage_files = [p for src in claude_sources()
-                              for p in (src["path"] / "projects").glob("*/*.jsonl")]
+        claude_usage_files = _iter_claude_usage_files()
         claude_cache = _load_claude_usage_cache()
         valid_claude_paths = {str(path) for path in claude_usage_files}
         claude_cache_dirty = False
@@ -3674,9 +3815,12 @@ def api_usage():
                             if fcwd is None:
                                 fcwd = _claude_file_cwd(path)
                             if fcwd:
-                                p = projects.setdefault(fcwd, {"tokens": 0, "cost": 0.0})
-                                p["tokens"] += sum(tk)
-                                p["cost"] += c
+                                project_cwd = _usage_project_cwd(fcwd, path_mappings)
+                                if project_cwd:
+                                    p = projects.setdefault(
+                                        project_cwd, {"tokens": 0, "cost": 0.0})
+                                    p["tokens"] += sum(tk)
+                                    p["cost"] += c
                     if ep and ep >= hour_cut:
                         hourly.setdefault(ep, {"c": 0, "x": 0})["c"] += sum(tk)
 
@@ -3694,6 +3838,7 @@ def api_usage():
         codex_cache = _load_codex_usage_cache()
         valid_codex_paths = {str(path) for path in codex_files}
         cache_dirty = False
+        codex_coverage_files = codex_missing_usage_files = 0
         for stale_key in set(codex_cache) - valid_codex_paths:
             codex_cache.pop(stale_key, None)
             cache_dirty = True
@@ -3701,10 +3846,17 @@ def api_usage():
             try:
                 if path.stat().st_mtime < cutoff:
                     continue
-                agg, changed = _cached_codex_file_usage(path, codex_cache)
+                stat = path.stat()
+                agg, changed, coverage = _cached_codex_file_usage(path, codex_cache)
                 cache_dirty = cache_dirty or changed
             except OSError:
                 continue
+            if coverage["has_activity"]:
+                codex_coverage_files += 1
+                # Active rollouts can receive their first token snapshot shortly after
+                # task start; only flag stable files as irrecoverably incomplete.
+                if not coverage["has_usage"] and now - stat.st_mtime > 120:
+                    codex_missing_usage_files += 1
             for hour, (total, cost) in agg.items():
                 ep = _hour_epoch(hour)
                 day = datetime.fromtimestamp(ep).strftime("%Y-%m-%d") if ep else hour[:10]
@@ -3716,9 +3868,12 @@ def api_usage():
                         xcost_7d += cost
                         cwd = _rollout_meta(path)["cwd"]
                         if cwd:
-                            p = projects.setdefault(cwd, {"tokens": 0, "cost": 0.0})
-                            p["tokens"] += total
-                            p["cost"] += cost
+                            project_cwd = _usage_project_cwd(cwd, path_mappings)
+                            if project_cwd:
+                                p = projects.setdefault(
+                                    project_cwd, {"tokens": 0, "cost": 0.0})
+                                p["tokens"] += total
+                                p["cost"] += cost
                 if ep and ep >= hour_cut:
                     hourly.setdefault(ep, {"c": 0, "x": 0})["x"] += total
 
@@ -3748,6 +3903,10 @@ def api_usage():
             "claude_cost_30d": round(cost_30d, 2),
             "codex_cost_7d": round(xcost_7d, 2),
             "codex_cost_30d": round(xcost_30d, 2),
+            "coverage": {
+                "codex_files": codex_coverage_files,
+                "codex_missing_usage_files": codex_missing_usage_files,
+            },
             "ts": time.time(),
         }
     return cached("usage", 120, build)
@@ -3756,6 +3915,7 @@ def api_usage():
 # ----------------------------------------------------------------- 恢复会话
 
 _ID_RE = re.compile(r"^[A-Za-z0-9-]{8,64}$")
+_path_mappings_lock = threading.Lock()
 
 
 def _shell_quote(s):
@@ -3764,6 +3924,83 @@ def _shell_quote(s):
 
 def _osa_escape(s):
     return s.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _normalize_session_cwd(value):
+    """Return a stable absolute path for resume lookup, or None for unusable metadata."""
+    if not isinstance(value, str):
+        return None
+    if not value or len(value) > 4096 or "\0" in value:
+        return None
+    expanded = os.path.expanduser(value)
+    if not os.path.isabs(expanded):
+        return None
+    return os.path.normpath(expanded)
+
+
+def _load_path_mappings():
+    try:
+        payload = json.loads(PATH_MAPPINGS_FILE.read_text())
+    except (OSError, ValueError):
+        return {}
+    raw = payload.get("mappings") if isinstance(payload, dict) else None
+    if not isinstance(raw, dict):
+        return {}
+    mappings = {}
+    for old, new in raw.items():
+        old_path = _normalize_session_cwd(old)
+        new_path = _normalize_session_cwd(new)
+        if old_path and new_path:
+            mappings[old_path] = new_path
+    return mappings
+
+
+def _save_path_mappings(mappings):
+    payload = {"version": 1, "mappings": mappings}
+    _atomic_write_text(PATH_MAPPINGS_FILE,
+                       json.dumps(payload, ensure_ascii=False, indent=1))
+
+
+def _mapped_session_cwd(original_cwd):
+    with _path_mappings_lock:
+        target = _load_path_mappings().get(original_cwd)
+    if target and os.path.isdir(target):
+        return os.path.realpath(target)
+    return None
+
+
+def _remember_session_cwd(original_cwd, replacement_cwd):
+    replacement = _normalize_session_cwd(replacement_cwd)
+    if not original_cwd or not replacement or not os.path.isdir(replacement):
+        return None
+    replacement = os.path.realpath(replacement)
+    with _path_mappings_lock:
+        mappings = _load_path_mappings()
+        mappings[original_cwd] = replacement
+        _save_path_mappings(mappings)
+    with _cache_lock:
+        _ttl_cache.pop("usage", None)
+    return replacement
+
+
+def _forget_session_cwd(original_cwd):
+    if not original_cwd:
+        return False
+    with _path_mappings_lock:
+        mappings = _load_path_mappings()
+        removed = mappings.pop(original_cwd, None) is not None
+        if removed:
+            _save_path_mappings(mappings)
+    if removed:
+        with _cache_lock:
+            _ttl_cache.pop("usage", None)
+    return removed
+
+
+def _resume_command(tool, sid, env_prefix, cwd=None):
+    binary = "claude --resume" if tool == "claude" else "codex resume"
+    command = f"{env_prefix}{binary} {_shell_quote(sid)}"
+    return f"cd {_shell_quote(cwd)} && {command}" if cwd else command
 
 
 # 可直接注入命令的终端：(mode, App 名, 显示名)，auto 按此优先级取第一个已安装的
@@ -3834,14 +4071,28 @@ def api_terminals():
     return {"terminals": out}
 
 
+def api_path_mapping(body):
+    original_cwd = _normalize_session_cwd(body.get("original_cwd"))
+    if not original_cwd:
+        return {"ok": False, "error": "invalid original directory"}
+    action = body.get("action")
+    if action == "set":
+        replacement = _remember_session_cwd(
+            original_cwd, body.get("replacement_cwd"))
+        if replacement is None:
+            return {"ok": False, "error": "invalid replacement directory"}
+        return {"ok": True, "mapped": True, "resolved_cwd": replacement}
+    if action == "remove":
+        return {"ok": True, "mapped": False,
+                "removed": _forget_session_cwd(original_cwd)}
+    return {"ok": False, "error": "invalid action"}
+
+
 def api_resume(body):
     tool = body.get("tool")
     sid = body.get("id", "")
-    cwd = body.get("cwd") or str(HOME)
     if tool not in ("claude", "codex") or not _ID_RE.match(sid):
         return {"ok": False, "error": "invalid args"}
-    if not os.path.isdir(cwd):
-        cwd = str(HOME)
 
     # 复合身份里的账号决定 CLI 应读取哪套配置目录。显式传账号时始终固定环境变量，
     # 包括 default：否则用户 shell 里已有的 CLAUDE_CONFIG_DIR/CODEX_HOME 会把恢复
@@ -3857,11 +4108,35 @@ def api_resume(body):
             return {"ok": False, "error": "account not found"}
         env_name = "CLAUDE_CONFIG_DIR" if tool == "claude" else "CODEX_HOME"
         env_prefix = f"/usr/bin/env {env_name}={_shell_quote(str(source['path']))} "
-    binary = "claude --resume" if tool == "claude" else "codex resume"
-    cmd = f"cd {_shell_quote(cwd)} && {env_prefix}{binary} {_shell_quote(sid)}"
+
+    original_cwd = _normalize_session_cwd(body.get("cwd"))
+    cwd = None
+    mapped = False
+    if original_cwd:
+        replacement = body.get("replacement_cwd")
+        if replacement is not None:
+            cwd = _remember_session_cwd(original_cwd, replacement)
+            if cwd is None:
+                return {"ok": False, "error": "invalid replacement directory"}
+            mapped = True
+        else:
+            cwd = _mapped_session_cwd(original_cwd)
+            mapped = cwd is not None
+            if cwd is None and os.path.isdir(original_cwd):
+                cwd = os.path.realpath(original_cwd)
+        if cwd is None:
+            # 先让原生壳选择迁移后的工程目录；取消时 command 可直接作为无 cd 的安全降级。
+            return {"ok": True, "copy": True, "needs_path": True,
+                    "command": _resume_command(tool, sid, env_prefix),
+                    "original_cwd": original_cwd}
+    elif body.get("replacement_cwd") is not None:
+        return {"ok": False, "error": "invalid original directory"}
+
+    cmd = _resume_command(tool, sid, env_prefix, cwd)
 
     if body.get("copy_only") is True:
-        return {"ok": True, "copy": True, "command": cmd}
+        return {"ok": True, "copy": True, "command": cmd,
+                "resolved_cwd": cwd, "path_mapped": mapped}
 
     mode = get_settings()["terminal"]
     if mode == "copy":   # 仅返回命令，由前端复制到剪贴板
@@ -3878,7 +4153,8 @@ def api_resume(body):
     if mode in paste_avail:
         # 无法注入命令：打开 App（尽量带 cwd）+ 由前端复制命令，粘贴回车即恢复
         app = paste_avail[mode]
-        r = subprocess.run(["open", "-a", app, cwd],
+        open_args = ["open", "-a", app] + ([cwd] if cwd else [])
+        r = subprocess.run(open_args,
                            capture_output=True, text=True, timeout=20)
         if r.returncode != 0:    # 该 App 不接受目录参数时退化为仅打开
             subprocess.run(["open", "-a", app], capture_output=True, timeout=20)
@@ -3907,11 +4183,12 @@ def api_resume(body):
     else:
         # 命令行直启（open --args）；会话退出后 exec zsh 保住窗口
         keep = f"{cmd}; exec zsh -i"
+        launch_cwd = cwd or str(HOME)
         args = {
             "ghostty": ["-e", "zsh", "-ic", keep],
-            "kitty": ["--directory", cwd, "zsh", "-ic", keep],
-            "wezterm": ["start", "--cwd", cwd, "--", "zsh", "-ic", keep],
-            "alacritty": ["--working-directory", cwd, "-e", "zsh", "-ic", keep],
+            "kitty": ["--directory", launch_cwd, "zsh", "-ic", keep],
+            "wezterm": ["start", "--cwd", launch_cwd, "--", "zsh", "-ic", keep],
+            "alacritty": ["--working-directory", launch_cwd, "-e", "zsh", "-ic", keep],
         }[mode]
         proc = subprocess.run(["open", "-na", run_avail[mode], "--args", *args],
                               capture_output=True, text=True, timeout=20)
@@ -4018,7 +4295,8 @@ class Handler(BaseHTTPRequestHandler):
         if not self._csrf_ok():
             return self._send(403, {"error": "forbidden"})
         path = self.path.split("?")[0]
-        handlers = {"/api/resume": api_resume, "/api/pin": api_pin,
+        handlers = {"/api/resume": api_resume, "/api/path-mapping": api_path_mapping,
+                    "/api/pin": api_pin,
                     "/api/settings": api_settings_save, "/api/event": api_event,
                     "/api/focus": api_focus, "/api/data": api_data,
                     "/api/update/install": api_update_install}

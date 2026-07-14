@@ -278,11 +278,28 @@ public final class AppStore: ObservableObject {
 
     // MARK: 动作
     @discardableResult
-    func resume(_ s: SessionItem, copyOnly: Bool = false) async -> ResumeResult? {
+    func resume(_ s: SessionItem, copyOnly: Bool = false,
+                replacementCwd: String? = nil) async -> ResumeResult? {
         let request = SessionResumeRequest(
             tool: s.tool, id: s.id, cwd: s.cwd ?? "",
-            accountId: s.accountId, copyOnly: copyOnly)
+            accountId: s.accountId, copyOnly: copyOnly,
+            replacementCwd: replacementCwd)
         return try? await api.post("/api/resume", body: request)
+    }
+
+    func setPathMapping(originalCwd: String, replacementCwd: String) async -> Bool {
+        let response = try? await api.postJSON("/api/path-mapping", body: [
+            "action": "set", "original_cwd": originalCwd,
+            "replacement_cwd": replacementCwd,
+        ])
+        return response?["ok"] as? Bool == true
+    }
+
+    func removePathMapping(originalCwd: String) async -> Bool {
+        let response = try? await api.postJSON("/api/path-mapping", body: [
+            "action": "remove", "original_cwd": originalCwd,
+        ])
+        return response?["ok"] as? Bool == true
     }
 
     func pin(_ s: SessionItem) async {

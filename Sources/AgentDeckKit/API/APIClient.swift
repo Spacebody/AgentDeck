@@ -61,7 +61,11 @@ actor APIClient {
             comps?.queryItems = query.map { URLQueryItem(name: $0.key, value: $0.value) }
         }
         guard let url = comps?.url else { throw APIError.badURL }
-        let (data, resp) = try await session.data(for: URLRequest(url: url))
+        var request = URLRequest(url: url)
+        // A cache-version upgrade may require one full 30-day JSONL rebuild.
+        // Keep the stricter default for every other loopback endpoint.
+        if path == "/api/usage" { request.timeoutInterval = 45 }
+        let (data, resp) = try await session.data(for: request)
         try Self.check(resp)
         return try decoder.decode(T.self, from: data)
     }

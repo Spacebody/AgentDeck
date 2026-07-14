@@ -110,7 +110,8 @@ enum PreviewSamples {
                 ProjectUsage(name: "Codex/cli", cwd: "/Users/jerry/Codex/cli", tokens: 900_000, cost: 6),
             ],
             cost7d: 66, cost30d: 210,
-            claudeCost7d: 54, claudeCost30d: 170, codexCost7d: 12, codexCost30d: 40)
+            claudeCost7d: 54, claudeCost30d: 170, codexCost7d: 12, codexCost30d: 40,
+            coverage: UsageCoverage(codexFiles: 24, codexMissingUsageFiles: 0))
     }
     static var today: TodaySummary? { TodaySummary(from: usage) }
 

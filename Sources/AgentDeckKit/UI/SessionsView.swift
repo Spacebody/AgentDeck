@@ -15,6 +15,8 @@ struct SessionsView: View {
     var onResume: (SessionItem) -> Void = { _ in }
     var onCopy: (SessionItem) -> Void = { _ in }
     var onPin: (SessionItem) -> Void = { _ in }
+    var onRelocate: (SessionItem) -> Void = { _ in }
+    var onForgetPath: (SessionItem) -> Void = { _ in }
     /// 加载某会话预览（接 store.preview，异步）。
     var loadPreview: (SessionItem) async -> [PreviewMsg] = { _ in [] }
     /// 搜索词/工具筛选由 AppStore 持有，切换 Tab 后仍保持一致。
@@ -38,6 +40,8 @@ struct SessionsView: View {
          onResume: @escaping (SessionItem) -> Void = { _ in },
          onCopy: @escaping (SessionItem) -> Void = { _ in },
          onPin: @escaping (SessionItem) -> Void = { _ in },
+         onRelocate: @escaping (SessionItem) -> Void = { _ in },
+         onForgetPath: @escaping (SessionItem) -> Void = { _ in },
          loadPreview: @escaping (SessionItem) async -> [PreviewMsg] = { _ in [] },
          onSearch: @escaping (String) -> Void = { _ in },
          onFilter: @escaping (String) -> Void = { _ in },
@@ -47,7 +51,9 @@ struct SessionsView: View {
         self.query = query; self.filter = filter; self.total = total
         self.hasMore = hasMore; self.loading = loading
         self.indexing = indexing; self.loadFailed = loadFailed
-        self.onResume = onResume; self.onCopy = onCopy; self.onPin = onPin; self.loadPreview = loadPreview
+        self.onResume = onResume; self.onCopy = onCopy; self.onPin = onPin
+        self.onRelocate = onRelocate; self.onForgetPath = onForgetPath
+        self.loadPreview = loadPreview
         self.onSearch = onSearch; self.onFilter = onFilter; self.onLoadMore = onLoadMore
         self.initialExpanded = initialExpanded; self.seededPreviews = seededPreviews
         _expandedKey = State(initialValue: initialExpanded)
@@ -85,7 +91,8 @@ struct SessionsView: View {
                     expanded: expandedKey == s.rowKey,
                     preview: previews[s.rowKey],
                     onToggle: { toggle(s) },
-                    onResume: { onResume(s) }, onCopy: { onCopy(s) }, onPin: { onPin(s) })
+                    onResume: { onResume(s) }, onCopy: { onCopy(s) }, onPin: { onPin(s) },
+                    onRelocate: { onRelocate(s) }, onForgetPath: { onForgetPath(s) })
             }
             if indexing { statusRow("session.indexing", spinning: true) }
             if loadFailed { statusRow("session.loadFailed", spinning: false) }
@@ -217,6 +224,8 @@ private struct SessionRow: View {
     var onResume: () -> Void = {}
     var onCopy: () -> Void = {}
     var onPin: () -> Void = {}
+    var onRelocate: () -> Void = {}
+    var onForgetPath: () -> Void = {}
 
     @State private var hovering = false
     private var brand: Brand { session.tool == "codex" ? .codex : .claude }
@@ -246,6 +255,16 @@ private struct SessionRow: View {
             .fill(session.pinned == true ? Color(hex: 0xffd479).opacity(0.045)
                   : (hovering ? Color.white.opacity(0.06) : .clear)))
         .onHover { hovering = $0 }
+        .contextMenu {
+            if session.cwd?.isEmpty == false {
+                Button(action: onRelocate) {
+                    Label(L("session.relocate"), systemImage: "folder.badge.gearshape")
+                }
+                Button(action: onForgetPath) {
+                    Label(L("session.forgetPath"), systemImage: "arrow.uturn.backward")
+                }
+            }
+        }
     }
 
     private var meta: String {

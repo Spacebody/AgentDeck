@@ -55,11 +55,13 @@ struct SessionResumeRequest: Encodable {
     let cwd: String
     let accountId: String?
     let copyOnly: Bool
+    let replacementCwd: String?
 
     enum CodingKeys: String, CodingKey {
         case tool, id, cwd
         case accountId = "account_id"
         case copyOnly = "copy_only"
+        case replacementCwd = "replacement_cwd"
     }
 }
 
@@ -72,5 +74,9 @@ struct ResumeResult: Decodable {
     let app: String?
     let autoPaste: Bool?
     let terminal: String?
+    let needsPath: Bool?
+    let originalCwd: String?
+    let resolvedCwd: String?
+    let pathMapped: Bool?
     let error: String?
 }

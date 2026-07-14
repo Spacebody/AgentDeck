@@ -50,6 +50,7 @@ AgentDeck 将 Claude Code 与 Codex 的额度监控、会话管理与用量统�
 - 点击活跃会话聚焦其所在终端：沿进程链自动识别宿主 `.app`，兼容任意终端，无需维护终端清单；iTerm2 / Terminal 精确至标签页；Codex 桌面端经 `codex://` 深链直达线程
 - 会话完成弹窗提醒，点击跳转回会话；事件去重，仅提醒一次
 - 历史会话一键恢复：iTerm2 / Terminal / Ghostty / kitty / WezTerm / Alacritty 直接注入命令启动；Warp / VS Code / Cursor / Windsurf / Hyper / Tabby / Rio / Wave 走「打开应用 + 复制命令」
+- 原工程目录移动后可选择新位置并记住映射；取消选择时复制不含旧路径的安全恢复命令，右键会话可重新选择或忘记映射
 - 会话列表支持完整历史元数据搜索、按端筛选、分页加载、置顶与对话预览；SQLite 增量索引让查询不再逐次扫描 transcript
 
 **用量统计**
@@ -138,7 +139,7 @@ scripts/             图标与 DMG 背景生成、Codex notify 包装、CSRF 回
 | Codex 额度 / 用量 / 会话 | 解析本地 `~/.codex/sessions` rollout 文件 | 同上；搜索和分页只读元数据索引，不逐次扫描原始会话 |
 | 完成事件 | AgentDeck 自动安装的 Claude Stop hook / Codex notify wrapper 回调（见会话完成提醒集成） | 完成提醒与事件流 |
 
-运行时产物：数据目录 `~/Library/Application Support/AgentDeck/`，日志 `~/Library/Logs/AgentDeck.log`。其中 `claude_usage_cache.json`、`codex_usage_cache.json` 与 `session_index.sqlite3` 均为可重建缓存；会话索引只保存标题、项目、路径、分支、时间与文件指纹，不保存完整对话正文。`pins.json` 是置顶状态真源，删除数据库不会丢收藏，只会触发后台重建索引。
+运行时产物：数据目录 `~/Library/Application Support/AgentDeck/`，日志 `~/Library/Logs/AgentDeck.log`。其中 `claude_usage_cache.json`、`codex_usage_cache.json` 与 `session_index.sqlite3` 均为可重建缓存；会话索引只保存标题、项目、路径、分支、时间与文件指纹，不保存完整对话正文。`pins.json` 是置顶状态真源，`path_mappings.json` 保存用户确认的工程迁移路径；删除数据库不会丢失这两类用户状态，只会触发后台重建索引。
 
 ## 安全设计
 
@@ -151,8 +152,9 @@ scripts/             图标与 DMG 背景生成、Codex notify 包装、CSRF 回
 
 ## 统计口径
 
-- **Claude**：usage 记录按 `(message.id, requestId)` 去重；cache 写入按 ephemeral 5m / 1h 两档分别计价；单价表按模型版本前缀匹配
-- **Codex**：按每条 `total_token_usage` 累计快照的正增量归入事件发生小时；跳过会完整重放父历史的 subagent rollout，只统计顶层累计流，cached input 不重复计入 input
+- **Claude**：主会话与 subagent 转写均纳入统计；usage 记录按 `(message.id, requestId)` 去重；cache 写入按 ephemeral 5m / 1h 两档分别计价；单价表按模型版本前缀匹配
+- **Codex**：主会话与 subagent rollout 均纳入统计；`thread_spawn` 开头复制的父历史不重复计算，只统计子线程启动后的 `total_token_usage` 正增量，cached input 不重复计入 input；稳定会话缺少上游 token 遥测时会在面板标记统计不完整，不凭空估算
+- **项目归属**：项目 Top 会应用用户确认的工程迁移路径，同一工程移动前后的会话合并展示
 - 金额为静态模型单价表换算的 API 等值估算，不代表订阅实际账单；未知 Codex 模型按当前默认档估算
 - 面板内各 ⓘ 入口提供对应视图的逐项口径说明
 

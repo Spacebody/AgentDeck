@@ -51,6 +51,15 @@ struct UsageView: View {
             }
             Spacer(minLength: 6)
             if let u = usage {
+                if let missing = u.coverage?.codexMissingUsageFiles, missing > 0 {
+                    let warning = L("usage.incomplete", ["count": "\(missing)"])
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundStyle(Theme.warn)
+                        .fixedSize()
+                        .help(warning)
+                        .accessibilityLabel(warning)
+                }
                 Text(L("usage.costEq", ["c7": "\(Int((u.cost7d ?? 0).rounded()))",
                                         "c30": "\(Int((u.cost30d ?? 0).rounded()))"]).strippingBold)
                     .font(.system(size: 10.5)).foregroundStyle(Theme.ink3)

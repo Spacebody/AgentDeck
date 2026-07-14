@@ -17,10 +17,15 @@ struct UsageResponse: Decodable {
     let claudeCost30d: Double?
     let codexCost7d: Double?
     let codexCost30d: Double?
+    let coverage: UsageCoverage?
 }
 
 struct HourBucket: Decodable { let ts: Double; let c: Double; let x: Double }
 struct ProjectUsage: Decodable { let name: String; let cwd: String; let tokens: Double; let cost: Double }
+struct UsageCoverage: Decodable {
+    let codexFiles: Int
+    let codexMissingUsageFiles: Int
+}
 
 // MARK: - /api/active（活跃会话，对应 api_active 行 1244）
 struct ActiveResponse: Decodable { let active: [ActiveSession] }

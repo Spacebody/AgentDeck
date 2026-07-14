@@ -1,6 +1,7 @@
 // AgentDeck v2 — 应用外壳（#4+#10）。复刻 index.html 的 body 结构：
 // 顶栏(logo/live/设置/刷新) + 更新横幅 + 双 tab(概览/会话) + 设置右滑浮层 + 统计口径弹层 + toast。
 // 把 store 数据与动作闭包接入各视图；主壳(main.swift)以 NSHostingView 承载本视图，退役 WebView。
+import AppKit
 import SwiftUI
 
 // MARK: - 统计口径弹层种类（today 摘要 / usage 当前视图）
@@ -370,6 +371,7 @@ public struct AgentDeckRootView: View {
                 loading: store.sessionsLoading, indexing: store.sessionsIndexing,
                 loadFailed: store.sessionsLoadFailed,
                 onResume: resume, onCopy: copyCommand, onPin: pin,
+                onRelocate: relocate, onForgetPath: forgetPathMapping,
                 loadPreview: { await store.preview($0) },
                 onSearch: { store.search($0) },
                 onFilter: { store.setSessionFilter($0) },
@@ -524,30 +526,111 @@ public struct AgentDeckRootView: View {
         }
     }
     private func resume(_ s: SessionItem) {
+        performResume(s, copyOnly: false)
+    }
+    private func copyCommand(_ s: SessionItem) {
+        performResume(s, copyOnly: true)
+    }
+    private func performResume(_ s: SessionItem, copyOnly: Bool) {
         Task {
-            let r = await store.resume(s)
-            if r?.ok == true, r?.copy == true {
-                guard let command = r?.command else {
-                    showToast(L("session.resumeFailed")); return
+            var result = await store.resume(s, copyOnly: copyOnly)
+            if result?.needsPath == true {
+                guard let fallbackCommand = result?.command else {
+                    showToast(L(copyOnly ? "session.copyFailed" : "session.resumeFailed"))
+                    return
+                }
+                guard let replacement = chooseReplacementDirectory(
+                    originalPath: result?.originalCwd ?? s.cwd ?? "",
+                    expectedProject: s.project ?? "") else {
+                    copyText(fallbackCommand)
+                    showToast(L("session.pathFallbackCopied"))
+                    return
+                }
+                result = await store.resume(
+                    s, copyOnly: copyOnly, replacementCwd: replacement)
+            }
+
+            if copyOnly {
+                guard result?.ok == true, let command = result?.command else {
+                    showToast(L("session.copyFailed"))
+                    return
                 }
                 copyText(command)
-                showToast(r?.paste == true ? L("session.openedPaste", ["app": r?.app ?? ""]) : L("session.cmdCopied"))
-                if r?.paste == true, r?.autoPaste == true { onHidePanel(); onPasteEnter() }
+                showToast(L("session.cmdCopied"))
+            } else if result?.ok == true, result?.copy == true {
+                guard let command = result?.command else {
+                    showToast(L("session.resumeFailed"))
+                    return
+                }
+                copyText(command)
+                showToast(result?.paste == true
+                          ? L("session.openedPaste", ["app": result?.app ?? ""])
+                          : L("session.cmdCopied"))
+                if result?.paste == true, result?.autoPaste == true {
+                    onHidePanel()
+                    onPasteEnter()
+                }
             } else {
-                showToast(r?.ok == true ? L("session.resumed")
-                          : L("session.resumeFailedReason", ["err": r?.error ?? ""]))
+                showToast(result?.ok == true ? L("session.resumed")
+                          : L("session.resumeFailedReason", ["err": result?.error ?? ""]))
             }
         }
     }
-    private func copyCommand(_ s: SessionItem) {
+    private func relocate(_ s: SessionItem) {
+        guard let originalPath = s.cwd, !originalPath.isEmpty,
+              let replacement = chooseReplacementDirectory(
+                originalPath: originalPath, expectedProject: s.project ?? "") else { return }
         Task {
-            let r = await store.resume(s, copyOnly: true)
-            guard r?.ok == true, let command = r?.command else {
-                showToast(L("session.copyFailed")); return
-            }
-            copyText(command)
-            showToast(L("session.cmdCopied"))
+            let ok = await store.setPathMapping(
+                originalCwd: originalPath, replacementCwd: replacement)
+            showToast(L(ok ? "session.pathMapped" : "session.pathMappingFailed"))
         }
+    }
+    private func forgetPathMapping(_ s: SessionItem) {
+        guard let originalPath = s.cwd, !originalPath.isEmpty else { return }
+        Task {
+            let ok = await store.removePathMapping(originalCwd: originalPath)
+            showToast(L(ok ? "session.pathForgotten" : "session.pathMappingFailed"))
+        }
+    }
+    private func chooseReplacementDirectory(
+        originalPath: String, expectedProject: String
+    ) -> String? {
+        let panel = NSOpenPanel()
+        panel.title = L("session.pathMovedTitle")
+        panel.message = L("session.pathMovedMessage", ["path": originalPath])
+        panel.prompt = L("session.chooseFolder")
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = false
+        panel.directoryURL = nearestExistingParent(of: originalPath)
+        NSApp.activate(ignoringOtherApps: true)
+        guard panel.runModal() == .OK, let selected = panel.url else { return nil }
+        if !expectedProject.isEmpty, selected.lastPathComponent != expectedProject {
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = L("session.pathMismatchTitle")
+            alert.informativeText = L("session.pathMismatchMessage", [
+                "expected": expectedProject, "selected": selected.lastPathComponent,
+            ])
+            alert.addButton(withTitle: L("session.useFolder"))
+            alert.addButton(withTitle: L("session.cancel"))
+            guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+        }
+        return selected.path
+    }
+    private func nearestExistingParent(of path: String) -> URL {
+        var candidate = URL(fileURLWithPath: path, isDirectory: true).deletingLastPathComponent()
+        var isDirectory: ObjCBool = false
+        while candidate.path != "/" {
+            if FileManager.default.fileExists(atPath: candidate.path, isDirectory: &isDirectory),
+               isDirectory.boolValue {
+                return candidate
+            }
+            candidate.deleteLastPathComponent()
+        }
+        return FileManager.default.homeDirectoryForCurrentUser
     }
     private func pin(_ s: SessionItem) {
         let wasPinned = s.pinned == true

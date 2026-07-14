@@ -2,6 +2,7 @@ import json
 import os
 import plistlib
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -110,15 +111,114 @@ class CodexUsageTests(unittest.TestCase):
         self.assertEqual(usage["2026-07-10T12"][0], 7)
         self.assertAlmostEqual(usage["2026-07-10T10"][1], 0.0002025)
 
-    def test_subagent_replay_does_not_duplicate_parent_usage(self):
+    def test_subagent_usage_is_counted_as_independent_work(self):
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "rollout.jsonl"
             _jsonl(path, [
-                {"type": "session_meta", "payload": {
-                    "id": "child", "source": {"subagent": {"thread_spawn": {}}}}},
+                {"timestamp": "2026-07-10T10:00:00.500Z",
+                 "type": "session_meta", "payload": {
+                    "id": "child", "timestamp": "2026-07-10T10:00:00.250Z",
+                    "source": {"subagent": {"thread_spawn": {}}}}},
+                {"type": "session_meta", "payload": {"id": "parent"}},
                 self._token("2026-07-10T10:00:00Z", 100, 20, 10),
+                {"type": "event_msg", "payload": {
+                    "type": "task_started", "started_at": 1783677600}},
+                self._token("2026-07-10T10:01:00Z", 140, 30, 20),
             ])
-            self.assertEqual(daemon._parse_codex_file_usage(path), {})
+            usage = daemon._parse_codex_file_usage(path)
+            self.assertEqual(usage["2026-07-10T10"][0], 50)
+
+    def test_partial_final_line_is_reparsed_after_append(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "rollout.jsonl"
+            raw = json.dumps(self._token(
+                "2026-07-10T10:00:00Z", 100, 20, 10)).encode()
+            split = len(raw) // 2
+            path.write_bytes(raw[:split])
+            state = daemon._parse_codex_usage_state(path)
+            self.assertEqual(state["offset"], 0)
+            with path.open("ab") as f:
+                f.write(raw[split:] + b"\n")
+            state = daemon._parse_codex_usage_state(path, state)
+            self.assertEqual(state["agg"]["2026-07-10T10"][0], 110)
+
+    def test_activity_without_usable_token_snapshot_is_incomplete(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "rollout.jsonl"
+            _jsonl(path, [
+                {"type": "event_msg", "payload": {"type": "task_started"}},
+                {"type": "event_msg", "payload": {
+                    "type": "token_count", "info": {"total_token_usage": {
+                        "input_tokens": 0, "cached_input_tokens": 0,
+                        "output_tokens": 0}}}},
+            ])
+            state = daemon._parse_codex_usage_state(path)
+            self.assertTrue(state["has_activity"])
+            self.assertFalse(state["has_usage"])
+
+    def test_total_only_import_is_counted_without_guessing_cost(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "rollout.jsonl"
+            _jsonl(path, [
+                {"type": "event_msg", "payload": {"type": "user_message"}},
+                {"timestamp": "2026-07-10T10:00:00Z", "type": "event_msg",
+                 "payload": {"type": "token_count", "info": {
+                    "total_token_usage": {"input_tokens": 0,
+                                          "cached_input_tokens": 0,
+                                          "output_tokens": 0,
+                                          "total_tokens": 3951}}}},
+            ])
+            state = daemon._parse_codex_usage_state(path)
+            self.assertEqual(state["agg"]["2026-07-10T10"], [3951, 0.0])
+            self.assertTrue(state["has_usage"])
+
+    def test_partial_session_meta_is_not_cached_as_top_level(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "rollout.jsonl"
+            path.write_text('{"type":"session_meta","payload":')
+            self.assertFalse(daemon._rollout_meta(path)["subagent"])
+            self.assertNotIn(str(path), daemon._rollout_meta_cache)
+            path.write_text(json.dumps({
+                "timestamp": "2026-07-10T10:00:00Z",
+                "type": "session_meta", "payload": {
+                    "id": "child", "timestamp": "2026-07-10T10:00:00Z",
+                    "source": {"subagent": {"thread_spawn": {}}}}}) + "\n")
+            self.assertTrue(daemon._rollout_meta(path)["subagent"])
+
+    def test_partial_session_meta_rebuilds_provisional_usage_state(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "rollout.jsonl"
+            meta = json.dumps({
+                "timestamp": "2026-07-10T10:00:00.500Z",
+                "type": "session_meta", "payload": {
+                    "id": "child", "timestamp": "2026-07-10T10:00:00.250Z",
+                    "source": {"subagent": {"thread_spawn": {}}}}})
+            split = len(meta) // 2
+            path.write_text(meta[:split])
+            state = daemon._parse_codex_usage_state(path)
+            self.assertEqual(state["offset"], 0)
+            self.assertTrue(state["replay_complete"])
+            with path.open("a") as f:
+                f.write(meta[split:] + "\n")
+                f.write(json.dumps(self._token(
+                    "2026-07-10T10:00:00Z", 100, 20, 10)) + "\n")
+                f.write(json.dumps({"type": "event_msg", "payload": {
+                    "type": "task_started", "started_at": 1783677600}}) + "\n")
+                f.write(json.dumps(self._token(
+                    "2026-07-10T10:01:00Z", 140, 30, 20)) + "\n")
+            state = daemon._parse_codex_usage_state(path, state)
+            self.assertEqual(state["agg"]["2026-07-10T10"][0], 50)
+
+    def test_v4_cache_is_rejected_after_fork_replay_fix(self):
+        with tempfile.TemporaryDirectory() as td:
+            cache_file = Path(td) / "codex-cache.json"
+            cache_file.write_text(json.dumps({
+                "version": 4,
+                "files": {"polluted.jsonl": {
+                    "version": 4, "subagent_kind": "thread_spawn",
+                    "agg": {"2026-07-10T10": [160, 0.0]}}}}))
+            with mock.patch.object(daemon, "CODEX_USAGE_CACHE_FILE", cache_file):
+                self.assertEqual(daemon._load_codex_usage_cache(), {})
 
 
 class ClaudeUsageTests(unittest.TestCase):
@@ -144,6 +244,111 @@ class ClaudeUsageTests(unittest.TestCase):
             usage, changed = daemon._cached_claude_file_usage(path, cache)
             self.assertTrue(changed)
             self.assertEqual(usage["2026-07-10T11"]["claude-sonnet-4-6"][0], 20)
+
+    def test_partial_final_line_is_reparsed_after_append(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "claude.jsonl"
+            raw = json.dumps(self._assistant(
+                "2026-07-10T10:00:00Z", "m1", "r1", 10)).encode()
+            split = len(raw) // 2
+            path.write_bytes(raw[:split])
+            state = daemon._parse_claude_usage_state(path)
+            self.assertEqual(state["offset"], 0)
+            with path.open("ab") as f:
+                f.write(raw[split:] + b"\n")
+            state = daemon._parse_claude_usage_state(path, state)
+            self.assertEqual(
+                state["agg"]["2026-07-10T10"]["claude-sonnet-4-6"][0], 10)
+
+    def test_usage_files_include_nested_subagents(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            project = root / "projects" / "project"
+            child_dir = project / "session" / "subagents"
+            child_dir.mkdir(parents=True)
+            top = project / "session.jsonl"
+            child = child_dir / "agent.jsonl"
+            top.touch()
+            child.touch()
+            with mock.patch.object(daemon, "claude_sources", return_value=[{
+                    "path": root}]):
+                self.assertEqual(set(daemon._iter_claude_usage_files()),
+                                 {top, child})
+
+
+class UsageProjectTests(unittest.TestCase):
+    def test_project_mapping_merges_old_and_new_directory_keys(self):
+        with tempfile.TemporaryDirectory() as td:
+            replacement = os.path.realpath(td)
+            old = "/missing/old/project"
+            mappings = {old: replacement}
+            self.assertEqual(daemon._usage_project_cwd(old, mappings), replacement)
+            self.assertEqual(daemon._usage_project_cwd(replacement, mappings),
+                             replacement)
+
+    def test_path_mapping_change_invalidates_usage_memory_cache(self):
+        with tempfile.TemporaryDirectory() as td:
+            mappings = Path(td) / "path_mappings.json"
+            replacement = Path(td) / "replacement"
+            replacement.mkdir()
+            with mock.patch.object(daemon, "PATH_MAPPINGS_FILE", mappings):
+                with daemon._cache_lock:
+                    daemon._ttl_cache["usage"] = (time.time() + 120, {"stale": True})
+                daemon._remember_session_cwd("/old/project", str(replacement))
+                with daemon._cache_lock:
+                    self.assertNotIn("usage", daemon._ttl_cache)
+                    daemon._ttl_cache["usage"] = (
+                        time.time() + 120, {"stale": True})
+                daemon._forget_session_cwd("/old/project")
+                with daemon._cache_lock:
+                    self.assertNotIn("usage", daemon._ttl_cache)
+
+    def test_usage_api_exposes_coverage_and_mapped_project(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            codex = root / "codex"
+            session_dir = codex / "sessions" / "2026" / "07" / "15"
+            session_dir.mkdir(parents=True)
+            rollout = session_dir / "rollout-2026-07-15T01-00-00-test.jsonl"
+            now = daemon.datetime.now(daemon.timezone.utc)
+            stamp = now.isoformat().replace("+00:00", "Z")
+            old = "/missing/old/project"
+            replacement = root / "moved-project"
+            replacement.mkdir()
+            _jsonl(rollout, [
+                {"timestamp": stamp, "type": "session_meta", "payload": {
+                    "id": "session", "cwd": old, "originator": "codex-tui",
+                    "timestamp": stamp, "source": "cli"}},
+                {"timestamp": stamp, "type": "event_msg",
+                 "payload": {"type": "user_message"}},
+                {"timestamp": stamp, "type": "event_msg", "payload": {
+                    "type": "token_count", "info": {"total_token_usage": {
+                        "input_tokens": 100, "cached_input_tokens": 20,
+                        "output_tokens": 10, "total_tokens": 110}}}},
+            ])
+            mappings = root / "path_mappings.json"
+            mappings.write_text(json.dumps({
+                "version": 1, "mappings": {old: str(replacement)}}))
+            with mock.patch.multiple(
+                    daemon,
+                    CODEX_USAGE_CACHE_FILE=root / "codex-cache.json",
+                    CLAUDE_USAGE_CACHE_FILE=root / "claude-cache.json",
+                    PATH_MAPPINGS_FILE=mappings), \
+                    mock.patch.object(daemon, "codex_sources", return_value=[{
+                        "path": codex}]), \
+                    mock.patch.object(daemon, "claude_sources", return_value=[]):
+                daemon._rollout_meta_cache.clear()
+                with daemon._cache_lock:
+                    daemon._ttl_cache.pop("usage", None)
+                usage = daemon.api_usage()
+                with daemon._cache_lock:
+                    daemon._ttl_cache.pop("usage", None)
+
+            self.assertEqual(usage["coverage"], {
+                "codex_files": 1, "codex_missing_usage_files": 0})
+            self.assertEqual(usage["projects_7d"][0]["cwd"],
+                             os.path.realpath(replacement))
+            self.assertEqual(sum(usage["codex_daily"].values()), 110)
 
 
 class SessionIndexTests(unittest.TestCase):
@@ -375,6 +580,228 @@ class ActiveSessionTests(unittest.TestCase):
 
 
 class ResumeCommandTests(unittest.TestCase):
+    def test_missing_cwd_requests_replacement_with_a_pathless_command(self):
+        sid = "11111111-1111-1111-1111-111111111111"
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            missing = root / "moved-project"
+            mappings = root / "path-mappings.json"
+            with mock.patch.object(daemon, "PATH_MAPPINGS_FILE", mappings):
+                result = daemon.api_resume({
+                    "tool": "codex", "id": sid, "cwd": str(missing),
+                    "copy_only": True,
+                })
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["needs_path"])
+        self.assertEqual(result["original_cwd"], str(missing))
+        self.assertEqual(result["command"],
+                         f"codex resume {daemon._shell_quote(sid)}")
+        self.assertNotIn("cd ", result["command"])
+
+    def test_replacement_cwd_is_persisted_and_reused(self):
+        sid = "11111111-1111-1111-1111-111111111111"
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            missing = root / "old" / "project"
+            replacement = root / "new" / "project"
+            replacement.mkdir(parents=True)
+            mappings = root / "path-mappings.json"
+            body = {"tool": "codex", "id": sid, "cwd": str(missing),
+                    "copy_only": True}
+            with mock.patch.object(daemon, "PATH_MAPPINGS_FILE", mappings):
+                first = daemon.api_resume({
+                    **body, "replacement_cwd": str(replacement)})
+                second = daemon.api_resume(body)
+                saved = json.loads(mappings.read_text())
+        resolved = os.path.realpath(replacement)
+        expected = f"cd {daemon._shell_quote(resolved)} && codex resume"
+        self.assertTrue(first["path_mapped"])
+        self.assertTrue(second["path_mapped"])
+        self.assertIn(expected, first["command"])
+        self.assertEqual(second["command"], first["command"])
+        self.assertEqual(saved["mappings"][str(missing)], resolved)
+
+    def test_stale_mapping_requests_a_new_replacement(self):
+        sid = "11111111-1111-1111-1111-111111111111"
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            missing = root / "old-project"
+            stale = root / "also-missing"
+            mappings = root / "path-mappings.json"
+            mappings.write_text(json.dumps({
+                "version": 1, "mappings": {str(missing): str(stale)}}))
+            with mock.patch.object(daemon, "PATH_MAPPINGS_FILE", mappings):
+                result = daemon.api_resume({
+                    "tool": "claude", "id": sid, "cwd": str(missing),
+                    "copy_only": True,
+                })
+        self.assertTrue(result["needs_path"])
+        self.assertNotIn("cd ", result["command"])
+
+    def test_invalid_replacement_directory_is_rejected(self):
+        sid = "11111111-1111-1111-1111-111111111111"
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            with mock.patch.object(
+                    daemon, "PATH_MAPPINGS_FILE", root / "path-mappings.json"):
+                result = daemon.api_resume({
+                    "tool": "codex", "id": sid,
+                    "cwd": str(root / "old-project"),
+                    "replacement_cwd": str(root / "missing-replacement"),
+                    "copy_only": True,
+                })
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"], "invalid replacement directory")
+
+    def test_existing_directory_with_trailing_space_is_preserved(self):
+        sid = "11111111-1111-1111-1111-111111111111"
+        with tempfile.TemporaryDirectory() as td:
+            project = Path(td) / "project "
+            project.mkdir()
+            result = daemon.api_resume({
+                "tool": "codex", "id": sid, "cwd": str(project),
+                "copy_only": True,
+            })
+        self.assertIn(f"cd {daemon._shell_quote(os.path.realpath(project))} &&",
+                      result["command"])
+
+    def test_path_mapping_api_can_replace_and_remove_a_mapping(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            original = root / "old-project"
+            replacement = root / "new-project"
+            replacement.mkdir()
+            mappings = root / "path-mappings.json"
+            with mock.patch.object(daemon, "PATH_MAPPINGS_FILE", mappings):
+                saved = daemon.api_path_mapping({
+                    "action": "set", "original_cwd": str(original),
+                    "replacement_cwd": str(replacement),
+                })
+                resumed = daemon.api_resume({
+                    "tool": "codex",
+                    "id": "11111111-1111-1111-1111-111111111111",
+                    "cwd": str(original), "copy_only": True,
+                })
+                removed = daemon.api_path_mapping({
+                    "action": "remove", "original_cwd": str(original),
+                })
+                payload = json.loads(mappings.read_text())
+        self.assertTrue(saved["ok"])
+        self.assertIn(daemon._shell_quote(os.path.realpath(replacement)),
+                      resumed["command"])
+        self.assertTrue(removed["removed"])
+        self.assertEqual(payload["mappings"], {})
+
+    def test_explicit_mapping_overrides_an_existing_original_directory(self):
+        sid = "11111111-1111-1111-1111-111111111111"
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            original = root / "original"
+            replacement = root / "replacement"
+            original.mkdir()
+            replacement.mkdir()
+            mappings = root / "path-mappings.json"
+            with mock.patch.object(daemon, "PATH_MAPPINGS_FILE", mappings):
+                daemon.api_path_mapping({
+                    "action": "set", "original_cwd": str(original),
+                    "replacement_cwd": str(replacement),
+                })
+                result = daemon.api_resume({
+                    "tool": "codex", "id": sid, "cwd": str(original),
+                    "copy_only": True,
+                })
+        self.assertIn(daemon._shell_quote(os.path.realpath(replacement)),
+                      result["command"])
+        self.assertNotIn(daemon._shell_quote(os.path.realpath(original)),
+                         result["command"])
+
+    def test_terminal_copy_mode_uses_the_resolved_directory(self):
+        sid = "11111111-1111-1111-1111-111111111111"
+        with tempfile.TemporaryDirectory() as td, \
+                mock.patch.object(daemon, "get_settings",
+                                  return_value={"terminal": "copy"}):
+            result = daemon.api_resume({
+                "tool": "codex", "id": sid, "cwd": td,
+            })
+        self.assertTrue(result["copy"])
+        self.assertIn(f"cd {daemon._shell_quote(os.path.realpath(td))} &&",
+                      result["command"])
+
+    def test_paste_terminal_opens_the_resolved_directory(self):
+        sid = "11111111-1111-1111-1111-111111111111"
+        completed = SimpleNamespace(returncode=0, stderr="")
+        with tempfile.TemporaryDirectory() as td, \
+                mock.patch.object(daemon, "get_settings", return_value={
+                    "terminal": "warp", "auto_paste_resume": False}), \
+                mock.patch.object(daemon, "_term_installed",
+                                  side_effect=lambda app: app == "Warp"), \
+                mock.patch.object(daemon.subprocess, "run",
+                                  return_value=completed) as run:
+            result = daemon.api_resume({
+                "tool": "codex", "id": sid, "cwd": td,
+            })
+        self.assertTrue(result["paste"])
+        self.assertEqual(run.call_args.args[0],
+                         ["open", "-a", "Warp", os.path.realpath(td)])
+
+    def test_terminal_applescript_contains_the_resolved_directory(self):
+        sid = "11111111-1111-1111-1111-111111111111"
+        completed = SimpleNamespace(returncode=0, stderr="")
+        with tempfile.TemporaryDirectory() as td, \
+                mock.patch.object(daemon, "get_settings",
+                                  return_value={"terminal": "terminal"}), \
+                mock.patch.object(daemon, "_term_installed",
+                                  side_effect=lambda app: app == "Terminal"), \
+                mock.patch.object(daemon.subprocess, "run",
+                                  return_value=completed) as run:
+            result = daemon.api_resume({
+                "tool": "claude", "id": sid, "cwd": td,
+            })
+        self.assertTrue(result["ok"])
+        script = run.call_args.args[0][-1]
+        self.assertIn(f"cd {daemon._shell_quote(os.path.realpath(td))} &&",
+                      script)
+
+    def test_iterm_applescript_contains_the_resolved_directory(self):
+        sid = "11111111-1111-1111-1111-111111111111"
+        completed = SimpleNamespace(returncode=0, stderr="")
+        with tempfile.TemporaryDirectory() as td, \
+                mock.patch.object(daemon, "get_settings",
+                                  return_value={"terminal": "iterm"}), \
+                mock.patch.object(daemon, "_term_installed",
+                                  side_effect=lambda app: app == "iTerm"), \
+                mock.patch.object(daemon.subprocess, "run",
+                                  return_value=completed) as run:
+            result = daemon.api_resume({
+                "tool": "codex", "id": sid, "cwd": td,
+            })
+        self.assertTrue(result["ok"])
+        script = run.call_args.args[0][-1]
+        self.assertIn(f"cd {daemon._shell_quote(os.path.realpath(td))} &&",
+                      script)
+
+    def test_direct_launch_terminals_receive_the_resolved_directory(self):
+        sid = "11111111-1111-1111-1111-111111111111"
+        completed = SimpleNamespace(returncode=0, stderr="")
+        cases = [("ghostty", "Ghostty"), ("kitty", "kitty"),
+                 ("wezterm", "WezTerm"), ("alacritty", "Alacritty")]
+        for mode, app in cases:
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as td, \
+                    mock.patch.object(daemon, "get_settings",
+                                      return_value={"terminal": mode}), \
+                    mock.patch.object(daemon, "_term_installed",
+                                      side_effect=lambda candidate, app=app: candidate == app), \
+                    mock.patch.object(daemon.subprocess, "run",
+                                      return_value=completed) as run:
+                result = daemon.api_resume({
+                    "tool": "codex", "id": sid, "cwd": td,
+                })
+                args = run.call_args.args[0]
+                self.assertTrue(result["ok"])
+                self.assertEqual(args[:4], ["open", "-na", app, "--args"])
+                self.assertIn(daemon._shell_quote(os.path.realpath(td)),
+                              " ".join(args))
+
     def test_account_scoped_resume_pins_the_matching_config_directory(self):
         sid = "11111111-1111-1111-1111-111111111111"
         with tempfile.TemporaryDirectory() as td:
