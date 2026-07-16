@@ -36,5 +36,11 @@ let package = Package(
             path: "Sources/PreviewGen",
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
+        .testTarget(
+            name: "AgentDeckKitTests",
+            dependencies: ["AgentDeckKit"],
+            path: "tests/AgentDeckKitTests",
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
     ]
 )

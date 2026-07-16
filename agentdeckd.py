@@ -3298,11 +3298,11 @@ def _sample_once():
             elif w.get("id") == "seven_day":
                 sample["c7d"] = w["used_percent"]
     if cx.get("ok"):
-        ws = cx.get("windows", [])
-        if ws:
-            sample["x5h"] = ws[0]["used_percent"]
-        if len(ws) > 1:
-            sample["x7d"] = ws[1]["used_percent"]
+        for w in cx.get("windows", []):
+            if w.get("id") == "five_hour":
+                sample["x5h"] = w["used_percent"]
+            elif w.get("id") == "seven_day":
+                sample["x7d"] = w["used_percent"]
     account_groups = q.get("accounts") or {}
     for key, tool_name, primary in (("claude", "Claude", cl), ("codex", "Codex", cx)):
         accounts = account_groups.get(key) or ([primary] if primary.get("ok") else [])

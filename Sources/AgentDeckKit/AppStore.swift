@@ -21,6 +21,37 @@ struct UpdateInstallStatus: Decodable {
     let message: String?
 }
 
+/// 合并一次设置 GET 的结果。GET 发起时仍未获 daemon 确认的本地修改必须保留，
+/// 否则较慢的旧响应会让刚切换的 Agent 在界面上短暂反弹。
+func mergeLoadedSettings(
+    remote: [String: SettingValue],
+    current: [String: SettingValue],
+    pending: [String: SettingValue],
+    mutationVersions: [String: Int],
+    acknowledgedVersionsAtRequest: [String: Int]
+) -> [String: SettingValue] {
+    var merged = remote
+    for (key, version) in mutationVersions
+    where version > (acknowledgedVersionsAtRequest[key] ?? 0) {
+        if let value = current[key] { merged[key] = value }
+    }
+    for (key, value) in pending { merged[key] = value }
+    return merged
+}
+
+/// 连续保存失败后，只为失败批次之外的新修改重新启动保存任务；原批次保留到下次
+/// 用户操作再重试，避免网络持续异常时形成无界重试循环。
+func hasUnattemptedSettingChanges(
+    pending: [String: SettingValue],
+    mutationVersions: [String: Int],
+    attemptedVersions: [String: Int]
+) -> Bool {
+    pending.keys.contains { key in
+        guard let attempted = attemptedVersions[key] else { return true }
+        return (mutationVersions[key] ?? 0) > attempted
+    }
+}
+
 @MainActor
 public final class AppStore: ObservableObject {
     // 仅初始化默认值，无需主线程隔离 → nonisolated，便于主壳在属性声明处直接构造。
@@ -51,14 +82,18 @@ public final class AppStore: ObservableObject {
     var today: TodaySummary? { usage.flatMap { TodaySummary(from: $0) } }
     var updateAvailable: Bool { update?.available == true }
 
-    /// 该 agent 是否展示（设置 show_claude/show_codex；默认 true，对应 v1 agentOn）。
-    func agentOn(_ tool: String) -> Bool { settings["show_\(tool)"]?.boolVal ?? true }
+    /// 该 agent 是否展示。设置一旦到达客户端便是前端唯一真值；设置尚未加载时才回退
+    /// `/api/quota.hidden`，避免启动瞬间闪出用户已隐藏的 Agent。
+    func agentOn(_ tool: String, fallbackHidden: Bool? = nil) -> Bool {
+        if let configured = settings["show_\(tool.lowercased())"] { return configured.boolVal }
+        return !(fallbackHidden ?? false)
+    }
     var showActive: Bool { settings["show_active"]?.boolVal ?? true }
 
     // 列表按 show_claude/show_codex 过滤（daemon 不过滤这几个，对齐 v1 客户端 agentOn）。
-    var sessionsShown: [SessionItem] { sessions.filter { agentOn($0.tool) } }
-    var activeShown: [ActiveSession] { active.filter { agentOn($0.tool) } }
-    var doneShown: [DoneEvent] { done.filter { agentOn($0.tool) } }
+    var sessionsShown: [SessionItem] { sessions.filter { agentOnWithQuotaFallback($0.tool) } }
+    var activeShown: [ActiveSession] { active.filter { agentOnWithQuotaFallback($0.tool) } }
+    var doneShown: [DoneEvent] { done.filter { agentOnWithQuotaFallback($0.tool) } }
 
     private let api = APIClient.shared
     private var pollTask: Task<Void, Never>?
@@ -69,6 +104,10 @@ public final class AppStore: ObservableObject {
     private var sessionPageCount = 0
     private var pendingSettingValues: [String: SettingValue] = [:]
     private var settingsSaveTask: Task<Void, Never>?
+    private var agentVisibilityRefreshTask: Task<Void, Never>?
+    private var settingsMutationVersion = 0
+    private var settingMutationVersions: [String: Int] = [:]
+    private var acknowledgedSettingVersions: [String: Int] = [:]
 
     private var refreshInterval: Double { Double(max(5, settings["refresh_interval"]?.intVal ?? 30)) }
 
@@ -89,6 +128,7 @@ public final class AppStore: ObservableObject {
         pollTask?.cancel(); pollTask = nil
         searchTask?.cancel(); searchTask = nil
         sessionIndexRetryTask?.cancel(); sessionIndexRetryTask = nil
+        agentVisibilityRefreshTask?.cancel(); agentVisibilityRefreshTask = nil
     }
 
     /// 开面板时调用：只走缓存做一次「即时同步」，不强刷。
@@ -140,6 +180,7 @@ public final class AppStore: ObservableObject {
 
     // MARK: 设置
     func loadSettings() async {
+        let acknowledgementsAtRequest = acknowledgedSettingVersions
         // GET /api/settings 直接返回扁平设置字典（无 settings 包裹，与 v1 一致）；
         // POST 的应答才是 {ok, settings:{…}}。兼容两种形态，否则设置永远读不回 → 看似「开关不保存」。
         guard let raw = try? await api.getJSON("/api/settings") else { return }
@@ -156,7 +197,12 @@ public final class AppStore: ObservableObject {
                 else if let n = v as? NSNumber { out[k] = .int(n.intValue) }
             }
         }
-        settings = out
+        settings = mergeLoadedSettings(
+            remote: out,
+            current: settings,
+            pending: pendingSettingValues,
+            mutationVersions: settingMutationVersions,
+            acknowledgedVersionsAtRequest: acknowledgementsAtRequest)
         applyCustomColors()
         I18N.locale = I18N.resolve(settings["language"]?.stringVal ?? "auto")
     }
@@ -166,8 +212,7 @@ public final class AppStore: ObservableObject {
     }
 
     func setSetting(_ key: String, _ value: SettingValue) {
-        settings[key] = value
-        pendingSettingValues[key] = value
+        stageSetting(key, value)
         normalizeNotificationThresholds(changed: key)
         applyCustomColors()
         if key == "language" { I18N.locale = I18N.resolve(value.stringVal) }
@@ -186,10 +231,8 @@ public final class AppStore: ObservableObject {
 
     /// 恢复默认配色：单请求清两色（避免两次 setSetting 竞态），后端回填空串=用默认。
     func resetColors() {
-        settings["color_claude"] = .string("")
-        settings["color_codex"] = .string("")
-        pendingSettingValues["color_claude"] = .string("")
-        pendingSettingValues["color_codex"] = .string("")
+        stageSetting("color_claude", .string(""))
+        stageSetting("color_codex", .string(""))
         applyCustomColors()
         onSettingsChanged?()
         scheduleSettingsSave()
@@ -206,10 +249,16 @@ public final class AppStore: ObservableObject {
         for (settingKey, normalized) in [("notify_warn", warn), ("notify_crit", crit)] {
             let value = SettingValue.int(normalized)
             if settings[settingKey] != value {
-                settings[settingKey] = value
-                pendingSettingValues[settingKey] = value
+                stageSetting(settingKey, value)
             }
         }
+    }
+
+    private func stageSetting(_ key: String, _ value: SettingValue) {
+        settingsMutationVersion += 1
+        settingMutationVersions[key] = settingsMutationVersion
+        settings[key] = value
+        pendingSettingValues[key] = value
     }
 
     private func scheduleSettingsSave() {
@@ -224,7 +273,9 @@ public final class AppStore: ObservableObject {
             var consecutiveFailures = 0
             while !self.pendingSettingValues.isEmpty {
                 let snapshot = self.pendingSettingValues
-                self.pendingSettingValues.removeAll()
+                let snapshotVersions = snapshot.reduce(into: [String: Int]()) { versions, item in
+                    versions[item.key] = self.settingMutationVersions[item.key] ?? 0
+                }
                 var body: [String: Any] = [:]
                 for (key, value) in snapshot {
                     switch value {
@@ -237,30 +288,61 @@ public final class AppStore: ObservableObject {
                 do {
                     _ = try await self.api.postJSON("/api/settings", body: body)
                     consecutiveFailures = 0
-                } catch {
-                    // 不覆盖失败期间产生的更新值；旧批次只补回仍无更新的键。
-                    for (key, value) in snapshot where self.pendingSettingValues[key] == nil {
-                        self.pendingSettingValues[key] = value
+                    for (key, value) in snapshot {
+                        let version = snapshotVersions[key] ?? 0
+                        self.acknowledgedSettingVersions[key] = max(
+                            self.acknowledgedSettingVersions[key] ?? 0, version)
+                        if self.pendingSettingValues[key] == value,
+                           self.settingMutationVersions[key] == version {
+                            self.pendingSettingValues.removeValue(forKey: key)
+                        }
                     }
+                    self.refreshQuotaAfterAgentVisibilityChange(in: snapshot)
+                } catch {
                     consecutiveFailures += 1
                     if consecutiveFailures < 3 {
                         try? await Task.sleep(nanoseconds: 500_000_000)
                         continue
                     }
-                    let stillPending = self.pendingSettingValues
                     await self.loadSettings()
-                    for (key, value) in stillPending { self.settings[key] = value }
-                    self.applyCustomColors()
-                    if let language = stillPending["language"]?.stringVal {
-                        I18N.locale = I18N.resolve(language)
-                    }
                     self.onSettingsChanged?()
+                    let shouldRetryNewChanges = hasUnattemptedSettingChanges(
+                        pending: self.pendingSettingValues,
+                        mutationVersions: self.settingMutationVersions,
+                        attemptedVersions: snapshotVersions)
                     self.settingsSaveTask = nil
+                    if shouldRetryNewChanges { self.scheduleSettingsSave() }
                     return
                 }
             }
             self.settingsSaveTask = nil
         }
+    }
+
+    /// Agent 可见性已被 daemon 接收后重读一次额度缓存。后到的切换覆盖前一次刷新，
+    /// 但刷新始终覆盖当前所有可见 Agent，不会因另一个 Agent 的开关而漏掉刚启用的数据。
+    private func refreshQuotaAfterAgentVisibilityChange(in saved: [String: SettingValue]) {
+        guard saved.keys.contains(where: { $0 == "show_claude" || $0 == "show_codex" }) else { return }
+        agentVisibilityRefreshTask?.cancel()
+        agentVisibilityRefreshTask = nil
+        guard agentOn("claude") || agentOn("codex") else { return }
+        agentVisibilityRefreshTask = Task { [weak self] in
+            guard let self else { return }
+            let refreshed: QuotaResponse? = try? await self.api.get("/api/quota")
+            guard !Task.isCancelled else { return }
+            if let refreshed { self.quota = refreshed; self.online = true }
+            self.agentVisibilityRefreshTask = nil
+        }
+    }
+
+    private func agentOnWithQuotaFallback(_ tool: String) -> Bool {
+        let hidden: Bool?
+        switch tool.lowercased() {
+        case "claude": hidden = quota?.claude?.hidden
+        case "codex": hidden = quota?.codex?.hidden
+        default: hidden = nil
+        }
+        return agentOn(tool, fallbackHidden: hidden)
     }
 
     /// 数据管理动作（打开目录 / 导出 CSV / 清空完成记录），对应 POST /api/data。

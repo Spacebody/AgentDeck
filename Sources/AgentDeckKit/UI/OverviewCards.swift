@@ -110,6 +110,7 @@ private struct SessionRow: View {
 // MARK: - 活跃会话卡（#active）
 struct ActiveCard: View {
     let sessions: [ActiveSession]
+    var totalCount: Int? = nil
     var onTap: (ActiveSession) -> Void = { _ in }
 
     var body: some View {
@@ -118,7 +119,7 @@ struct ActiveCard: View {
                 HStack(spacing: 6) {
                     Circle().fill(Theme.ok).frame(width: 6, height: 6).pulse(1.6)   // .adot 呼吸
                         .shadow(color: Theme.ok, radius: 3)
-                    Text(L("active.running", ["n": "\(sessions.count)"]))
+                    Text(L("active.running", ["n": "\(totalCount ?? sessions.count)"]))
                         .font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.ink2)
                 }
                 .padding(.bottom, 4)

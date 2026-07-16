@@ -831,6 +831,39 @@ class ResumeCommandTests(unittest.TestCase):
         self.assertEqual(result["error"], "account not found")
 
 
+class QuotaSamplingTests(unittest.TestCase):
+    def sample(self, windows):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            history = root / "quota-history.jsonl"
+            payload = {
+                "claude": {"ok": False},
+                "codex": {"ok": True, "windows": windows},
+                "accounts": {"claude": [], "codex": []},
+            }
+            with mock.patch.multiple(
+                    daemon, DATA_DIR=root, HISTORY_FILE=history), \
+                    mock.patch.object(daemon, "api_quota", return_value=payload), \
+                    mock.patch.object(daemon, "_check_alerts"):
+                daemon._sample_once()
+            return json.loads(history.read_text().strip())
+
+    def test_codex_weekly_only_is_recorded_as_weekly(self):
+        sample = self.sample([{
+            "id": "seven_day", "used_percent": 19,
+        }])
+        self.assertEqual(sample["x7d"], 19)
+        self.assertNotIn("x5h", sample)
+
+    def test_codex_samples_are_selected_by_id_not_position(self):
+        sample = self.sample([
+            {"id": "seven_day", "used_percent": 61},
+            {"id": "five_hour", "used_percent": 17},
+        ])
+        self.assertEqual(sample["x5h"], 17)
+        self.assertEqual(sample["x7d"], 61)
+
+
 class PersistenceAndUpdateTests(unittest.TestCase):
     def test_update_url_requires_matching_semver_tag_and_asset(self):
         self.assertTrue(daemon._safe_update_url(

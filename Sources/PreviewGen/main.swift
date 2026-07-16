@@ -3,9 +3,10 @@
 import Foundation
 import AgentDeckKit
 
-// 用法：PreviewGen [overview|charts|sessions|settings|widget|root|widgetroot] [outPath]
+// 用法：PreviewGen [overview|codexonly|visibilityoff|visibilityon|quotacases|quotadual|quotaduplicate|quotaharmony|charts|chartsfiltered|sessions|settings|widget|widgetsizes|widgetfour|widgetstress|root|widgetroot] [outPath]
 var args = Array(CommandLine.arguments.dropFirst())
-let mode = ["overview", "charts", "sessions", "settings", "widget", "root", "widgetroot", "carousel"].contains(args.first)
+let mode = ["overview", "codexonly", "visibilityoff", "visibilityon", "quotacases", "quotadual", "quotaduplicate", "quotaharmony", "charts", "chartsfiltered",
+            "sessions", "settings", "widget", "widgetsizes", "widgetfour", "widgetstress", "root", "widgetroot", "carousel"].contains(args.first)
     ? args.removeFirst() : "overview"
 let outPath = args.first ?? "/tmp/agentdeck-\(mode).png"
 
@@ -13,11 +14,25 @@ let data = MainActor.assumeIsolated { () -> Data? in
     PreviewRender.useMaterialGlass()   // 无头：玻璃回退 SwiftUI 材质（ImageRenderer 渲不出 NSView）
     // 可经 AD_LOCALE=en|ja 切换预览语言，验证三语布局。
     if let loc = ProcessInfo.processInfo.environment["AD_LOCALE"] { PreviewRender.setLocale(loc) }
+    if let raw = ProcessInfo.processInfo.environment["AD_FONT_SCALE"], let value = Int(raw) {
+        PreviewRender.setFontScalePercent(value)
+    }
     switch mode {
+    case "codexonly":  return PreviewRender.codexOnlyOverviewPNG()
+    case "visibilityoff": return PreviewRender.agentVisibilityOffPNG()
+    case "visibilityon": return PreviewRender.agentVisibilityOnPNG()
+    case "quotacases": return PreviewRender.quotaCasesPNG()
+    case "quotadual":  return PreviewRender.quotaDualCasesPNG()
+    case "quotaduplicate": return PreviewRender.quotaDuplicatePNG()
+    case "quotaharmony": return PreviewRender.quotaHarmonyPNG()
     case "charts":     return PreviewRender.chartsPNG()
+    case "chartsfiltered": return PreviewRender.filteredChartsPNG()
     case "sessions":   return PreviewRender.sessionsPNG()
     case "settings":   return PreviewRender.settingsPNG()
     case "widget":     return PreviewRender.widgetPNG()
+    case "widgetsizes": return PreviewRender.widgetSizesPNG()
+    case "widgetfour": return PreviewRender.widgetFourWindowPNG()
+    case "widgetstress": return PreviewRender.widgetStressPNG()
     case "root":       return PreviewRender.rootPNG()
     case "widgetroot": return PreviewRender.widgetRootPNG()
     case "carousel":   return PreviewRender.carouselPNG()

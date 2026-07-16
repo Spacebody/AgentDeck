@@ -25,6 +25,7 @@ let kDirectSession: URLSession = {
 
 // 默认高取概览页全显 + 设置页大半的折中值，展示时钳制到屏幕可视高度
 let kPanelW: CGFloat = 420, kPanelH: CGFloat = 780
+let kWidgetMinW: CGFloat = 360, kWidgetMinH: CGFloat = 300
 
 func quotaAlertColor(_ level: String) -> NSColor {
     switch level {
@@ -491,15 +492,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let f = p.frame
             animate(p, NSRect(x: f.midX - w / 2, y: f.maxY - h, width: w, height: h))
         }
-        if let wp = widgetPanel, wp.isVisible {  // 小组件：锚定左上角
+        if let wp = widgetPanel {                // 小组件：锚定左上角
             let d = UserDefaults.standard
-            let bw = CGFloat(d.double(forKey: "widgetW")) > 0 ? CGFloat(d.double(forKey: "widgetW")) : 360
-            let bh = CGFloat(d.double(forKey: "widgetH")) > 0 ? CGFloat(d.double(forKey: "widgetH")) : 300
-            wp.minSize = NSSize(width: 280 * s, height: 180 * s)
+            let bw = CGFloat(d.double(forKey: "widgetW")) > 0
+                ? CGFloat(d.double(forKey: "widgetW")) : kWidgetMinW
+            let bh = CGFloat(d.double(forKey: "widgetH")) > 0
+                ? CGFloat(d.double(forKey: "widgetH")) : kWidgetMinH
+            wp.minSize = NSSize(width: kWidgetMinW * s, height: kWidgetMinH * s)
             wp.maxSize = NSSize(width: 720 * s, height: 560 * s)
             let f = wp.frame
-            animate(wp, NSRect(x: f.minX, y: f.maxY - max(180, bh) * s,
-                               width: max(280, bw) * s, height: max(180, bh) * s))
+            let target = NSRect(x: f.minX, y: f.maxY - max(kWidgetMinH, bh) * s,
+                                width: max(kWidgetMinW, bw) * s,
+                                height: max(kWidgetMinH, bh) * s)
+            if wp.isVisible { animate(wp, target) } else { wp.setFrame(target, display: false) }
         }
     }
 
@@ -988,15 +993,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if widgetPanel == nil {
             let d0 = UserDefaults.standard
             // 默认高按内容实高取值：额度卡+今日条+活跃卡头部 ≈ 285
-            let W = max(280, CGFloat(d0.double(forKey: "widgetW")) > 0
-                        ? CGFloat(d0.double(forKey: "widgetW")) : 360) * uiScale
-            let H = max(180, CGFloat(d0.double(forKey: "widgetH")) > 0
-                        ? CGFloat(d0.double(forKey: "widgetH")) : 300) * uiScale
+            let W = max(kWidgetMinW, CGFloat(d0.double(forKey: "widgetW")) > 0
+                        ? CGFloat(d0.double(forKey: "widgetW")) : kWidgetMinW) * uiScale
+            let H = max(kWidgetMinH, CGFloat(d0.double(forKey: "widgetH")) > 0
+                        ? CGFloat(d0.double(forKey: "widgetH")) : kWidgetMinH) * uiScale
             let p = NSPanel(contentRect: NSRect(x: 0, y: 0, width: W, height: H),
                             styleMask: [.borderless, .nonactivatingPanel,
                                         .fullSizeContentView, .resizable],
                             backing: .buffered, defer: false)
-            p.minSize = NSSize(width: 280 * uiScale, height: 180 * uiScale)
+            p.minSize = NSSize(width: kWidgetMinW * uiScale, height: kWidgetMinH * uiScale)
             p.maxSize = NSSize(width: 720 * uiScale, height: 560 * uiScale)
             // 桌面图标之上、所有应用窗口之下 —— 小组件层
             p.level = NSWindow.Level(Int(CGWindowLevelForKey(.desktopIconWindow)) + 1)

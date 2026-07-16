@@ -352,9 +352,12 @@ public struct AgentDeckRootView: View {
     // MARK: Tab 内容（自然高；超屏由外层 ScrollView 滚动）
     @ViewBuilder private var tabContent: some View {
         if tab == "overview" {
+            let showClaude = store.agentOn("claude", fallbackHidden: store.quota?.claude?.hidden)
+            let showCodex = store.agentOn("codex", fallbackHidden: store.quota?.codex?.hidden)
             OverviewView(
                 quota: store.quota, usage: store.usage, today: store.today,
                 active: store.activeShown, done: store.doneShown, showActive: store.showActive,
+                showClaudeAgent: showClaude, showCodexAgent: showCodex,
                 onFocusActive: focusActive, onFocusDone: focusDone)
         } else {
             sessionsCard
@@ -697,6 +700,8 @@ public struct AgentDeckWidgetRootView: View {
                 WidgetView(
                     quota: store.quota, today: store.today, active: store.activeShown,
                     showActive: store.showActive,
+                    showClaudeAgent: store.agentOn("claude", fallbackHidden: store.quota?.claude?.hidden),
+                    showCodexAgent: store.agentOn("codex", fallbackHidden: store.quota?.codex?.hidden),
                     onTapPanel: onTapPanel,
                     onFocusActive: { a in
                         // 小组件常驻桌面：跳转成功不收起自身

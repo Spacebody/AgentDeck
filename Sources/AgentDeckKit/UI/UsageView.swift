@@ -14,6 +14,8 @@ enum UsageMode: String, CaseIterable { case curve, usage, proj }
 
 struct UsageView: View {
     let usage: UsageResponse?
+    var showClaude: Bool = true
+    var showCodex: Bool = true
     @State private var mode: UsageMode = .curve
     @Environment(\.adShowInfo) private var showInfo
 
@@ -21,10 +23,19 @@ struct UsageView: View {
         VStack(alignment: .leading, spacing: 10) {
             header
             Group {
-                switch mode {
-                case .curve: Curve24h(usage: usage)
-                case .usage: Week7Bars(usage: usage)
-                case .proj:  ProjectTop(usage: usage)
+                if !showClaude && !showCodex {
+                    Text(L("usage.noVisibleAgents"))
+                        .font(.system(size: 10.5)).foregroundStyle(Theme.ink3)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    switch mode {
+                    case .curve:
+                        Curve24h(usage: usage, showClaude: showClaude, showCodex: showCodex)
+                    case .usage:
+                        Week7Bars(usage: usage, showClaude: showClaude, showCodex: showCodex)
+                    case .proj:
+                        ProjectTop(usage: usage)
+                    }
                 }
             }
             .frame(maxWidth: .infinity, minHeight: 150, maxHeight: .infinity)
@@ -51,7 +62,7 @@ struct UsageView: View {
             }
             Spacer(minLength: 6)
             if let u = usage {
-                if let missing = u.coverage?.codexMissingUsageFiles, missing > 0 {
+                if showCodex, let missing = u.coverage?.codexMissingUsageFiles, missing > 0 {
                     let warning = L("usage.incomplete", ["count": "\(missing)"])
                     Image(systemName: "exclamationmark.triangle.fill")
                         .font(.system(size: 10.5, weight: .semibold))
@@ -113,6 +124,8 @@ private func smoothPath(_ pts: [CGPoint]) -> Path {
 // MARK: - 24h 额度曲线（loadCurve）
 struct Curve24h: View {
     let usage: UsageResponse?
+    var showClaude: Bool = true
+    var showCodex: Bool = true
 
     var body: some View {
         let buckets = makeBuckets()
@@ -142,7 +155,9 @@ struct Curve24h: View {
         let nowH = floor(now / 3600) * 3600
         let t0 = nowH - 23 * 3600, t1 = nowH + 3600
         func px(_ ts: Double) -> Double { X0 + (ts - t0) / (t1 - t0) * (X1 - X0) }
-        let peak = max(1, buckets.map { max($0.c, $0.x) }.max() ?? 1)
+        let peak = max(1, buckets.map {
+            max(showClaude ? $0.c : 0, showCodex ? $0.x : 0)
+        }.max() ?? 1)
         let yMax = usageNiceMax(peak)
         func py(_ v: Double) -> Double { Y0 - v / yMax * (Y0 - Y1) }
 
@@ -167,6 +182,8 @@ struct Curve24h: View {
         }
         // 双序列：面积 + 线 + 端点
         for (key, color) in [("c", Brand.claude.accent), ("x", Brand.codex.accent)] {
+            if key == "c" && !showClaude { continue }
+            if key == "x" && !showCodex { continue }
             let pts = buckets.map { CGPoint(x: px($0.ts), y: py(key == "c" ? $0.c : $0.x)) }
             let line = smoothPath(pts)
             var area = line
@@ -187,8 +204,12 @@ struct Curve24h: View {
     private func legend(_ buckets: [(ts: Double, c: Double, x: Double)]) -> some View {
         let cTot = buckets.reduce(0) { $0 + $1.c }, xTot = buckets.reduce(0) { $0 + $1.x }
         return HStack(spacing: 12) {
-            legendItem(Brand.claude.accent, L("usage.legend24h", ["name": "Claude"]), cTot)
-            legendItem(Brand.codex.accent, L("usage.legend24h", ["name": "Codex"]), xTot)
+            if showClaude {
+                legendItem(Brand.claude.accent, L("usage.legend24h", ["name": "Claude"]), cTot)
+            }
+            if showCodex {
+                legendItem(Brand.codex.accent, L("usage.legend24h", ["name": "Codex"]), xTot)
+            }
             Spacer()
         }
         .font(.system(size: 9.5)).foregroundStyle(Theme.ink3)
@@ -204,6 +225,8 @@ struct Curve24h: View {
 // MARK: - 近 7 天堆叠柱（loadUsage）
 struct Week7Bars: View {
     let usage: UsageResponse?
+    var showClaude: Bool = true
+    var showCodex: Bool = true
 
     private struct DayBar { let day: String; var per: [TodaySummary.Family: Double]; let all: Double }
 
@@ -218,18 +241,25 @@ struct Week7Bars: View {
     // 模型分段图例（对应 #usageview .legend：Opus/Sonnet/Haiku/Codex）
     private var legend: some View {
         HStack(spacing: 9) {
-            ForEach([(TodaySummary.Family.opus, "Opus"), (.sonnet, "Sonnet"),
-                     (.haiku, "Haiku"), (.codex, "Codex")], id: \.1) { fam, name in
-                HStack(spacing: 3) {
-                    RoundedRectangle(cornerRadius: 2)
-                        .fill(LinearGradient(colors: grad(fam), startPoint: .top, endPoint: .bottom))
-                        .frame(width: 7, height: 7)
-                    Text(name)
+            if showClaude {
+                ForEach([(TodaySummary.Family.opus, "Opus"), (.sonnet, "Sonnet"),
+                         (.haiku, "Haiku")], id: \.1) { fam, name in
+                    legendItem(fam, name)
                 }
             }
+            if showCodex { legendItem(.codex, "Codex") }
             Spacer()
         }
         .font(.system(size: 9.5)).foregroundStyle(Theme.ink3)
+    }
+
+    private func legendItem(_ family: TodaySummary.Family, _ name: String) -> some View {
+        HStack(spacing: 3) {
+            RoundedRectangle(cornerRadius: 2)
+                .fill(LinearGradient(colors: grad(family), startPoint: .top, endPoint: .bottom))
+                .frame(width: 7, height: 7)
+            Text(name)
+        }
     }
 
     private func makeBars() -> [DayBar] {
@@ -237,15 +267,19 @@ struct Week7Bars: View {
         let days = Array(u.days.suffix(7))
         return days.map { day in
             var per: [TodaySummary.Family: Double] = [:]
-            for (model, parts) in (u.claudeDaily[day] ?? [:]) {
-                let t = parts.reduce(0, +)
-                guard t > 0 else { continue }
-                let fam: TodaySummary.Family = ["opus", "sonnet", "haiku"].first { model.hasPrefix($0) }
-                    .flatMap { TodaySummary.Family(rawValue: $0) } ?? .other
-                per[fam, default: 0] += t
+            if showClaude {
+                for (model, parts) in (u.claudeDaily[day] ?? [:]) {
+                    let t = parts.reduce(0, +)
+                    guard t > 0 else { continue }
+                    let fam: TodaySummary.Family = ["opus", "sonnet", "haiku"].first { model.hasPrefix($0) }
+                        .flatMap { TodaySummary.Family(rawValue: $0) } ?? .other
+                    per[fam, default: 0] += t
+                }
             }
-            let cx = u.codexDaily[day] ?? 0
-            if cx > 0 { per[.codex, default: 0] += cx }
+            if showCodex {
+                let cx = u.codexDaily[day] ?? 0
+                if cx > 0 { per[.codex, default: 0] += cx }
+            }
             return DayBar(day: day, per: per, all: per.values.reduce(0, +))
         }
     }
@@ -286,7 +320,10 @@ struct Week7Bars: View {
                 let clip = Path(roundedRect: CGRect(x: x, y: Y0 - max(totalH, 4), width: BW, height: max(totalH, 4)),
                                 cornerRadius: 4.5)
                 var cur = Y0
-                for f in [TodaySummary.Family.opus, .sonnet, .haiku, .other, .codex] {
+                let families: [TodaySummary.Family] =
+                    (showClaude ? [.opus, .sonnet, .haiku, .other] : [])
+                    + (showCodex ? [.codex] : [])
+                for f in families {
                     let v = b.per[f] ?? 0
                     guard v > 0 else { continue }
                     let h = v / niceMax * (Y0 - Y1)

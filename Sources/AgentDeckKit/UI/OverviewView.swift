@@ -2,6 +2,43 @@
 // 今日条 / 活跃会话 / 完成事件 / 用量图表在 #5、#6 接入。
 import SwiftUI
 
+/// 双 Agent 额度行：先以相同列宽测量两侧当前页，再把较高值作为共同高度。
+/// 使用 Layout 避免 PreferenceKey 的首帧跳动，也能随 carousel 当前页即时重排。
+struct EqualHeightQuotaRow: Layout {
+    let spacing: CGFloat
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews,
+                     cache: inout ()) -> CGSize {
+        guard !subviews.isEmpty else { return .zero }
+        let gaps = spacing * CGFloat(max(0, subviews.count - 1))
+        let totalWidth: CGFloat
+        if let proposedWidth = proposal.width {
+            totalWidth = proposedWidth
+        } else {
+            let idealWidth = subviews.map { $0.sizeThatFits(.unspecified).width }.max() ?? 0
+            totalWidth = idealWidth * CGFloat(subviews.count) + gaps
+        }
+        let columnWidth = max(0, (totalWidth - gaps) / CGFloat(subviews.count))
+        let height = subviews.map {
+            $0.sizeThatFits(ProposedViewSize(width: columnWidth, height: nil)).height
+        }.max() ?? 0
+        return CGSize(width: totalWidth, height: height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize,
+                       subviews: Subviews, cache: inout ()) {
+        guard !subviews.isEmpty else { return }
+        let gaps = spacing * CGFloat(max(0, subviews.count - 1))
+        let columnWidth = max(0, (bounds.width - gaps) / CGFloat(subviews.count))
+        var x = bounds.minX
+        for subview in subviews {
+            subview.place(at: CGPoint(x: x, y: bounds.minY), anchor: .topLeading,
+                          proposal: ProposedViewSize(width: columnWidth, height: bounds.height))
+            x += columnWidth + spacing
+        }
+    }
+}
+
 struct OverviewView: View {
     let quota: QuotaResponse?
     var usage: UsageResponse? = nil
@@ -9,6 +46,9 @@ struct OverviewView: View {
     var active: [ActiveSession] = []
     var done: [DoneEvent] = []
     var showActive: Bool = true
+    /// nil 时回退 quota.hidden（仅预览/设置尚未加载）；真实根视图传入本地设置值。
+    var showClaudeAgent: Bool? = nil
+    var showCodexAgent: Bool? = nil
     var onFocusActive: (ActiveSession) -> Void = { _ in }
     var onFocusDone: (DoneEvent) -> Void = { _ in }
 
@@ -19,24 +59,48 @@ struct OverviewView: View {
             if let today { TodayBar(summary: today).reveal(delay: 0.06) }
             if showActive { ActiveCard(sessions: active, onTap: onFocusActive).reveal(delay: 0.09) }
             DoneCard(events: done, onTap: onFocusDone).reveal(delay: 0.10)
-            UsageView(usage: usage).reveal(delay: 0.12)   // 用量趋势（24h / 近7天 / 项目 Top）
+            UsageView(usage: usage, showClaude: showClaude,
+                      showCodex: showCodex).reveal(delay: 0.12)
         }
+        .animation(.easeInOut(duration: 0.18), value: showClaude)
+        .animation(.easeInOut(duration: 0.18), value: showCodex)
+    }
+
+    private var showClaude: Bool {
+        showClaudeAgent ?? !(quota?.claude?.hidden ?? false)
+    }
+
+    private var showCodex: Bool {
+        showCodexAgent ?? !(quota?.codex?.hidden ?? false)
     }
 
     @ViewBuilder private var quotaSection: some View {
         let claude = quota?.claude
         let codex = quota?.codex
-        let showClaude = !(claude?.hidden ?? false)
-        let showCodex = !(codex?.hidden ?? false)
         // accounts 列表（多账号）→ carousel；缺失则回退顶层单账号节点。
-        let claudeAccts = quota?.accounts?.claude ?? (claude.map { [$0] } ?? [])
-        let codexAccts = quota?.accounts?.codex ?? (codex.map { [$0] } ?? [])
-        // fillHeight + fixedSize(vertical)：两卡撑到同高（对应 v1 grid stretch）。
-        HStack(alignment: .top, spacing: 10) {
-            if showClaude { QuotaCarousel(brand: .claude, accounts: claudeAccts, fillHeight: true) }
-            if showCodex { QuotaCarousel(brand: .codex, accounts: codexAccts, fillHeight: true) }
+        let listedClaude = quota?.accounts?.claude ?? []
+        let listedCodex = quota?.accounts?.codex ?? []
+        let claudeAccts = listedClaude.isEmpty ? (claude.map { [$0] } ?? []) : listedClaude
+        let codexAccts = listedCodex.isEmpty ? (codex.map { [$0] } ?? []) : listedCodex
+        if showClaude && showCodex {
+            let reservePageIndicator = claudeAccts.count > 1 || codexAccts.count > 1
+            EqualHeightQuotaRow(spacing: 10) {
+                QuotaCarousel(brand: .claude, accounts: claudeAccts,
+                              presentation: .panelDual,
+                              reservePageIndicator: reservePageIndicator)
+                QuotaCarousel(brand: .codex, accounts: codexAccts,
+                              presentation: .panelDual,
+                              reservePageIndicator: reservePageIndicator)
+            }
+        } else if showClaude {
+            QuotaCarousel(brand: .claude, accounts: claudeAccts,
+                          presentation: .panelWide)
+                .frame(maxWidth: .infinity, alignment: .top)
+        } else if showCodex {
+            QuotaCarousel(brand: .codex, accounts: codexAccts,
+                          presentation: .panelWide)
+                .frame(maxWidth: .infinity, alignment: .top)
         }
-        .fixedSize(horizontal: false, vertical: true)
     }
 }
 
@@ -69,8 +133,9 @@ enum PreviewSamples {
     static let claude = QuotaNode(
         ok: true, hidden: false, accountId: nil, account: nil, isDefault: true, kind: "oauth",
         windows: [
-            win("five_hour", "5 小时窗口", 35.2, resetIn: 2.4 * 3600),
             win("seven_day", "周限额", 62, resetIn: 3.5 * 86400),
+            // 故意不按周期排序，预览可验证圆环按 windowSeconds 选择最短窗口。
+            win("five_hour", "5 小时窗口", 35.2, resetIn: 2.4 * 3600),
             win("seven_day_opus", "周限额 · Opus", 88, resetIn: 3.5 * 86400),
         ],
         error: nil, noQuota: nil, sampledAt: nil, stale: nil, credits: nil, raw: nil)
@@ -78,14 +143,23 @@ enum PreviewSamples {
     static let codex = QuotaNode(
         ok: true, hidden: false, accountId: nil, account: nil, isDefault: true, kind: nil,
         windows: [
-            win("five_hour", "5 小时窗口", 12, resetIn: 1.2 * 3600),
-            win("seven_day", "周限额", 96, resetIn: 5 * 86400),
+            win("seven_day", "周限额", 19, resetIn: 6 * 86400),
         ],
         error: nil, noQuota: nil, sampledAt: nil, stale: nil, credits: nil, raw: nil)
+
+    static let hiddenClaude = QuotaNode(
+        ok: false, hidden: true, accountId: nil, account: nil, isDefault: true, kind: nil,
+        windows: nil, error: nil, noQuota: nil, sampledAt: nil, stale: nil,
+        credits: nil, raw: nil)
 
     static let response = QuotaResponse(
         claude: claude, codex: codex,
         accounts: QuotaAccounts(claude: [claude], codex: [codex]),
+        menubar: nil, ts: nil)
+
+    static let codexOnlyResponse = QuotaResponse(
+        claude: hiddenClaude, codex: codex,
+        accounts: QuotaAccounts(claude: [], codex: [codex]),
         menubar: nil, ts: nil)
 
     static let usageDays: [String] = (0..<7).reversed().map {

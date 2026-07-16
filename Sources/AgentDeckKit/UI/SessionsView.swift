@@ -32,6 +32,7 @@ struct SessionsView: View {
     @State private var previewOrder: [String] = []
     @State private var previewMtimes: [String: Double] = [:]
     @State private var latestMtimes: [String: Double] = [:]
+    @FocusState private var searchFocused: Bool
 
     init(sessions: [SessionItem], scrollable: Bool = true,
          query: String = "", filter: String = "all", total: Int = 0,
@@ -152,23 +153,14 @@ struct SessionsView: View {
     }
 
     private var header: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 7) {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(spacing: 8) {
                 titleAndCount
-                filterChips
                 Spacer(minLength: 6)
                 loadingIndicator
-                searchField
+                filterChips
             }
-            VStack(spacing: 7) {
-                HStack(spacing: 7) {
-                    titleAndCount
-                    Spacer(minLength: 6)
-                    loadingIndicator
-                    searchField
-                }
-                HStack(spacing: 7) { filterChips; Spacer(minLength: 0) }
-            }
+            searchField
         }
     }
 
@@ -198,20 +190,29 @@ struct SessionsView: View {
     }
 
     private var searchField: some View {
-        HStack(spacing: 5) {
-            Image(systemName: "magnifyingglass").font(.system(size: 10)).foregroundStyle(Theme.ink3)
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 12, weight: .medium)).foregroundStyle(Theme.ink3)
             TextField(L("session.search"), text: Binding(get: { query }, set: onSearch))
-                .textFieldStyle(.plain).font(.system(size: 10.5)).foregroundStyle(Theme.ink)
-                .frame(width: 96)
+                .textFieldStyle(.plain).font(.system(size: 12)).foregroundStyle(Theme.ink)
+                .focused($searchFocused)
+                .frame(maxWidth: .infinity)
             if !query.isEmpty {
                 Button { onSearch("") } label: {
-                    Image(systemName: "xmark.circle.fill").font(.system(size: 10)).foregroundStyle(Theme.ink3)
-                }.buttonStyle(.plain)
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 12)).foregroundStyle(Theme.ink3)
+                        .frame(width: 18, height: 18)
+                }
+                .buttonStyle(.plain)
+                .help(L("session.clearSearch"))
+                .accessibilityLabel(L("session.clearSearch"))
             }
         }
-        .padding(.horizontal, 11).padding(.vertical, 4)
-        .background(Capsule().fill(Color.white.opacity(0.06)))
-        .overlay(Capsule().strokeBorder(Theme.edge))
+        .padding(.horizontal, 13)
+        .frame(maxWidth: .infinity, minHeight: 40, maxHeight: 40)
+        .background(Capsule().fill(Color.white.opacity(searchFocused ? 0.09 : 0.06)))
+        .overlay(Capsule().strokeBorder(searchFocused ? Theme.edgeHi : Theme.edge, lineWidth: 1))
+        .animation(.easeOut(duration: 0.16), value: searchFocused)
     }
 }
 
