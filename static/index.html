@@ -1207,24 +1207,11 @@ function quotaCardInner(name, data, gradId, accountLabel) {
   let foot = '';
   if (data.stale) {
     foot = t('quota.stale');
-  } else if (name === 'Claude') {
-    const extra = (data.raw || {}).extra_usage;
-    const burn = burnHint(ws.find(w => w.id === 'five_hour'));
-    // extra_usage 金额单位是美分（monthly_limit 10000 = $100）
-    const cents = c => {
-      const d = (c || 0) / 100;
-      return Number.isInteger(d) ? d : d.toFixed(2);
-    };
-    foot = burn || (extra && extra.is_enabled
-      ? t('quota.extra', {used: cents(extra.used_credits), limit: cents(extra.monthly_limit)}) : '');
   } else {
-    // 新鲜度警示优先于一切：数据不可信时其他信息没有意义
+    // 右上角只展示数据状态，不混入 Credits / extra_usage 等额度内容。
     const age = data.sampled_at ? Date.now() - Date.parse(data.sampled_at) : 0;
-    const cr = data.credits;
     if (age > 2 * 3.6e6) {
       foot = `<span class="stale">${t('quota.dataStale', {h: Math.round(age/3.6e6)})}</span>`;
-    } else if (cr && cr.has_credits) {
-      foot = t('quota.credits', {bal: cr.unlimited ? '∞' : esc('$' + cr.balance)});
     } else if (data.sampled_at) {
       foot = t('quota.sampledAt', {time: rel(Date.parse(data.sampled_at)/1000)});
     }

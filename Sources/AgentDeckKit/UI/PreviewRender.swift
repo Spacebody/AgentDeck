@@ -43,7 +43,7 @@ public enum PreviewRender {
         store.settings["show_claude"] = .bool(false)
         store.settings["show_codex"] = .bool(true)
         store.quota = PreviewSamples.response
-        return png(AgentDeckRootView(previewStore: store, version: "2.5.0")
+        return png(AgentDeckRootView(previewStore: store, version: "2.5.1")
             .frame(width: 420, height: 920), scale: scale)
     }
 
@@ -54,7 +54,7 @@ public enum PreviewRender {
         store.settings["show_claude"] = .bool(true)
         store.settings["show_codex"] = .bool(true)
         store.quota = PreviewSamples.codexOnlyResponse
-        return png(AgentDeckRootView(previewStore: store, version: "2.5.0")
+        return png(AgentDeckRootView(previewStore: store, version: "2.5.1")
             .frame(width: 420, height: 920), scale: scale)
     }
 

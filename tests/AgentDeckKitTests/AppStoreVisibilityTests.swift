@@ -193,4 +193,33 @@ final class AppStoreVisibilityTests: XCTestCase {
         XCTAssertEqual(weekly.windowSeconds, 7 * 86400)
         XCTAssertEqual(fiveHour.windowSeconds, 5 * 3600)
     }
+
+    func testQuotaHeaderUsesSampleTimeInsteadOfCreditsBalance() throws {
+        let data = Data("""
+        {
+          "ok": true,
+          "windows": [{
+            "id": "seven_day",
+            "used_percent": 12,
+            "resets_at": 1785258146
+          }],
+          "sampled_at": "2026-07-24T15:00:00Z",
+          "credits": {
+            "hasCredits": true,
+            "unlimited": false,
+            "balance": "2500"
+          }
+        }
+        """.utf8)
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let node = try decoder.decode(QuotaNode.self, from: data)
+        let now = try XCTUnwrap(Fmt.parseISO("2026-07-24T15:01:00Z"))
+
+        let status = try XCTUnwrap(quotaStatusInfo(node: node, now: now))
+
+        XCTAssertFalse(status.stale)
+        XCTAssertFalse(status.text.contains("2500"))
+        XCTAssertEqual(status.text, L("quota.sampledAt", ["time": L("time.minAgo", ["n": "1"])]))
+    }
 }

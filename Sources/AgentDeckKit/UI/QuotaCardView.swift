@@ -7,56 +7,28 @@ private func pctText(_ v: Double) -> String {
     v == v.rounded() ? String(Int(v)) : String(format: "%.1f", v)
 }
 
-private struct QuotaStatusInfo {
+struct QuotaStatusInfo {
     let text: String
     let stale: Bool
 }
 
-/// 额度状态脚注的共享语义；每张额度卡在自己的右上角展示。
-private func quotaStatusInfo(brand: Brand, node: QuotaNode) -> QuotaStatusInfo? {
+/// 额度卡右上角只展示数据新鲜度/降级状态，不混入余额、额外用量等额度内容。
+func quotaStatusInfo(node: QuotaNode, now: Date = Date()) -> QuotaStatusInfo? {
     if node.stale == true {
         return QuotaStatusInfo(text: L("quota.stale"), stale: true)
     }
-    if brand == .claude {
-        let burn = Fmt.burnHint(node.displayWindows.first { $0.id == "five_hour" })
-        if !burn.isEmpty { return QuotaStatusInfo(text: burn, stale: false) }
-        if let ex = node.raw?.extraUsage, ex.isEnabled == true {
-            func cents(_ c: Double?) -> String {
-                let d = (c ?? 0) / 100
-                return d == d.rounded() ? "\(Int(d))" : String(format: "%.2f", d)
-            }
-            let text = L("quota.extra", [
-                "used": cents(ex.usedCredits),
-                "limit": cents(ex.monthlyLimit),
-            ]).strippingBold
-            return QuotaStatusInfo(text: text, stale: false)
-        }
+    guard let sampledAt = node.sampledAt, let date = Fmt.parseISO(sampledAt) else {
         return nil
     }
-
-    if let s = node.sampledAt, let d = Fmt.parseISO(s) {
-        let age = Date().timeIntervalSince(d)
-        if age > 2 * 3600 {
-            return QuotaStatusInfo(
-                text: L("quota.dataStale", ["h": "\(Int((age / 3600).rounded()))"]),
-                stale: true)
-        }
-    }
-    if let cr = node.credits, cr.hasCredits == true {
-        let balance: String
-        if cr.unlimited == true {
-            balance = "∞"
-        } else {
-            let value = cr.balance ?? 0
-            let formatted = value == value.rounded()
-                ? "\(Int(value))" : String(format: "%.2f", value)
-            balance = "$\(formatted)"
-        }
+    let age = now.timeIntervalSince(date)
+    if age > 2 * 3600 {
         return QuotaStatusInfo(
-            text: L("quota.credits", ["bal": balance]).strippingBold,
-            stale: false)
+            text: L("quota.dataStale", ["h": "\(Int((age / 3600).rounded()))"]),
+            stale: true)
     }
-    return nil
+    return QuotaStatusInfo(
+        text: L("quota.sampledAt", ["time": Fmt.relative(date, now: now)]),
+        stale: false)
 }
 
 /// 额度卡的展示环境。主面板双栏与桌面小组件必须使用独立排版指标，避免窄卡误套小组件字号。
@@ -653,17 +625,7 @@ struct QuotaCardView: View {
     }
 
     private var headerStatus: QuotaStatusInfo? {
-        if let node, let status = quotaStatusInfo(brand: brand, node: node) {
-            return status
-        }
-        guard brand == .codex, let sampledAtText else { return nil }
-        return QuotaStatusInfo(text: sampledAtText, stale: false)
-    }
-
-    private var sampledAtText: String? {
-        guard let sampledAt = node?.sampledAt, let date = Fmt.parseISO(sampledAt) else {
-            return nil
-        }
-        return L("quota.sampledAt", ["time": Fmt.relative(date)])
+        guard let node else { return nil }
+        return quotaStatusInfo(node: node)
     }
 }

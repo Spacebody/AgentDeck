@@ -78,6 +78,29 @@ class HTTPBoundaryTests(unittest.TestCase):
         self.assertEqual(sent, [(403, {"error": "forbidden"})])
 
 
+class ClaudeQuotaTests(unittest.TestCase):
+    def test_successful_quota_fetch_records_sample_time(self):
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps({
+            "five_hour": {
+                "utilization": 12.5,
+                "resets_at": "2026-07-24T20:00:00Z",
+            },
+        }).encode()
+        source = {"path": Path("/tmp/claude-home"), "is_default": True}
+
+        with mock.patch.object(
+                daemon, "_source_token", return_value=("token", "oauth")), \
+                mock.patch.object(
+                    daemon.urllib.request, "urlopen", return_value=response):
+            quota = daemon._claude_quota_for(source)
+
+        self.assertTrue(quota["ok"])
+        self.assertRegex(
+            quota["sampled_at"],
+            r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$")
+
+
 class CodexNotifyTests(unittest.TestCase):
     def test_notify_is_inserted_at_toml_root(self):
         source = 'model = "gpt-5"\n[profiles.work]\nnotify = ["nested"]\n'

@@ -944,7 +944,8 @@ def _claude_quota_for(src):
                 "used_percent": round(float(node["utilization"]), 1),
                 "resets_at": node.get("resets_at"),
             })
-    return {"ok": True, "kind": "oauth", "windows": windows, "raw": raw}
+    return {"ok": True, "kind": "oauth", "windows": windows, "raw": raw,
+            "sampled_at": _iso_at()}
 
 
 def _claude_quota():
