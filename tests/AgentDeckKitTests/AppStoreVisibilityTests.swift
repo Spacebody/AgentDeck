@@ -89,4 +89,108 @@ final class AppStoreVisibilityTests: XCTestCase {
             mutationVersions: ["show_codex": 5],
             attemptedVersions: [:]))
     }
+
+    func testQuotaChangesResponseDecodesDaemonRestartCursor() throws {
+        let data = Data("""
+        {
+          "boot_id": "boot-2",
+          "revision": 17,
+          "quota": {
+            "claude": {"ok": false, "hidden": true},
+            "codex": {
+              "ok": true,
+              "windows": [{
+                "id": "seven_day",
+                "label": "Weekly",
+                "used_percent": 50,
+                "resets_at": 1785258146
+              }]
+            },
+            "accounts": {"claude": [], "codex": []},
+            "ts": 1784819000
+          }
+        }
+        """.utf8)
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+
+        let response = try decoder.decode(QuotaChangesResponse.self, from: data)
+
+        XCTAssertEqual(response.bootId, "boot-2")
+        XCTAssertEqual(response.revision, 17)
+        XCTAssertEqual(response.quota.codex?.displayWindows.first?.usedPercent, 50)
+    }
+
+    func testQuotaResponseDecodesSnapshotVersion() throws {
+        let data = Data("""
+        {
+          "claude": {"ok": false},
+          "codex": {"ok": false},
+          "quota_revision": 12,
+          "quota_boot_id": "boot-a"
+        }
+        """.utf8)
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+
+        let response = try decoder.decode(QuotaResponse.self, from: data)
+
+        XCTAssertEqual(response.quotaRevision, 12)
+        XCTAssertEqual(response.quotaBootId, "boot-a")
+    }
+
+    func testQuotaPushAllowsMatchingRevisionOrdinaryResponseToCompleteSnapshot() {
+        var gate = QuotaSnapshotGate()
+        let slowRequest = gate.beginRequest()
+
+        XCTAssertTrue(gate.accept(bootId: "boot-a", revision: 2, request: nil))
+        XCTAssertTrue(gate.accept(
+            bootId: "boot-a", revision: 2, request: slowRequest))
+        XCTAssertFalse(gate.accept(
+            bootId: "boot-a", revision: 1, request: slowRequest))
+        XCTAssertFalse(gate.canReportFailure(for: slowRequest))
+    }
+
+    func testQuotaGateRejectsOutOfOrderOrdinaryResponses() {
+        var gate = QuotaSnapshotGate()
+        let first = gate.beginRequest()
+        let second = gate.beginRequest()
+
+        XCTAssertTrue(gate.accept(bootId: "boot-a", revision: 4, request: second))
+        XCTAssertFalse(gate.accept(bootId: "boot-a", revision: 3, request: first))
+    }
+
+    func testQuotaGateAcceptsHigherRevisionFromOlderRequest() {
+        var gate = QuotaSnapshotGate()
+        let forceRequest = gate.beginRequest()
+        let ordinaryRequest = gate.beginRequest()
+
+        XCTAssertTrue(gate.accept(
+            bootId: "boot-a", revision: 4, request: ordinaryRequest))
+        XCTAssertTrue(gate.accept(
+            bootId: "boot-a", revision: 5, request: forceRequest))
+        XCTAssertEqual(gate.revision, 5)
+    }
+
+    func testQuotaGateAcceptsNewDaemonBootAfterRestart() {
+        var gate = QuotaSnapshotGate()
+
+        XCTAssertTrue(gate.accept(bootId: "boot-a", revision: 19, request: nil))
+        XCTAssertFalse(gate.accept(bootId: "boot-a", revision: 19, request: nil))
+        XCTAssertTrue(gate.accept(bootId: "boot-b", revision: 1, request: nil))
+        XCTAssertEqual(gate.bootId, "boot-b")
+        XCTAssertEqual(gate.revision, 1)
+    }
+
+    func testNamedCodexWindowsRetainTheirKnownDuration() {
+        let weekly = QuotaWindow(
+            id: "seven_day_codex-bengalfox", label: "GPT-5.3-Codex-Spark",
+            usedPercent: 5, resetsAt: nil)
+        let fiveHour = QuotaWindow(
+            id: "five_hour_codex-fast", label: "Fast",
+            usedPercent: 7, resetsAt: nil)
+
+        XCTAssertEqual(weekly.windowSeconds, 7 * 86400)
+        XCTAssertEqual(fiveHour.windowSeconds, 5 * 3600)
+    }
 }

@@ -2,6 +2,7 @@ import json
 import os
 import plistlib
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -22,6 +23,51 @@ class HTTPBoundaryTests(unittest.TestCase):
         self.assertFalse(daemon._local_http_host({"Host": "rebind.example"}))
         self.assertFalse(daemon._local_http_host({"Host": "127.0.0.1:7777.evil"}))
 
+    def test_quota_long_poll_requires_a_local_same_origin_request(self):
+        local = {"Host": "127.0.0.1:7777"}
+        self.assertTrue(daemon._local_long_poll_request(local))
+        self.assertTrue(daemon._local_long_poll_request({
+            **local, "Sec-Fetch-Site": "same-origin",
+            "Origin": "http://127.0.0.1:7777",
+        }))
+        self.assertFalse(daemon._local_long_poll_request({
+            **local, "Sec-Fetch-Site": "cross-site",
+        }))
+        self.assertFalse(daemon._local_long_poll_request({
+            **local, "Origin": "https://attacker.example",
+        }))
+
+    def test_quota_long_poll_rejects_excess_waiters(self):
+        handler = object.__new__(daemon.Handler)
+        handler.path = "/api/quota/changes?after=1"
+        handler.headers = {"Host": "127.0.0.1:7777"}
+        sent = []
+        handler._send = lambda code, payload, ctype="": sent.append((code, payload))
+        slots = SimpleNamespace(acquire=lambda blocking=False: False)
+        with mock.patch.object(daemon, "_quota_wait_slots", slots), \
+                mock.patch.object(daemon, "api_quota_changes") as changes:
+            handler.do_GET()
+        self.assertEqual(sent, [(429, {"error": "too many quota watchers"})])
+        changes.assert_not_called()
+
+    def test_cross_site_request_cannot_trigger_quota_refresh(self):
+        for query in ("", "force=1", "fresh_codex=1"):
+            with self.subTest(query=query):
+                handler = object.__new__(daemon.Handler)
+                handler.path = f"/api/quota?{query}" if query else "/api/quota"
+                handler.headers = {
+                    "Host": "127.0.0.1:7777",
+                    "Sec-Fetch-Site": "cross-site",
+                    "Origin": "https://attacker.example",
+                }
+                sent = []
+                handler._send = lambda code, payload, ctype="": \
+                    sent.append((code, payload))
+                with mock.patch.object(daemon, "api_quota") as quota:
+                    handler.do_GET()
+                self.assertEqual(sent, [(403, {"error": "forbidden"})])
+                quota.assert_not_called()
+
     def test_handler_rejects_rebound_get_for_every_api(self):
         handler = object.__new__(daemon.Handler)
         handler.path = "/api/sessions"
@@ -41,6 +87,150 @@ class CodexNotifyTests(unittest.TestCase):
         removed = daemon._codex_set_notify(updated, None)
         self.assertIsNone(daemon._codex_read_notify(removed))
         self.assertIn('[profiles.work]\nnotify = ["nested"]', removed)
+
+    def test_python39_fallback_preserves_single_quoted_notify(self):
+        source = "notify = ['external-tool', '--flag']\nmodel = 'gpt-5'\n"
+        with mock.patch.dict("sys.modules", {"tomllib": None}):
+            self.assertEqual(
+                daemon._codex_read_notify(source),
+                ["external-tool", "--flag"])
+
+    def test_multiline_notify_is_replaced_without_leaving_toml_fragments(self):
+        source = """
+notify = [
+  'external-tool', # owner
+  "--flag",
+]
+[profiles.work]
+model = "gpt-5"
+""".lstrip()
+        self.assertEqual(
+            daemon._codex_read_notify(source),
+            ["external-tool", "--flag"])
+        updated = daemon._codex_set_notify(source, ["agentdeck"])
+        self.assertEqual(daemon._codex_read_notify(updated), ["agentdeck"])
+        self.assertNotIn("'external-tool'", updated)
+        self.assertNotIn('  "--flag"', updated)
+        self.assertIn('[profiles.work]\nmodel = "gpt-5"', updated)
+
+    def test_notify_text_inside_multiline_string_is_not_a_root_key_or_table(self):
+        source = '''
+description = """
+notify = ['not-a-hook']
+[not-a-table]
+"""
+model = "gpt-5"
+[profiles.work]
+model = "gpt-5"
+'''.lstrip()
+        self.assertIsNone(daemon._codex_read_notify(source))
+        updated = daemon._codex_set_notify(source, ["agentdeck"])
+        self.assertEqual(daemon._codex_read_notify(updated), ["agentdeck"])
+        self.assertIn("notify = ['not-a-hook']", updated)
+        self.assertLess(
+            updated.index('notify = ["agentdeck"]'),
+            updated.index("[profiles.work]"))
+
+    def test_quoted_notify_root_keys_are_recognized_and_replaced(self):
+        for source in (
+                '"notify" = ["external"]\n',
+                "'notify' = ['external']\n",
+                r'"not\u0069fy" = ["external"]' + "\n"):
+            with self.subTest(source=source):
+                self.assertEqual(
+                    daemon._codex_read_notify(source), ["external"])
+                updated = daemon._codex_set_notify(source, ["agentdeck"])
+                self.assertEqual(
+                    daemon._codex_read_notify(updated), ["agentdeck"])
+                self.assertEqual(updated.count("notify"), 1)
+
+    def test_literal_quoted_key_does_not_decode_backslash_escapes(self):
+        source = r"'noti\u0066y' = ['unrelated']" + "\n"
+        self.assertIsNone(daemon._codex_read_notify(source))
+        updated = daemon._codex_set_notify(source, ["agentdeck"])
+        self.assertEqual(daemon._codex_read_notify(updated), ["agentdeck"])
+        self.assertIn(r"'noti\u0066y' = ['unrelated']", updated)
+
+    def test_unrelated_codex_notify_name_is_not_claimed(self):
+        external = ["/opt/tools/my-codex-notify-hook"]
+        self.assertFalse(daemon._codex_notify_is_ours(external))
+        self.assertFalse(daemon._codex_notify_direct_is_ours(external))
+
+    def test_malformed_notify_fails_closed_without_overwriting_config(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            config = root / "config.toml"
+            wrapper = root / "codex-notify.sh"
+            integration = root / "integration.json"
+            original = 'notify = ["external-tool"\nmodel = "gpt-5"\n'
+            config.write_text(original)
+            with mock.patch.object(daemon, "INTEGRATION_FILE", integration):
+                self.assertFalse(daemon._install_codex_notify(
+                    config=config, wrapper=wrapper))
+            self.assertEqual(config.read_text(), original)
+            self.assertFalse(wrapper.exists())
+
+    def test_wrapper_self_cleanup_restores_multiline_original_notify(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            data = root / "data"
+            data.mkdir()
+            config = root / "config.toml"
+            wrapper = data / "codex-notify.sh"
+            integration = data / "integration.json"
+            config.write_text('"notify" = [\n  \'/usr/bin/true\',\n]\n')
+            with mock.patch.multiple(
+                    daemon, DATA_DIR=data, INTEGRATION_FILE=integration,
+                    _CODEX_WRAPPER=wrapper):
+                self.assertTrue(daemon._install_codex_notify(
+                    config=config, wrapper=wrapper))
+            script = wrapper.read_text().replace(
+                'APP="/Applications/AgentDeck.app"',
+                f'APP="{root}/missing.app"').replace(
+                    "127.0.0.1:7777", "127.0.0.1:9")
+            wrapper.write_text(script)
+            result = daemon.subprocess.run(
+                [str(wrapper), '{"type":"test"}'],
+                capture_output=True, text=True, timeout=8)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                daemon._codex_read_notify(config.read_text()),
+                ["/usr/bin/true"])
+            self.assertFalse(wrapper.exists())
+
+    def test_wrapper_self_cleanup_removes_notify_when_no_original_existed(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            data = root / "data"
+            data.mkdir()
+            config = root / "config.toml"
+            config.write_text('''
+description = """
+notify = ['not-a-hook']
+[not-a-table]
+"""
+model = "gpt-5"
+'''.lstrip())
+            wrapper = data / "codex-notify.sh"
+            integration = data / "integration.json"
+            with mock.patch.multiple(
+                    daemon, DATA_DIR=data, INTEGRATION_FILE=integration,
+                    _CODEX_WRAPPER=wrapper):
+                self.assertTrue(daemon._install_codex_notify(
+                    config=config, wrapper=wrapper))
+            script = wrapper.read_text().replace(
+                'APP="/Applications/AgentDeck.app"',
+                f'APP="{root}/missing.app"').replace(
+                    "127.0.0.1:7777", "127.0.0.1:9")
+            wrapper.write_text(script)
+            result = daemon.subprocess.run(
+                [str(wrapper), '{"type":"test"}'],
+                capture_output=True, text=True, timeout=8)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIsNone(daemon._codex_read_notify(config.read_text()))
+            self.assertIn('model = "gpt-5"', config.read_text())
+            self.assertIn("notify = ['not-a-hook']", config.read_text())
+            self.assertFalse(wrapper.exists())
 
     def test_external_previous_notify_chain_is_unwrapped(self):
         wrapper = str(daemon._CODEX_WRAPPER)
@@ -70,6 +260,81 @@ class CodexNotifyTests(unittest.TestCase):
                 daemon._remove_codex_notify()
                 self.assertEqual(daemon._codex_read_notify(config.read_text()),
                                  ["computer-use", "turn-ended"])
+
+    def test_install_creates_config_for_an_initialized_home_without_one(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            home = root / ".codex-work"
+            data = root / "data"
+            home.mkdir()
+            data.mkdir()
+            (home / "auth.json").write_text("{}")
+            config = home / "config.toml"
+            wrapper = data / "codex-notify-0123456789ab.sh"
+            integration = data / "integration.json"
+            with mock.patch.multiple(
+                    daemon, DATA_DIR=data, INTEGRATION_FILE=integration):
+                self.assertTrue(daemon._install_codex_notify(
+                    config=config, wrapper=wrapper,
+                    state_key="codex_prev_notify_work"))
+                self.assertEqual(
+                    daemon._codex_read_notify(config.read_text()),
+                    [str(wrapper)])
+                daemon._remove_codex_notify(
+                    config=config, wrapper=wrapper,
+                    state_key="codex_prev_notify_work")
+            self.assertIsNone(daemon._codex_read_notify(config.read_text()))
+
+    def test_integration_installs_and_restores_every_codex_home(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            data = root / "data"
+            default_home = root / ".codex"
+            work_home = root / ".codex-work"
+            data.mkdir()
+            default_home.mkdir()
+            work_home.mkdir()
+            original_default = ["default-notify"]
+            original_work = ["work-notify"]
+            (default_home / "config.toml").write_text(
+                "notify = " + json.dumps(original_default) + "\n")
+            (work_home / "config.toml").write_text(
+                "notify = " + json.dumps(original_work) + "\n")
+            sources = [
+                {"id": "default", "path": default_home, "is_default": True,
+                 "session_only": False},
+                {"id": "work", "path": work_home, "is_default": False,
+                 "session_only": False},
+            ]
+            integration = data / "integration.json"
+            default_wrapper = data / "codex-notify.sh"
+            with mock.patch.multiple(
+                    daemon, DATA_DIR=data, INTEGRATION_FILE=integration,
+                    _CODEX_CONFIG=default_home / "config.toml",
+                    _CODEX_WRAPPER=default_wrapper), \
+                    mock.patch.object(daemon, "codex_sources", return_value=sources), \
+                    mock.patch.object(daemon, "_install_claude_hook", return_value=False), \
+                    mock.patch.object(daemon, "_remove_claude_hook"), \
+                    mock.patch.object(daemon, "_remove_legacy_codex_stop_hook"):
+                daemon.install_integration()
+                default_notify = daemon._codex_read_notify(
+                    (default_home / "config.toml").read_text())
+                work_notify = daemon._codex_read_notify(
+                    (work_home / "config.toml").read_text())
+                self.assertEqual(default_notify, [str(default_wrapper)])
+                self.assertEqual(len(work_notify), 1)
+                self.assertNotEqual(work_notify[0], str(default_wrapper))
+                self.assertTrue(Path(work_notify[0]).is_file())
+                state = json.loads(integration.read_text())
+                self.assertEqual(len(state["codex_notify_targets"]), 2)
+
+                daemon.remove_integration()
+                self.assertEqual(daemon._codex_read_notify(
+                    (default_home / "config.toml").read_text()), original_default)
+                self.assertEqual(daemon._codex_read_notify(
+                    (work_home / "config.toml").read_text()), original_work)
+                self.assertFalse(default_wrapper.exists())
+                self.assertFalse(Path(work_notify[0]).exists())
 
 
 class ClaudeHookTests(unittest.TestCase):
@@ -829,6 +1094,403 @@ class ResumeCommandTests(unittest.TestCase):
             })
         self.assertFalse(result["ok"])
         self.assertEqual(result["error"], "account not found")
+
+
+class CodexQuotaRealtimeTests(unittest.TestCase):
+    @staticmethod
+    def rollout_event(timestamp, percent):
+        return {"timestamp": timestamp, "type": "event_msg", "payload": {
+            "type": "token_count",
+            "rate_limits": {
+                "primary": {
+                    "used_percent": percent,
+                    "window_minutes": 10080,
+                    "resets_at": time.time() + 86400,
+                },
+                "secondary": None,
+                "credits": {"has_credits": False, "balance": "0"},
+            },
+        }}
+
+    def test_app_server_snapshot_maps_all_limit_ids(self):
+        result = {
+            "rateLimits": {
+                "limitId": "codex",
+                "primary": {
+                    "usedPercent": 50,
+                    "windowDurationMins": 10080,
+                    "resetsAt": time.time() + 86400,
+                },
+                "secondary": None,
+                "credits": {
+                    "hasCredits": False, "unlimited": False, "balance": "0",
+                },
+            },
+            "rateLimitsByLimitId": {
+                "codex": {
+                    "limitId": "codex",
+                    "primary": {
+                        "usedPercent": 50,
+                        "windowDurationMins": 10080,
+                        "resetsAt": time.time() + 86400,
+                    },
+                },
+                "codex_bengalfox": {
+                    "limitId": "codex_bengalfox",
+                    "limitName": "GPT-5.3-Codex-Spark",
+                    "primary": {
+                        "usedPercent": 0,
+                        "windowDurationMins": 10080,
+                        "resetsAt": time.time() + 86400,
+                    },
+                },
+            },
+        }
+
+        quota = daemon._codex_quota_from_app_server(result, "2026-07-23T15:00:00Z")
+
+        self.assertTrue(quota["ok"])
+        self.assertEqual([w["id"] for w in quota["windows"]],
+                         ["seven_day", "seven_day_codex-bengalfox"])
+        self.assertEqual(quota["windows"][1]["label"], "GPT-5.3-Codex-Spark")
+        self.assertEqual(quota["credits"]["balance"], "0")
+
+    def test_sparse_app_server_notification_never_overwrites_full_snapshot(self):
+        manager = daemon.CodexQuotaManager()
+        try:
+            with mock.patch.object(manager, "request_reconcile") as reconcile, \
+                    mock.patch.object(manager, "_apply") as apply:
+                self.assertTrue(manager._apply_notification({}, {
+                    "rateLimits": {
+                        "limitId": "codex",
+                        "primary": {"usedPercent": 52},
+                    },
+                }))
+            reconcile.assert_not_called()
+            apply.assert_not_called()
+        finally:
+            manager.stop()
+
+    def test_official_refresh_uses_timestamp_captured_inside_client_lock(self):
+        manager = daemon.CodexQuotaManager()
+        src = {
+            "id": "default", "label": "默认", "path": Path("/tmp/codex-home"),
+            "is_default": True, "session_only": False,
+        }
+        response = {
+            "rateLimits": {
+                "limitId": "codex",
+                "primary": {
+                    "usedPercent": 50,
+                    "windowDurationMins": 10080,
+                    "resetsAt": time.time() + 86400,
+                },
+            },
+        }
+        client = SimpleNamespace(
+            read_rate_limits_observed=lambda: (response, 1234.5))
+        try:
+            with mock.patch.object(manager, "_client_for", return_value=client), \
+                    mock.patch.object(manager, "_apply", return_value=True) as apply:
+                self.assertTrue(manager._refresh_source_official(src))
+            self.assertEqual(apply.call_args.args[2], 1234.5)
+        finally:
+            manager.stop()
+
+    def test_official_refresh_rejects_response_without_quota_windows(self):
+        manager = daemon.CodexQuotaManager()
+        src = {
+            "id": "default", "label": "默认", "path": Path("/tmp/codex-home"),
+            "is_default": True, "session_only": False,
+        }
+        client = SimpleNamespace(
+            read_rate_limits_observed=lambda: ({}, 1234.5))
+        try:
+            with mock.patch.object(manager, "_client_for", return_value=client), \
+                    mock.patch.object(manager, "_apply") as apply:
+                self.assertFalse(manager._refresh_source_official(src))
+            apply.assert_not_called()
+        finally:
+            manager.stop()
+
+    def test_retired_app_server_client_cannot_restart(self):
+        client = daemon._CodexAppServerClient(Path("/tmp/codex-home"))
+        client.retire()
+        with mock.patch.object(daemon.subprocess, "Popen") as popen:
+            with self.assertRaisesRegex(RuntimeError, "retired"):
+                client.read_rate_limits()
+        popen.assert_not_called()
+
+    def test_force_refresh_waits_for_active_reconcile_before_starting(self):
+        manager = daemon.CodexQuotaManager()
+        manager._last_force = 0
+        result = []
+        worker = threading.Thread(
+            target=lambda: result.append(manager.force_refresh()))
+        try:
+            with mock.patch.object(
+                    manager, "_refresh_all_locked", return_value=True) as refresh:
+                manager._refresh_gate.acquire()
+                worker.start()
+                time.sleep(0.03)
+                self.assertTrue(worker.is_alive())
+                manager._refresh_gate.release()
+                worker.join(timeout=1)
+                self.assertFalse(worker.is_alive())
+                self.assertEqual(result, [True])
+                refresh.assert_called_once_with()
+        finally:
+            if manager._refresh_gate.locked():
+                manager._refresh_gate.release()
+            worker.join(timeout=1)
+            manager.stop()
+
+    def test_concurrent_force_refreshes_share_one_batch_result(self):
+        manager = daemon.CodexQuotaManager()
+        entered = threading.Event()
+        release = threading.Event()
+        results = []
+
+        def refresh():
+            entered.set()
+            release.wait(timeout=1)
+            return True
+
+        workers = [
+            threading.Thread(target=lambda: results.append(
+                manager.force_refresh(timeout=1)))
+            for _ in range(2)
+        ]
+        try:
+            with mock.patch.object(
+                    manager, "_refresh_all_locked", side_effect=refresh) as batch:
+                workers[0].start()
+                self.assertTrue(entered.wait(timeout=1))
+                workers[1].start()
+                time.sleep(0.03)
+                release.set()
+                for worker in workers:
+                    worker.join(timeout=1)
+            self.assertEqual(sorted(results), [True, True])
+            batch.assert_called_once_with()
+        finally:
+            release.set()
+            for worker in workers:
+                worker.join(timeout=1)
+            manager.stop()
+
+    def test_force_refresh_has_a_total_wait_deadline(self):
+        manager = daemon.CodexQuotaManager()
+        try:
+            manager._refresh_gate.acquire()
+            started = time.monotonic()
+            self.assertFalse(manager.force_refresh(timeout=0.03))
+            self.assertLess(time.monotonic() - started, 0.2)
+        finally:
+            if manager._refresh_gate.locked():
+                manager._refresh_gate.release()
+            manager.stop()
+
+    def test_api_quota_reports_forced_codex_refresh_failure(self):
+        settings = {
+            "quota_interval": 600, "show_claude": False, "show_codex": True,
+        }
+        with mock.patch.object(daemon, "get_settings", return_value=settings), \
+                mock.patch.object(
+                    daemon._codex_quota_manager, "force_refresh",
+                    return_value=False):
+            with self.assertRaisesRegex(RuntimeError, "refresh failed"):
+                daemon.api_quota(force=True)
+
+    def test_force_quota_refreshes_enforces_end_to_end_budget(self):
+        release = threading.Event()
+
+        def blocked_refresh(_timeout):
+            release.wait(timeout=1)
+            return True
+
+        settings = {"show_claude": False, "show_codex": True}
+        started = time.monotonic()
+        try:
+            with mock.patch.object(
+                    daemon._codex_quota_manager, "force_refresh",
+                    side_effect=blocked_refresh):
+                with self.assertRaisesRegex(RuntimeError, "timed out"):
+                    daemon._force_quota_refreshes(
+                        settings, ttl=600, budget=0.03)
+            self.assertLess(time.monotonic() - started, 0.2)
+        finally:
+            release.set()
+
+    def test_force_quota_refreshes_reports_claude_semantic_failure(self):
+        settings = {"show_claude": True, "show_codex": False}
+        failed = [{"ok": False, "error": "upstream failed"}]
+        with mock.patch.object(
+                daemon, "_claude_quota_accounts", return_value=failed):
+            with self.assertRaisesRegex(RuntimeError, "Claude"):
+                daemon._force_quota_refreshes(settings, ttl=600)
+
+    def test_force_quota_refreshes_allows_expected_no_quota_account(self):
+        settings = {"show_claude": True, "show_codex": False}
+        unavailable = [{"ok": False, "no_quota": True, "kind": "gateway"}]
+        with mock.patch.object(
+                daemon, "_claude_quota_accounts", return_value=unavailable):
+            self.assertEqual(
+                daemon._force_quota_refreshes(settings, ttl=600), unavailable)
+
+    def test_stopping_manager_cannot_spawn_a_new_app_server(self):
+        manager = daemon.CodexQuotaManager()
+        manager._stop.set()
+        try:
+            with self.assertRaisesRegex(RuntimeError, "stopping"):
+                manager._client_for({
+                    "id": "default", "path": Path("/tmp/codex-home"),
+                    "is_default": True,
+                })
+            self.assertEqual(manager._clients, {})
+        finally:
+            manager.stop()
+
+    def test_reconcile_prunes_removed_account_processes_and_state(self):
+        manager = daemon.CodexQuotaManager()
+        removed = SimpleNamespace(retire=mock.Mock())
+        removed_key = os.path.realpath("/tmp/removed")
+        kept_key = os.path.realpath("/tmp/kept")
+        manager._clients = {removed_key: removed, kept_key: SimpleNamespace()}
+        manager._states = {
+            removed_key: {"quota": {"ok": True}},
+            kept_key: {"quota": {"ok": True}},
+        }
+        try:
+            with mock.patch.object(manager, "_path_key", return_value=kept_key):
+                manager._prune_inactive([{"path": Path("/tmp/kept")}])
+            self.assertNotIn(removed_key, manager._clients)
+            self.assertNotIn(removed_key, manager._states)
+            self.assertIn(removed_key, manager._inactive_paths)
+            removed.retire.assert_called_once_with()
+            removed_src = {
+                "id": "removed", "label": "Removed",
+                "path": Path("/tmp/removed"), "is_default": False,
+            }
+            self.assertFalse(manager._apply(
+                removed_src, {"ok": True, "windows": []}, time.time()))
+            with self.assertRaisesRegex(RuntimeError, "inactive"):
+                manager._client_for(removed_src)
+        finally:
+            manager._clients.clear()
+            manager.stop()
+
+    def test_rollout_fallback_uses_latest_event_not_latest_filename(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            recent_dir = base / "sessions" / "2026" / "07" / "22"
+            resumed_dir = base / "sessions" / "2026" / "06" / "29"
+            recent_dir.mkdir(parents=True)
+            resumed_dir.mkdir(parents=True)
+            recent = recent_dir / "rollout-2026-07-22T00-00-00-new.jsonl"
+            resumed = resumed_dir / "rollout-2026-06-29T00-00-00-old.jsonl"
+            _jsonl(recent, [self.rollout_event("2026-07-22T12:00:00Z", 23)])
+            _jsonl(resumed, [self.rollout_event("2026-07-23T15:00:00Z", 50)])
+            os.utime(recent, (100, 100))
+            os.utime(resumed, (200, 200))
+
+            quota = daemon._codex_quota(base)
+
+        self.assertEqual(quota["windows"][0]["used_percent"], 50)
+        self.assertEqual(quota["sampled_at"], "2026-07-23T15:00:00Z")
+
+    def test_codex_quota_refresh_runs_when_completion_pills_are_disabled(self):
+        settings = dict(daemon.DEFAULT_SETTINGS, notify_session_done=False)
+        body = {
+            "type": "agent-turn-complete",
+            "thread-id": "019f0f1d-8408-7600-bc4f-0c53dd24d3d3",
+            "cwd": "/tmp/project",
+        }
+        with mock.patch.object(daemon, "get_settings", return_value=settings), \
+                mock.patch.object(daemon._codex_quota_manager,
+                                  "note_turn_complete") as refresh:
+            result = daemon.api_event(body)
+
+        self.assertEqual(result["skipped"], "disabled")
+        refresh.assert_called_once_with(body["thread-id"], body["cwd"])
+
+    def test_older_rollout_event_cannot_replace_newer_official_snapshot(self):
+        manager = daemon.CodexQuotaManager()
+        src = {
+            "id": "default", "label": "默认", "path": Path("/tmp/codex-home"),
+            "is_default": True, "session_only": False,
+        }
+        official = {"ok": True, "windows": [{
+            "id": "seven_day", "label": "周限额",
+            "used_percent": 50, "resets_at": time.time() + 86400,
+        }], "sampled_at": "2026-07-23T15:00:00Z"}
+        older = {"ok": True, "windows": [{
+            "id": "seven_day", "label": "周限额",
+            "used_percent": 23, "resets_at": time.time() + 86400,
+        }], "sampled_at": "2026-07-22T15:00:00Z"}
+        try:
+            with mock.patch.object(daemon, "_remember_last_good"), \
+                    mock.patch.object(daemon, "_bump_quota_revision"), \
+                    mock.patch.object(daemon, "_check_alerts"):
+                self.assertTrue(manager._apply(src, official, 200, official=True))
+                self.assertFalse(manager._apply(src, older, 100, official=False))
+            self.assertEqual(manager.quota_for_source(src)["windows"][0]["used_percent"], 50)
+        finally:
+            manager.stop()
+
+    def test_rollout_update_preserves_named_official_limits(self):
+        manager = daemon.CodexQuotaManager()
+        src = {
+            "id": "default", "label": "默认", "path": Path("/tmp/codex-home-2"),
+            "is_default": True, "session_only": False,
+        }
+        official = {"ok": True, "windows": [
+            {"id": "seven_day", "label": "周限额",
+             "used_percent": 40, "resets_at": time.time() + 86400},
+            {"id": "seven_day_codex-bengalfox", "label": "Spark",
+             "used_percent": 5, "resets_at": time.time() + 86400},
+        ], "sampled_at": "2026-07-23T15:00:00Z"}
+        local = {"ok": True, "windows": [
+            {"id": "seven_day", "label": "周限额",
+             "used_percent": 41, "resets_at": time.time() + 86400},
+        ], "sampled_at": "2026-07-23T15:01:00Z"}
+        try:
+            with mock.patch.object(daemon, "_remember_last_good"), \
+                    mock.patch.object(daemon, "_bump_quota_revision"), \
+                    mock.patch.object(daemon, "_check_alerts"):
+                manager._apply(src, official, 100, official=True)
+                manager._apply(src, local, 101, official=False)
+            windows = manager.quota_for_source(src)["windows"]
+            self.assertEqual([w["id"] for w in windows],
+                             ["seven_day", "seven_day_codex-bengalfox"])
+            self.assertEqual(windows[0]["used_percent"], 41)
+        finally:
+            manager.stop()
+
+    def test_quota_change_long_poll_wakes_on_revision(self):
+        old_revision = daemon._quota_revision
+        try:
+            with daemon._quota_change:
+                daemon._quota_revision = 100
+
+            def bump():
+                time.sleep(0.03)
+                daemon._bump_quota_revision()
+
+            thread = daemon.threading.Thread(target=bump)
+            thread.start()
+            with mock.patch.object(daemon, "api_quota",
+                                   return_value={"codex": {"ok": True}}):
+                result = daemon.api_quota_changes({
+                    "after": ["100"], "boot": [daemon._quota_boot_id],
+                    "timeout": ["1"],
+                })
+            thread.join()
+            self.assertEqual(result["revision"], 101)
+            self.assertTrue(result["quota"]["codex"]["ok"])
+        finally:
+            with daemon._quota_change:
+                daemon._quota_revision = old_revision
 
 
 class QuotaSamplingTests(unittest.TestCase):

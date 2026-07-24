@@ -42,7 +42,7 @@ AgentDeck integrates quota monitoring, session management, and usage analytics f
 - Live aggregation of Claude's official quota (5-hour / 7-day windows) and Codex rate limits
 - Multi-account in parallel: auto-discovers multiple Claude config directories (`CLAUDE_CONFIG_DIR` / `~/.claude-*` / shell startup files), queries quota per account, with a panel carousel and an optional menu-bar rotation across accounts
 - Always-on usage percentage in the menu bar (configurable: one side, both, or hidden; the number and the alert color each pick from the 5h / weekly / tightest window)
-- Adjustable quota-query interval (default 10 minutes, up to 6 hours) to throttle official-endpoint calls and ease multi-account rate limiting
+- Adjustable Claude quota interval (10 minutes by default, up to 6 hours); Codex updates on completed turns and periodically reconciles through the CLI's app-server
 - Window-reset progress bars; system notifications for nearing or refilled quota (configurable thresholds)
 
 **Session management**
@@ -135,7 +135,8 @@ All data is **processed locally** — no telemetry, no reporting:
 | Claude quota | Claude Code OAuth credential in Keychain → `api.anthropic.com/api/oauth/usage` | Your own credentials querying your own quota; with multiple accounts, the matching credential is resolved per config directory |
 | Update check | `agentdeck.yilin.dev/version.json` (static manifest, 6-hour cache) | Version comparison only; carries no credentials or machine info; can be disabled in Settings |
 | Claude usage / sessions | parses `projects/**/*.jsonl` under each discovered Claude config directory | token stats, cost estimates, session list |
-| Codex quota / usage / sessions | parses local `~/.codex/sessions` rollout files | same as above |
+| Codex quota | Codex CLI app-server `account/rateLimits/read`, augmented by the matching rollout snapshot when a turn completes | never reads or forwards the login token; falls back to bounded local parsing when app-server is unavailable |
+| Codex usage / sessions | parses local `~/.codex/sessions` rollout files | token stats and session metadata |
 | Done events | AgentDeck-installed Claude Stop hook / Codex notify wrapper callbacks (see Session-Done Alert Integration) | done alerts and the event stream |
 
 Runtime artifacts: data directory `~/Library/Application Support/AgentDeck/`, log `~/Library/Logs/AgentDeck.log`.

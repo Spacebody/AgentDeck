@@ -14,6 +14,17 @@ enum Fmt {
         return L("cd.inM", ["m": "\(m)"])
     }
 
+    /// 半宽额度卡圆环下方使用的极简倒计时；上下文已明确是重置时间。
+    static func countdownToken(_ date: Date?, now: Date = Date()) -> String {
+        guard let date else { return "" }
+        let seconds = date.timeIntervalSince(now)
+        if seconds <= 0 { return L("cd.reset") }
+        let hours = Int(seconds / 3600)
+        if hours > 48 { return "\(hours / 24)d" }
+        if hours > 0 { return "\(hours)h" }
+        return "\(max(0, Int(seconds / 60)))m"
+    }
+
     /// 秒 → 时长（对应 fmtDur）。活跃会话运行时长 / 预测耗尽复用。
     static func duration(_ secs: Double) -> String {
         let s = max(0, Int(secs.rounded()))
@@ -81,6 +92,8 @@ extension QuotaWindow {
         case "seven_day", "seven_day_sonnet", "seven_day_opus", "seven_day_oauth_apps":
             return 7 * 86400
         default:
+            if id.hasPrefix("five_hour_") { return 5 * 3600 }
+            if id.hasPrefix("seven_day_") { return 7 * 86400 }
             if id.hasPrefix("win_"), let mins = Int(id.dropFirst(4)) { return Double(mins) * 60 }
             return nil
         }

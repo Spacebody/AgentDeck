@@ -7,6 +7,58 @@ private func pctText(_ v: Double) -> String {
     v == v.rounded() ? String(Int(v)) : String(format: "%.1f", v)
 }
 
+private struct QuotaStatusInfo {
+    let text: String
+    let stale: Bool
+}
+
+/// 额度状态脚注的共享语义；每张额度卡在自己的右上角展示。
+private func quotaStatusInfo(brand: Brand, node: QuotaNode) -> QuotaStatusInfo? {
+    if node.stale == true {
+        return QuotaStatusInfo(text: L("quota.stale"), stale: true)
+    }
+    if brand == .claude {
+        let burn = Fmt.burnHint(node.displayWindows.first { $0.id == "five_hour" })
+        if !burn.isEmpty { return QuotaStatusInfo(text: burn, stale: false) }
+        if let ex = node.raw?.extraUsage, ex.isEnabled == true {
+            func cents(_ c: Double?) -> String {
+                let d = (c ?? 0) / 100
+                return d == d.rounded() ? "\(Int(d))" : String(format: "%.2f", d)
+            }
+            let text = L("quota.extra", [
+                "used": cents(ex.usedCredits),
+                "limit": cents(ex.monthlyLimit),
+            ]).strippingBold
+            return QuotaStatusInfo(text: text, stale: false)
+        }
+        return nil
+    }
+
+    if let s = node.sampledAt, let d = Fmt.parseISO(s) {
+        let age = Date().timeIntervalSince(d)
+        if age > 2 * 3600 {
+            return QuotaStatusInfo(
+                text: L("quota.dataStale", ["h": "\(Int((age / 3600).rounded()))"]),
+                stale: true)
+        }
+    }
+    if let cr = node.credits, cr.hasCredits == true {
+        let balance: String
+        if cr.unlimited == true {
+            balance = "∞"
+        } else {
+            let value = cr.balance ?? 0
+            let formatted = value == value.rounded()
+                ? "\(Int(value))" : String(format: "%.2f", value)
+            balance = "$\(formatted)"
+        }
+        return QuotaStatusInfo(
+            text: L("quota.credits", ["bal": balance]).strippingBold,
+            stale: false)
+    }
+    return nil
+}
+
 /// 额度卡的展示环境。主面板双栏与桌面小组件必须使用独立排版指标，避免窄卡误套小组件字号。
 enum QuotaCardPresentation {
     case panelWide
@@ -178,7 +230,8 @@ struct WindowRow: View {
                         .animation(.easeOut(duration: 1), value: window.usedPercent)
                 }
             }
-            .frame(height: dense ? 2.5 : (presentation.isWidget ? 3 : 4))
+            .frame(height: dense ? 2.5 : (presentation.isWidget ? 3
+                           : (presentation.isDualPanel ? 4 : 5)))
         }
     }
 }
@@ -187,6 +240,58 @@ struct WindowRow: View {
 private struct IndexedQuotaWindow: Identifiable {
     let id: Int
     let window: QuotaWindow
+}
+
+/// 宽面板额度主体的稳定比例布局。右栏整体中心与左栏指定的视觉锚点对齐。
+private struct QuotaColumnsLayout: Layout {
+    let leadingFraction: CGFloat
+    let spacing: CGFloat
+    let leadingCenterY: CGFloat
+
+    private func widths(totalWidth: CGFloat) -> (leading: CGFloat, trailing: CGFloat) {
+        let available = max(0, totalWidth - spacing)
+        let leading = available * leadingFraction
+        return (leading, available - leading)
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews,
+                     cache: inout ()) -> CGSize {
+        guard subviews.count >= 2 else {
+            return subviews.first?.sizeThatFits(proposal) ?? .zero
+        }
+        let fallback = subviews.prefix(2).reduce(CGFloat.zero) {
+            $0 + $1.sizeThatFits(.unspecified).width
+        } + spacing
+        let width = proposal.width ?? fallback
+        let columns = widths(totalWidth: width)
+        let leading = subviews[0].sizeThatFits(
+            ProposedViewSize(width: columns.leading, height: proposal.height))
+        let trailing = subviews[1].sizeThatFits(
+            ProposedViewSize(width: columns.trailing, height: proposal.height))
+        let commonCenterY = max(leadingCenterY, trailing.height / 2)
+        let leadingBottom = commonCenterY - leadingCenterY + leading.height
+        let trailingBottom = commonCenterY + trailing.height / 2
+        return CGSize(width: width, height: max(leadingBottom, trailingBottom))
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize,
+                       subviews: Subviews, cache: inout ()) {
+        guard subviews.count >= 2 else { return }
+        let columns = widths(totalWidth: bounds.width)
+        let leadingProposal = ProposedViewSize(width: columns.leading, height: nil)
+        let trailingProposal = ProposedViewSize(width: columns.trailing, height: nil)
+        let trailingSize = subviews[1].sizeThatFits(trailingProposal)
+        let commonCenterY = max(leadingCenterY, trailingSize.height / 2)
+
+        subviews[0].place(
+            at: CGPoint(x: bounds.minX,
+                        y: bounds.minY + commonCenterY - leadingCenterY),
+            anchor: .topLeading, proposal: leadingProposal)
+        subviews[1].place(
+            at: CGPoint(x: bounds.minX + columns.leading + spacing,
+                        y: bounds.minY + commonCenterY - trailingSize.height / 2),
+            anchor: .topLeading, proposal: trailingProposal)
+    }
 }
 
 // MARK: - 多账号 carousel（对应 renderQuotaTool）：单账号→单卡；多账号→横向翻页 + 圆点。
@@ -287,6 +392,7 @@ struct QuotaCardView: View {
     private var compact: Bool { presentation.isWidget }
     private var narrow: Bool { presentation.isDualPanel }
     private var radius: CGFloat { compact ? 16 : Theme.rLg }
+    private var dualBodyMinHeight: CGFloat { 104 }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -323,15 +429,6 @@ struct QuotaCardView: View {
                     .font(.system(size: compact ? 9 : 10.5)).foregroundStyle(Theme.ink3)
                     .padding(.vertical, compact ? 5 : 7)
             }
-            if !compact, let foot = footer(node) {   // .qfoot：限流警示 / 烧录速率 / 额外用量 / Credits / 新鲜度
-                if presentation.isDualPanel { Spacer(minLength: 0) }
-                Divider().overlay(Color.white.opacity(0.07)).padding(.top, 9)
-                Text(foot.text).font(.system(size: 9.5))
-                    .foregroundStyle(foot.stale ? Color(hex: 0xffb38a) : Theme.ink3)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.top, 8)
-            }
         } else {
             // 错误/无额度态
             head
@@ -350,7 +447,8 @@ struct QuotaCardView: View {
         let labelSize: CGFloat = compact ? 10 : (narrow ? 10.5 : 11.5)
         let valueSize: CGFloat = compact ? 11.5 : (narrow ? 13 : 14)
         let detailSize: CGFloat = compact ? 8.5 : (narrow ? 9.5 : 10)
-        return VStack(alignment: .leading, spacing: compact ? 5 : 7) {
+        return VStack(alignment: .leading,
+                      spacing: compact ? 5 : (narrow ? 0 : 7)) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(window.displayLabel)
                     .font(.system(size: labelSize, weight: .semibold))
@@ -361,6 +459,7 @@ struct QuotaCardView: View {
                     .font(.rounded(valueSize, weight: .semibold))
                     .foregroundStyle(Theme.ink).fixedSize()
             }
+            if narrow { Spacer(minLength: 8) }
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
                     Capsule().fill(Color.white.opacity(0.09))
@@ -370,6 +469,7 @@ struct QuotaCardView: View {
                 }
             }
             .frame(height: compact ? 4 : (narrow ? 4 : 5))
+            if narrow { Spacer(minLength: 8) }
             HStack(spacing: 8) {
                 Text(L("quota.remainingPercent", ["pct": remaining]))
                 Spacer(minLength: 6)
@@ -378,8 +478,9 @@ struct QuotaCardView: View {
             .font(.system(size: detailSize, weight: .medium))
             .foregroundStyle(Theme.ink2).lineLimit(1)
         }
-        .padding(.top, compact ? 7 : 9)
-        .frame(minHeight: narrow ? 80 : nil, alignment: .center)
+        .padding(.top, compact ? 7 : (narrow ? 8 : 9))
+        .padding(.bottom, narrow ? 2 : 0)
+        .frame(height: narrow ? dualBodyMinHeight : nil, alignment: .center)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(L("quota.windowSummary", [
             "window": window.displayLabel, "used": used,
@@ -388,13 +489,59 @@ struct QuotaCardView: View {
     }
 
     /// 两个及以上窗口固定为“左环右条”：2 个窗口右侧 1 条，3 个窗口右侧 2 条，以此类推。
+    @ViewBuilder
     private func multiWindowBody(main: QuotaWindow, rest: [IndexedQuotaWindow]) -> some View {
-        let dense = compact && rest.count >= 3
-        let ringSize: CGFloat = dense ? 44 : (compact ? 48 : (narrow ? 54 : 64))
-        let ringWidth: CGFloat = dense ? 54 : (compact ? 58 : (narrow ? 66 : 76))
-        return HStack(alignment: .top, spacing: compact ? 6 : (narrow ? 8 : 11)) {
+        switch presentation {
+        case .panelWide:
+            centeredMultiWindowBody(
+                main: main, rest: rest,
+                ringSize: rest.count == 1 ? 98 : 88,
+                leadingFraction: 1 / 3, spacing: 14)
+        case .panelDual:
+            centeredMultiWindowBody(
+                main: main, rest: rest,
+                ringSize: rest.count == 1 ? 70 : 58,
+                leadingFraction: 0.42, spacing: 8)
+        case .widget:
+            widgetMultiWindowBody(main: main, rest: rest)
+        }
+    }
+
+    /// 面板卡统一以圆心为视觉锚点：右侧单行或多行组的整体中心始终对齐圆心。
+    private func centeredMultiWindowBody(main: QuotaWindow,
+                                         rest: [IndexedQuotaWindow],
+                                         ringSize: CGFloat,
+                                         leadingFraction: CGFloat,
+                                         spacing: CGFloat) -> some View {
+        QuotaColumnsLayout(leadingFraction: leadingFraction, spacing: spacing,
+                           leadingCenterY: ringSize / 2) {
+            VStack(spacing: 4) {
+                RingView(percent: main.usedPercent, brand: brand,
+                         size: ringSize, lineWidth: 6)
+                primaryRingCaption(main, singleLine: rest.count == 1)
+                    .frame(maxWidth: .infinity)
+            }
+            .frame(maxWidth: .infinity)
+
+            VStack(alignment: .leading, spacing: 9) {
+                ForEach(rest) {
+                    WindowRow(window: $0.window, brand: brand,
+                              presentation: presentation)
+                }
+            }
+        }
+        .padding(.top, 9)
+        .frame(minHeight: narrow ? dualBodyMinHeight : nil, alignment: .center)
+    }
+
+    private func widgetMultiWindowBody(main: QuotaWindow,
+                                       rest: [IndexedQuotaWindow]) -> some View {
+        let dense = rest.count >= 3
+        let ringSize: CGFloat = dense ? 44 : 48
+        let ringWidth: CGFloat = dense ? 54 : 58
+        return HStack(alignment: .top, spacing: 6) {
             primaryRing(main, size: ringSize, columnWidth: ringWidth)
-            VStack(alignment: .leading, spacing: dense ? 3 : (compact ? 6 : (narrow ? 7 : 9))) {
+            VStack(alignment: .leading, spacing: dense ? 3 : 6) {
                 ForEach(rest) {
                     WindowRow(window: $0.window, brand: brand,
                               presentation: presentation, dense: dense)
@@ -402,8 +549,52 @@ struct QuotaCardView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(.top, dense ? 5 : (compact ? 7 : 9))
-        .frame(minHeight: narrow ? 80 : nil, alignment: .top)
+        .padding(.top, dense ? 5 : 7)
+    }
+
+    @ViewBuilder
+    private func primaryRingCaption(_ window: QuotaWindow,
+                                    singleLine: Bool) -> some View {
+        let countdown = Fmt.countdown(window.resetsAt?.date, compact: true)
+        if singleLine {
+            // 半宽双栏优先保住完整单行，圆环本身已表达“已用”，这里省略重复词。
+            let primary = narrow
+                ? window.displayLabel
+                : L("quota.primaryUsed", ["window": window.displayLabel])
+            let visibleCountdown = narrow
+                ? Fmt.countdownToken(window.resetsAt?.date)
+                : countdown
+            let parts = [primary, visibleCountdown]
+                .filter { !$0.isEmpty }
+            Text(parts.joined(separator: " · "))
+                .font(.system(size: narrow ? 8.5 : 9.5, weight: .medium))
+                .foregroundStyle(Theme.ink2)
+                .lineLimit(1)
+                .minimumScaleFactor(narrow ? 0.78 : 0.75)
+                .accessibilityLabel(primaryRingAccessibility(window, countdown: countdown))
+        } else {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(L("quota.primaryUsed", ["window": window.displayLabel]))
+                    .foregroundStyle(Theme.ink2)
+                if !countdown.isEmpty {
+                    Text(countdown).foregroundStyle(Theme.ink3)
+                }
+            }
+            .font(.system(size: narrow ? 8.5 : 9.5, weight: .medium))
+            .lineLimit(1)
+            .minimumScaleFactor(narrow ? 0.68 : 0.75)
+            .accessibilityLabel(primaryRingAccessibility(window, countdown: countdown))
+        }
+    }
+
+    private func primaryRingAccessibility(_ window: QuotaWindow,
+                                          countdown: String) -> String {
+        L("quota.windowSummary", [
+            "window": window.displayLabel,
+            "used": pctText(window.usedPercent),
+            "remaining": pctText(max(0, 100 - min(window.usedPercent, 100))),
+            "reset": countdown,
+        ])
     }
 
     private func primaryRing(_ window: QuotaWindow, size: CGFloat,
@@ -412,11 +603,11 @@ struct QuotaCardView: View {
             RingView(percent: window.usedPercent, brand: brand,
                      size: size, lineWidth: compact ? 5 : 6)
             Text(L("quota.primaryUsed", ["window": window.displayLabel]))
-                .font(.system(size: compact ? 7.5 : 8.5, weight: .medium))
+                .font(.system(size: compact ? 7.5 : (narrow ? 8.5 : 9.5), weight: .medium))
                 .foregroundStyle(Theme.ink2).lineLimit(1).minimumScaleFactor(0.68)
             let countdown = Fmt.countdown(window.resetsAt?.date, compact: true)
             if !countdown.isEmpty {
-                Text(countdown).font(.system(size: compact ? 7.5 : 8.5))
+                Text(countdown).font(.system(size: compact ? 7.5 : (narrow ? 8.5 : 9.5)))
                     .foregroundStyle(Theme.ink3).lineLimit(1).minimumScaleFactor(0.68)
             }
         }
@@ -433,44 +624,6 @@ struct QuotaCardView: View {
         }
     }
 
-    /// 卡片脚注（对应 quotaCardInner 的 .qfoot）：限流警示优先；
-    /// Claude → 烧录速率 / 额外用量；Codex → 数据新鲜度 / Credits 余额 / 采样时间。
-    private func footer(_ node: QuotaNode) -> (text: String, stale: Bool)? {
-        if node.stale == true { return (L("quota.stale"), true) }
-        if brand == .claude {
-            let burn = Fmt.burnHint(node.displayWindows.first { $0.id == "five_hour" })
-            if !burn.isEmpty { return (burn, false) }
-            if let ex = node.raw?.extraUsage, ex.isEnabled == true {
-                func cents(_ c: Double?) -> String {
-                    let d = (c ?? 0) / 100
-                    return d == d.rounded() ? "\(Int(d))" : String(format: "%.2f", d)
-                }
-                return (L("quota.extra", ["used": cents(ex.usedCredits), "limit": cents(ex.monthlyLimit)]).strippingBold, false)
-            }
-            return nil
-        } else {
-            // 新鲜度警示优先：数据不可信时其他信息没意义
-            if let s = node.sampledAt, let d = Fmt.parseISO(s) {
-                let age = Date().timeIntervalSince(d)
-                if age > 2 * 3600 {
-                    return (L("quota.dataStale", ["h": "\(Int((age / 3600).rounded()))"]), true)
-                }
-            }
-            if let cr = node.credits, cr.hasCredits == true {
-                let bal = cr.unlimited == true ? "∞" : "$\(creditFmt(cr.balance))"
-                return (L("quota.credits", ["bal": bal]).strippingBold, false)
-            }
-            if let s = node.sampledAt, let d = Fmt.parseISO(s) {
-                return (L("quota.sampledAt", ["time": Fmt.relative(d)]), false)
-            }
-            return nil
-        }
-    }
-    private func creditFmt(_ b: Double?) -> String {
-        let v = b ?? 0
-        return v == v.rounded() ? "\(Int(v))" : String(format: "%.2f", v)
-    }
-
     // .qhead：只承载品牌与账号；窗口语义放回对应的数据图形旁边。
     private var head: some View {
         HStack(alignment: .center, spacing: 6) {
@@ -485,6 +638,32 @@ struct QuotaCardView: View {
                     .background(Capsule().fill(Color.white.opacity(0.09)))
             }
             Spacer(minLength: 0)
+            if let headerStatus {
+                Text(headerStatus.text)
+                    .font(.system(size: 9.5, weight: .medium))
+                    .foregroundStyle(headerStatus.stale
+                        ? Color(hex: 0xffb38a) : Theme.ink3)
+                    .multilineTextAlignment(.trailing)
+                    .lineLimit(narrow ? 2 : 1)
+                    .minimumScaleFactor(narrow ? 0.72 : 0.78)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: narrow ? 105 : 220, alignment: .trailing)
+            }
         }
+    }
+
+    private var headerStatus: QuotaStatusInfo? {
+        if let node, let status = quotaStatusInfo(brand: brand, node: node) {
+            return status
+        }
+        guard brand == .codex, let sampledAtText else { return nil }
+        return QuotaStatusInfo(text: sampledAtText, stale: false)
+    }
+
+    private var sampledAtText: String? {
+        guard let sampledAt = node?.sampledAt, let date = Fmt.parseISO(sampledAt) else {
+            return nil
+        }
+        return L("quota.sampledAt", ["time": Fmt.relative(date)])
     }
 }

@@ -3,21 +3,25 @@
 
 API:
   GET  /api/health    存活探测
-  GET  /api/quota     Claude 官方额度(OAuth) + Codex rate_limits(本地解析)
+  GET  /api/quota     Claude 官方额度(OAuth) + Codex app-server/rollout 实时额度
   GET  /api/sessions  双端最近会话合并列表
   GET  /api/usage     近 7/30 天 token 用量 + 成本估算
   POST /api/resume    在终端中恢复指定会话
 """
 
+import ast
 import base64
 import binascii
+import copy
 import concurrent.futures
 import hashlib
 import json
 import os
 import plistlib
 import re
+import select
 import shlex
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -60,7 +64,13 @@ HISTORY_KEEP = 7 * 86400       # 历史保留 7 天
 # Claude 官方 usage 端点限流偏严：缓存 5 分钟（额度窗口是 5h/7d，无需更勤）。
 # 多账号时每账号各拉一次，本 TTL 直接决定每个账号的真实外部调用频率。
 CLAUDE_QUOTA_TTL = 300
-CODEX_QUOTA_TTL = 30           # Codex 是本地 jsonl 解析，无外部限流，可勤
+CODEX_QUOTA_TTL = 5            # 仅供 app-server 不可用时的本地 rollout 降级读取
+CODEX_RECONCILE_SECS = 90      # Codex 官方快照后台自愈周期
+CODEX_OPEN_STALE_SECS = 30     # 开面板时超过该时长便异步校准
+CODEX_STALE_SECS = 180         # 所有实时来源都失联后才标记陈旧
+QUOTA_FORCE_BUDGET_SECS = 110  # 留 10s 给原生客户端解码/调度（客户端总超时 120s）
+CODEX_ROLLOUT_FAST_TAIL_BYTES = 512 * 1024
+CODEX_ROLLOUT_TAIL_BYTES = 4 * 1024 * 1024
 
 # 更新检测：向自托管的 Cloudflare Pages 清单查最新版本号（不带任何凭据；可在设置中关闭）。
 # 部署后把域名改成你的 Pages 项目地址即可。
@@ -148,7 +158,7 @@ DEFAULT_SETTINGS = {
     "sessions_limit": 15,      # 每端会话列表数量
     "refresh_interval": 30,    # 前端自动刷新（秒）
     "sample_interval": 180,    # 历史曲线采样间隔（秒）——只影响记录密度，不决定查询频率
-    "quota_interval": 600,     # 额度查询间隔（秒）——Claude 直接决定外部 API 频率（调大可避限流），Codex 为本地读取节流
+    "quota_interval": 600,     # Claude 额度查询间隔（秒）；Codex 使用事件驱动 + 独立校准
     "terminal": "auto",        # auto | iterm | terminal | copy
     "auto_paste_resume": False,    # 唤起 Warp/VS Code 等无 CLI 注入终端后，自动模拟 ⌘V + 回车（需辅助功能授权）
     "font_scale": 100,         # 面板/小组件字体缩放 %（整体 zoom）
@@ -169,7 +179,7 @@ SETTING_RANGES = {
     "sessions_limit": (5, 100),
     "refresh_interval": (5, 600),
     "sample_interval": (60, 3600),
-    "quota_interval": (300, 21600),   # 5 分钟 ~ 6 小时
+    "quota_interval": (300, 21600),   # Claude：5 分钟 ~ 6 小时
     "menubar_rotate_secs": (0, 60),
 }
 _settings_lock = threading.Lock()
@@ -276,19 +286,45 @@ def api_settings_save(body):
             # 否则缩短到期会在限流中提前重试又被打。
             now = time.time()
             for key, (_exp, val) in list(_ttl_cache.items()):
-                if (key.startswith(("claude_quota", "codex_quota"))
+                if (key.startswith("claude_quota")
                         and isinstance(val, dict) and val.get("ok") and not val.get("stale")):
                     _ttl_cache[key] = (now + clean["quota_interval"], val)
     if "keep_awake" in clean:   # 立即生效，不阻塞响应
         threading.Thread(target=_update_keepawake, daemon=True).start()
     if "claude_dirs" in clean or "codex_dirs" in clean:
         _request_session_index_scan()
+    if "codex_dirs" in clean:
+        # 新增/移除 CODEX_HOME 后立即同步各自 notify；文件 I/O 放后台，不拖慢设置响应。
+        threading.Thread(target=install_integration, daemon=True,
+                         name="agentdeck-integration-sync").start()
+    quota_keys = {
+        "show_claude", "show_codex", "claude_dirs", "codex_dirs",
+        "quota_interval", "menubar_claude", "menubar_codex",
+        "menubar_alert_color", "menubar_value_dim", "menubar_color_dim",
+        "menubar_rotate_secs",
+    }
+    if quota_keys.intersection(clean):
+        _bump_quota_revision()
+    if "show_codex" in clean or "codex_dirs" in clean:
+        _codex_quota_manager.request_reconcile()
     return {"ok": True, "settings": _settings_response()}
 
 
 _cache_lock = threading.Lock()
 _ttl_cache = {}        # key -> (expire_ts, value)，接口级 TTL 缓存
 _compute_locks = {}    # key -> Lock，防缓存击穿：同 key 到期时只放一个线程算 fn
+
+_quota_change = threading.Condition()
+_quota_revision = 0
+_quota_boot_id = uuid.uuid4().hex
+
+
+def _bump_quota_revision():
+    global _quota_revision
+    with _quota_change:
+        _quota_revision += 1
+        _quota_change.notify_all()
+        return _quota_revision
 
 
 def cached(key, ttl, fn):
@@ -965,66 +1001,670 @@ def _tail_lines(path, size=262144):
     return data.decode("utf-8", "replace").splitlines()
 
 
-def _codex_quota(base=None):
-    primary = secondary = credits = stamp = None
-    for path in _iter_codex_files(30, base=base):
-        for line in reversed(_tail_lines(path)):
-            if '"rate_limits"' not in line:
-                continue
-            try:
-                evt = json.loads(line)
-            except ValueError:
-                continue
-            rl = (evt.get("payload") or {}).get("rate_limits") or {}
-            if credits is None and isinstance(rl.get("credits"), dict):
-                credits = rl["credits"]
-            if rl.get("primary"):
-                primary = rl["primary"]
-                secondary = rl.get("secondary")
-                stamp = evt.get("timestamp")
-                break
-        if primary:
-            break
+def _iso_at(timestamp=None):
+    dt = datetime.fromtimestamp(timestamp, timezone.utc) if timestamp is not None \
+        else datetime.now(timezone.utc)
+    return dt.isoformat().replace("+00:00", "Z")
 
-    windows = []
-    now = time.time()
-    for node, fb_label, fb_id in ((primary, "主窗口", "primary"),
-                                  (secondary, "次窗口", "secondary")):
-        if not node:
-            continue
-        mins = node.get("window_minutes") or 0
-        # 稳定 id 供前端/通知本地化；label 作为回退
-        wid = ("five_hour" if mins == 300 else
-               "seven_day" if mins >= 10000 else
-               f"win_{mins}" if mins else fb_id)
+
+def _timestamp_epoch(value, fallback=0.0):
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            pass
+    return float(fallback or 0)
+
+
+def _codex_window_id(minutes, limit_id="codex"):
+    base = ("five_hour" if minutes == 300 else
+            "seven_day" if minutes >= 10000 else
+            f"win_{minutes}" if minutes else "primary")
+    return base if limit_id == "codex" else f"{base}_{_slug(limit_id)}"
+
+
+def _codex_window(node, limit_id="codex", limit_name="", secondary=False,
+                  camel_case=False):
+    if not isinstance(node, dict):
+        return None
+    mins_key = "windowDurationMins" if camel_case else "window_minutes"
+    pct_key = "usedPercent" if camel_case else "used_percent"
+    reset_key = "resetsAt" if camel_case else "resets_at"
+    try:
+        mins = int(node.get(mins_key) or 0)
+        pct = max(0.0, min(100.0, float(node.get(pct_key) or 0)))
+    except (TypeError, ValueError):
+        return None
+    resets = node.get(reset_key)
+    try:
+        resets = float(resets) if resets is not None else None
+    except (TypeError, ValueError):
+        resets = None
+    if resets and resets < time.time():
+        pct = 0.0
+    if limit_id == "codex":
         label = ("5 小时窗口" if mins == 300 else
                  "周限额" if mins >= 10000 else
-                 f"{mins} 分钟窗口" if mins else fb_label)
-        resets = node.get("resets_at")
-        pct = float(node.get("used_percent") or 0)
-        if resets and resets < now:   # 窗口已重置，历史百分比作废
-            pct = 0.0
-        windows.append({
-            "id": wid,
-            "label": label,
-            "used_percent": round(pct, 1),
-            "resets_at": resets,
-        })
+                 f"{mins} 分钟窗口" if mins else
+                 "次窗口" if secondary else "主窗口")
+    else:
+        label = str(limit_name or limit_id)[:100]
+        if secondary and mins:
+            label = f"{label} · {mins}m"
+    return {
+        "id": _codex_window_id(mins, limit_id),
+        "label": label,
+        "used_percent": round(pct, 1),
+        "resets_at": resets,
+    }
+
+
+def _sanitize_codex_credits(value):
+    if not isinstance(value, dict):
+        return None
+    return {k: value.get(k) for k in ("hasCredits", "unlimited", "balance")
+            if k in value}
+
+
+def _codex_quota_from_app_server(result, sampled_at=None):
+    """Map Codex app-server v2 account/rateLimits/read into AgentDeck's stable model."""
+    if not isinstance(result, dict):
+        raise ValueError("invalid Codex rate-limit response")
+    base = result.get("rateLimits")
+    by_id = result.get("rateLimitsByLimitId")
+    snapshots = []
+    seen = set()
+    if isinstance(base, dict):
+        limit_id = str(base.get("limitId") or "codex")
+        snapshots.append((limit_id, base))
+        seen.add(limit_id)
+    if isinstance(by_id, dict):
+        for raw_id, snapshot in sorted(by_id.items(), key=lambda item: str(item[0])):
+            if not isinstance(snapshot, dict):
+                continue
+            limit_id = str(snapshot.get("limitId") or raw_id)
+            if limit_id in seen:
+                continue
+            snapshots.append((limit_id, snapshot))
+            seen.add(limit_id)
+
+    windows = []
+    credits = _sanitize_codex_credits(base.get("credits")) \
+        if isinstance(base, dict) else None
+    for limit_id, snapshot in snapshots:
+        name = str(snapshot.get("limitName") or "")
+        for key, secondary in (("primary", False), ("secondary", True)):
+            window = _codex_window(snapshot.get(key), limit_id, name, secondary,
+                                   camel_case=True)
+            if window:
+                windows.append(window)
+        if credits is None:
+            credits = _sanitize_codex_credits(snapshot.get("credits"))
+    if not windows:
+        return {"ok": False, "no_quota": True,
+                "error": "Codex account has no rate-limit snapshot"}
     return {"ok": True, "windows": windows, "credits": credits,
-            "sampled_at": stamp}
+            "sampled_at": sampled_at or _iso_at()}
 
 
-def _codex_quota_accounts(ttl=CODEX_QUOTA_TTL):
-    """每个 Codex 账号各自解析 rate_limits（各自缓存）。"""
-    out = []
+def _codex_quota_from_rollout_limits(rate_limits, sampled_at=None):
+    if not isinstance(rate_limits, dict):
+        return None
+    windows = []
+    for key, secondary in (("primary", False), ("secondary", True)):
+        window = _codex_window(rate_limits.get(key), secondary=secondary)
+        if window:
+            windows.append(window)
+    if not windows:
+        return None
+    credits = rate_limits.get("credits")
+    return {"ok": True, "windows": windows,
+            "credits": credits if isinstance(credits, dict) else None,
+            "sampled_at": sampled_at or _iso_at()}
+
+
+def _codex_quota_from_path(path, max_bytes=CODEX_ROLLOUT_TAIL_BYTES):
+    """Read one bounded tail and return its newest rate-limit event."""
+    try:
+        lines = _tail_lines(path, max_bytes)
+        fallback = path.stat().st_mtime
+    except OSError:
+        return None
+    for line in reversed(lines):
+        if '"rate_limits"' not in line:
+            continue
+        try:
+            evt = json.loads(line)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(evt, dict):
+            continue
+        payload = evt.get("payload")
+        rate_limits = payload.get("rate_limits") if isinstance(payload, dict) else None
+        quota = _codex_quota_from_rollout_limits(rate_limits, evt.get("timestamp"))
+        if quota:
+            return quota, _timestamp_epoch(evt.get("timestamp"), fallback)
+    return None
+
+
+def _recent_codex_files(base, limit=60):
+    ranked = []
+    for path in _codex_file_index(base):
+        try:
+            ranked.append((path.stat().st_mtime, path))
+        except OSError:
+            continue
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    return [path for _mtime, path in ranked[:limit]]
+
+
+def _codex_quota(base=None):
+    """Bounded rollout fallback; choose the newest event, never the newest filename."""
+    bases = [base] if base is not None else [s["path"] for s in codex_sources()]
+    best = None
+    for current_base in bases:
+        for path in _recent_codex_files(current_base, limit=12):
+            found = _codex_quota_from_path(path, CODEX_ROLLOUT_FAST_TAIL_BYTES)
+            if found and (best is None or found[1] > best[1]):
+                best = found
+    if best:
+        return best[0]
+    return {"ok": False, "no_quota": True,
+            "error": "no Codex rate-limit snapshot found"}
+
+
+def _codex_executable():
+    candidates = [
+        os.environ.get("AGENTDECK_CODEX_BIN"),
+        shutil.which("codex"),
+        "/opt/homebrew/bin/codex",
+        "/usr/local/bin/codex",
+        str(HOME / ".local" / "bin" / "codex"),
+    ]
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    raise FileNotFoundError("Codex CLI not found")
+
+
+class _CodexAppServerClient:
+    """Small synchronous JSONL client for one CODEX_HOME app-server child."""
+
+    def __init__(self, codex_home, notification_handler=None):
+        self.codex_home = Path(codex_home)
+        self.notification_handler = notification_handler
+        self._lock = threading.RLock()
+        self._proc = None
+        self._buffer = b""
+        self._request_id = 0
+        self._retired = False
+
+    def close(self):
+        with self._lock:
+            proc, self._proc = self._proc, None
+            self._buffer = b""
+            if not proc:
+                return
+            try:
+                if proc.stdin:
+                    proc.stdin.close()
+            except OSError:
+                pass
+            if proc.poll() is None:
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=2)
+                except Exception:
+                    try:
+                        proc.kill()
+                        proc.wait(timeout=2)
+                    except OSError:
+                        pass
+                    except subprocess.TimeoutExpired:
+                        pass
+
+    def retire(self):
+        with self._lock:
+            self._retired = True
+            self.close()
+
+    def _send_locked(self, payload):
+        if not self._proc or not self._proc.stdin:
+            raise RuntimeError("Codex app-server is not running")
+        data = json.dumps(payload, separators=(",", ":")).encode() + b"\n"
+        self._proc.stdin.write(data)
+        self._proc.stdin.flush()
+
+    def _read_message_locked(self, deadline):
+        while True:
+            newline = self._buffer.find(b"\n")
+            if newline >= 0:
+                raw, self._buffer = self._buffer[:newline], self._buffer[newline + 1:]
+                if not raw.strip():
+                    continue
+                try:
+                    value = json.loads(raw)
+                except ValueError:
+                    continue
+                if isinstance(value, dict):
+                    return value
+                continue
+            if not self._proc or not self._proc.stdout:
+                raise RuntimeError("Codex app-server stdout is unavailable")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Codex app-server response timed out")
+            ready, _, _ = select.select([self._proc.stdout], [], [], remaining)
+            if not ready:
+                raise TimeoutError("Codex app-server response timed out")
+            chunk = os.read(self._proc.stdout.fileno(), 65536)
+            if not chunk:
+                raise RuntimeError("Codex app-server exited")
+            self._buffer += chunk
+
+    def _request_locked(self, method, params=None, timeout=12):
+        self._request_id += 1
+        request_id = self._request_id
+        self._send_locked({"id": request_id, "method": method, "params": params})
+        deadline = time.monotonic() + timeout
+        while True:
+            message = self._read_message_locked(deadline)
+            if message.get("method") == "account/rateLimits/updated":
+                if self.notification_handler:
+                    self.notification_handler(message.get("params") or {})
+                continue
+            if message.get("id") != request_id:
+                continue
+            if "error" in message:
+                raise RuntimeError(f"Codex app-server error: {message['error']}")
+            return message.get("result") or {}
+
+    def _start_locked(self):
+        if self._retired:
+            raise RuntimeError("Codex app-server client is retired")
+        if self._proc and self._proc.poll() is None:
+            return
+        self.close()
+        env = os.environ.copy()
+        env["CODEX_HOME"] = str(self.codex_home)
+        self._proc = subprocess.Popen(
+            [_codex_executable(), "app-server", "--stdio"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            env=env, bufsize=0)
+        try:
+            result = self._request_locked("initialize", {
+                "clientInfo": {"name": "agentdeck", "version": VERSION},
+            })
+            returned_home = result.get("codexHome")
+            if returned_home and os.path.realpath(returned_home) != \
+                    os.path.realpath(self.codex_home):
+                raise RuntimeError("Codex app-server opened the wrong CODEX_HOME")
+            self._send_locked({"method": "initialized"})
+        except Exception:
+            self.close()
+            raise
+
+    def read_rate_limits_observed(self):
+        with self._lock:
+            try:
+                self._start_locked()
+                observed_at = time.time()
+                result = self._request_locked("account/rateLimits/read", None)
+                return result, observed_at
+            except Exception:
+                self.close()
+                raise
+
+    def read_rate_limits(self):
+        result, _observed_at = self.read_rate_limits_observed()
+        return result
+
+
+def _codex_source_for_path(path):
+    try:
+        target = os.path.realpath(path)
+    except (OSError, ValueError):
+        return None
     for src in codex_sources():
-        if src.get("session_only"):
-            continue          # IDE 注入的会话源，非计费账号，不拉额度
-        key = "codex_quota" if src["is_default"] else f"codex_quota_{src['id']}"
-        q = _resilient(key, ttl, lambda s=src: _codex_quota(base=s["path"]))
-        out.append({"account_id": src["id"], "account": src["label"],
-                    "is_default": src["is_default"], **q})
-    return out
+        root = os.path.realpath(src["path"] / "sessions") + os.sep
+        if target.startswith(root):
+            return src
+    return None
+
+
+def _codex_rollout_for_thread(thread_id):
+    if not isinstance(thread_id, str) or not re.fullmatch(r"[A-Za-z0-9-]{8,64}", thread_id):
+        return None, None
+    try:
+        indexed = _session_index_path("codex", thread_id)
+    except Exception:
+        indexed = None
+    candidates = [indexed] if indexed and indexed.is_file() else []
+    if not candidates:
+        for src in codex_sources():
+            candidates.extend(
+                (src["path"] / "sessions").glob(f"*/*/*/rollout-*{thread_id}.jsonl"))
+    if not candidates:
+        return None, None
+    try:
+        path = max(candidates, key=lambda value: value.stat().st_mtime)
+    except OSError:
+        return None, None
+    return path, _codex_source_for_path(path)
+
+
+def _is_base_codex_window(window_id):
+    return (window_id in ("five_hour", "seven_day", "primary")
+            or re.fullmatch(r"win_\d+", str(window_id or "")) is not None)
+
+
+class CodexQuotaManager:
+    """Authoritative in-memory Codex quota state with local event and official repair paths."""
+
+    def __init__(self):
+        self._lock = threading.RLock()
+        self._states = {}
+        self._clients = {}
+        self._inactive_paths = set()
+        self._pending_threads = {}
+        self._reconcile_pending = False
+        self._last_force = 0.0
+        self._last_refresh_completed_at = 0.0
+        self._last_refresh_success = False
+        self._started = False
+        self._stop = threading.Event()
+        self._refresh_gate = threading.Lock()
+        self._executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=4, thread_name_prefix="agentdeck-codex-quota")
+
+    @staticmethod
+    def _path_key(src):
+        return os.path.realpath(src["path"])
+
+    @staticmethod
+    def _cache_key(src):
+        return "codex_quota" if src["is_default"] else f"codex_quota_{src['id']}"
+
+    def start(self):
+        with self._lock:
+            if self._started:
+                return
+            self._started = True
+        threading.Thread(target=self._periodic_loop, daemon=True,
+                         name="agentdeck-codex-quota-reconcile").start()
+        self.request_reconcile()
+
+    def stop(self):
+        self._stop.set()
+        with self._lock:
+            clients = list(self._clients.values())
+            self._clients.clear()
+        for client in clients:
+            client.retire()
+        self._executor.shutdown(wait=True, cancel_futures=True)
+
+    def _periodic_loop(self):
+        while not self._stop.wait(CODEX_RECONCILE_SECS):
+            self.request_reconcile()
+
+    def _sources(self):
+        return [src for src in codex_sources() if not src.get("session_only")]
+
+    def _prune_inactive(self, sources):
+        active = {self._path_key(src) for src in sources}
+        with self._lock:
+            known = set(self._clients) | set(self._states)
+            removed = [key for key in known if key not in active]
+            self._inactive_paths.update(removed)
+            self._inactive_paths.difference_update(active)
+            clients = [self._clients.pop(key) for key in removed
+                       if key in self._clients]
+            for key in removed:
+                self._states.pop(key, None)
+        for client in clients:
+            client.retire()
+
+    def _client_for(self, src):
+        key = self._path_key(src)
+        with self._lock:
+            if self._stop.is_set():
+                raise RuntimeError("Codex quota manager is stopping")
+            if key in self._inactive_paths:
+                raise RuntimeError("Codex quota source is inactive")
+            client = self._clients.get(key)
+            if client is None:
+                client = _CodexAppServerClient(
+                    src["path"],
+                    notification_handler=lambda params, source=src:
+                        self._apply_notification(source, params))
+                self._clients[key] = client
+            return client
+
+    def _apply_notification(self, src, params):
+        # 协议明确该通知是 sparse rolling update：缺失字段不代表清空，不能直接
+        # 覆盖完整快照。客户端只会在 initialize/rateLimits/read 等待响应时消费通知；
+        # 初始化后紧接完整读取，读取期间则随后必有完整响应，所以忽略 sparse 内容即可，
+        # 避免通知反过来再排一批重复读取。
+        return isinstance(params, dict) and isinstance(params.get("rateLimits"), dict)
+
+    def _record_error(self, src, error):
+        key = self._path_key(src)
+        with self._lock:
+            state = self._states.get(key)
+            if state is not None:
+                state["error"] = str(error)
+
+    def _refresh_source_official(self, src):
+        try:
+            result, observed_at = self._client_for(src).read_rate_limits_observed()
+            quota = _codex_quota_from_app_server(result, _iso_at(observed_at))
+            if not quota.get("ok"):
+                self._record_error(
+                    src, quota.get("error") or "Codex quota refresh returned no data")
+                return False
+            # 以请求发起时间排序：请求期间若 rollout 已写入更新快照，迟到的旧响应
+            # 不得倒灌覆盖刚收到的实时值。
+            self._apply(src, quota, observed_at, official=True)
+            return True
+        except Exception as exc:
+            self._record_error(src, exc)
+            return False
+
+    def _refresh_all_locked(self):
+        """Refresh every active Codex source while the caller owns _refresh_gate."""
+        sources = self._sources() if get_settings().get("show_codex", True) else []
+        self._prune_inactive(sources)
+        if not sources:
+            return True
+        futures = [self._executor.submit(self._refresh_source_official, src)
+                   for src in sources]
+        # 每个 app-server 请求自身有 12s 超时。这里必须等整批 futures 收束后
+        # 才释放 gate，避免超时任务在后台继续跑、下一批又重复提交同一账号。
+        done, _ = concurrent.futures.wait(futures)
+        results = [f.result() for f in done if not f.cancelled()]
+        return len(results) == len(sources) and all(results)
+
+    def _run_refresh_locked(self):
+        success = False
+        try:
+            success = self._refresh_all_locked()
+            return success
+        finally:
+            with self._lock:
+                self._last_refresh_completed_at = time.monotonic()
+                self._last_refresh_success = bool(success)
+
+    def refresh_all_sync(self, skip_if_busy=False):
+        if not self._refresh_gate.acquire(blocking=not skip_if_busy):
+            return False
+        try:
+            return self._run_refresh_locked()
+        finally:
+            self._refresh_gate.release()
+
+    def request_reconcile(self):
+        with self._lock:
+            if not self._started or self._stop.is_set() or self._reconcile_pending:
+                return
+            self._reconcile_pending = True
+
+        def run():
+            try:
+                self.refresh_all_sync()
+            finally:
+                with self._lock:
+                    self._reconcile_pending = False
+
+        threading.Thread(target=run, daemon=True,
+                         name="agentdeck-codex-quota-batch").start()
+
+    def ensure_fresh(self, max_age=CODEX_OPEN_STALE_SECS):
+        now = time.time()
+        with self._lock:
+            sources = self._sources()
+            due = any(
+                now - (self._states.get(self._path_key(src), {}).get("official_at") or 0)
+                > max_age for src in sources)
+        if due:
+            self.request_reconcile()
+
+    def force_refresh(self, timeout=110):
+        """Run or join one forced refresh, with a total wait deadline.
+
+        The actual batch stays alive behind _refresh_gate if the caller reaches its
+        deadline, so a timed-out HTTP request cannot create overlapping app-server
+        work. Concurrent callers observe the same completed batch result.
+        """
+        requested_at = time.monotonic()
+        deadline = requested_at + max(0.0, timeout)
+        done = threading.Event()
+        outcome = {"success": False}
+
+        def run():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not self._refresh_gate.acquire(timeout=remaining):
+                done.set()
+                return
+            try:
+                with self._lock:
+                    if self._last_refresh_completed_at >= requested_at:
+                        outcome["success"] = self._last_refresh_success
+                        return
+                    if requested_at - self._last_force < 3:
+                        outcome["success"] = self._last_refresh_success
+                        return
+                    self._last_force = requested_at
+                outcome["success"] = self._run_refresh_locked()
+            finally:
+                self._refresh_gate.release()
+                done.set()
+
+        threading.Thread(
+            target=run, daemon=True, name="agentdeck-codex-quota-force").start()
+        if not done.wait(max(0.0, timeout)):
+            return False
+        return outcome["success"]
+
+    def note_turn_complete(self, thread_id, cwd=""):
+        if not isinstance(thread_id, str) or not thread_id:
+            return
+        now = time.monotonic()
+        with self._lock:
+            previous = self._pending_threads.get(thread_id, 0)
+            if now - previous < 2:
+                return
+            self._pending_threads[thread_id] = now
+
+        def run():
+            try:
+                path, src = _codex_rollout_for_thread(thread_id)
+                found = _codex_quota_from_path(path) if path else None
+                if found and src:
+                    self._apply(src, found[0], found[1], official=False)
+                    self.ensure_fresh(CODEX_RECONCILE_SECS)
+                elif src:
+                    self._refresh_source_official(src)
+                else:
+                    self.request_reconcile()
+            finally:
+                with self._lock:
+                    self._pending_threads.pop(thread_id, None)
+
+        self._executor.submit(run)
+
+    def _apply(self, src, quota, observed_at, official=False):
+        if not isinstance(quota, dict) or not quota.get("ok"):
+            return False
+        key = self._path_key(src)
+        value = copy.deepcopy(quota)
+        with self._lock:
+            if key in self._inactive_paths:
+                return False
+            old = self._states.get(key)
+            if old and observed_at + 0.001 < old["observed_at"]:
+                return False
+            if not official and old:
+                extras = [window for window in old["quota"].get("windows", [])
+                          if not _is_base_codex_window(window.get("id"))]
+                existing_ids = {window.get("id") for window in value.get("windows", [])}
+                value["windows"] = value.get("windows", []) + [
+                    window for window in extras if window.get("id") not in existing_ids]
+                if value.get("credits") is None:
+                    value["credits"] = old["quota"].get("credits")
+            state = {
+                "quota": value,
+                "observed_at": observed_at,
+                "official_at": time.time() if official else
+                    (old.get("official_at", 0) if old else 0),
+                "error": None,
+            }
+            changed = old is None or old["quota"] != value
+            self._states[key] = state
+        _remember_last_good(self._cache_key(src), value)
+        if changed:
+            _bump_quota_revision()
+            if get_settings().get("show_codex", True):
+                accounts = self._sources()
+                _check_alerts("Codex", value.get("windows", []), src["id"],
+                              src["label"], len(accounts) > 1)
+        return changed
+
+    def quota_for_source(self, src):
+        key = self._path_key(src)
+        with self._lock:
+            state = copy.deepcopy(self._states.get(key))
+        if state:
+            quota = state["quota"]
+            if time.time() - state["observed_at"] > CODEX_STALE_SECS:
+                quota["stale"] = True
+                if state.get("error"):
+                    quota["error"] = state["error"]
+            return quota
+        cache_key = self._cache_key(src)
+        quota = _resilient(
+            cache_key, CODEX_QUOTA_TTL,
+            lambda source=src: _codex_quota(base=source["path"]))
+        if quota.get("ok"):
+            observed = _timestamp_epoch(quota.get("sampled_at"), time.time())
+            self._apply(src, quota, observed, official=False)
+        return quota
+
+    def accounts(self):
+        out = []
+        for src in self._sources():
+            quota = self.quota_for_source(src)
+            out.append({"account_id": src["id"], "account": src["label"],
+                        "is_default": src["is_default"], **quota})
+        return out
+
+
+_codex_quota_manager = CodexQuotaManager()
+
+
+def _codex_quota_accounts():
+    return _codex_quota_manager.accounts()
 
 
 _last_good = {}        # key -> 最近一次成功结果（失败时降级返回）
@@ -1032,8 +1672,7 @@ _last_good_lock = threading.Lock()
 LAST_GOOD_FILE = None  # 延迟初始化，DATA_DIR 定义在前文
 
 
-def _resilient(key, ttl, fn):
-    """失败时回退到最近一次成功值；429 限流额外退避 10 分钟。"""
+def _ensure_last_good_loaded():
     global LAST_GOOD_FILE
     with _last_good_lock:
         if LAST_GOOD_FILE is None:
@@ -1042,20 +1681,42 @@ def _resilient(key, ttl, fn):
                 _last_good.update(json.loads(LAST_GOOD_FILE.read_text()))
             except (OSError, ValueError):
                 pass
+
+
+def _remember_last_good(key, value):
+    if not isinstance(value, dict) or not value.get("ok") or value.get("stale"):
+        return
+    _ensure_last_good_loaded()
+    with _last_good_lock:
+        if _last_good.get(key) == value:
+            return
+        _last_good[key] = copy.deepcopy(value)
+        try:
+            _atomic_write_text(LAST_GOOD_FILE,
+                               json.dumps(_last_good, ensure_ascii=False))
+        except OSError:
+            pass
+
+
+def _cached_or_last_good(key):
+    with _cache_lock:
+        hit = _ttl_cache.get(key)
+        if hit and isinstance(hit[1], dict):
+            return copy.deepcopy(hit[1])
+    _ensure_last_good_loaded()
+    with _last_good_lock:
+        value = _last_good.get(key)
+        return copy.deepcopy(value) if isinstance(value, dict) else None
+
+
+def _resilient(key, ttl, fn):
+    """失败时回退到最近一次成功值；429 限流额外退避 10 分钟。"""
+    _ensure_last_good_loaded()
     try:
         val = cached(key, ttl, fn)
         # 只把「真正成功」的结果存为降级值：ok=False（如网关无额度 / 钥匙串抖动）
         # 不得污染兜底，否则真额度 429 时拿不回上一次的好数据
-        if val.get("ok") and not val.get("stale"):
-            with _last_good_lock:
-                if _last_good.get(key) != val:
-                    _last_good[key] = val
-                    try:
-                        _atomic_write_text(
-                            LAST_GOOD_FILE,
-                            json.dumps(_last_good, ensure_ascii=False))
-                    except OSError:
-                        pass
+        _remember_last_good(key, val)
         return val
     except Exception as exc:
         err = str(exc)
@@ -1069,31 +1730,95 @@ def _resilient(key, ttl, fn):
         return out
 
 
-_last_force_quota = 0.0
+_last_force_claude_quota = 0.0
 
 
-def api_quota(force=False):
+def _force_quota_refreshes(settings, ttl, budget=QUOTA_FORCE_BUDGET_SECS):
+    """Refresh visible providers concurrently within one end-to-end deadline."""
+    pool = concurrent.futures.ThreadPoolExecutor(
+        max_workers=2, thread_name_prefix="agentdeck-quota-force")
+    futures = {}
+    try:
+        if settings.get("show_claude", True):
+            futures["claude"] = pool.submit(_claude_quota_accounts, ttl)
+        if settings.get("show_codex", True):
+            futures["codex"] = pool.submit(
+                _codex_quota_manager.force_refresh, max(0.0, budget - 1))
+        done, pending = concurrent.futures.wait(
+            futures.values(), timeout=max(0.0, budget))
+        if pending:
+            for future in pending:
+                future.cancel()
+            raise RuntimeError("Quota refresh timed out")
+        if "codex" in futures and not futures["codex"].result():
+            raise RuntimeError("Codex quota refresh failed or timed out")
+        claude_accounts = futures["claude"].result() \
+            if "claude" in futures else []
+        claude_failed = any(
+            account.get("stale")
+            or (not account.get("ok") and not account.get("no_quota"))
+            for account in claude_accounts)
+        if claude_failed:
+            raise RuntimeError("Claude quota refresh failed")
+        return claude_accounts
+    finally:
+        # Running provider calls own bounded I/O timeouts. Do not make an already
+        # timed-out HTTP request wait again while the executor drains.
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
+def _claude_quota_accounts_cached():
+    out = []
+    for src in claude_sources():
+        if src.get("session_only"):
+            continue
+        key = "claude_quota" if src["is_default"] else f"claude_quota_{src['id']}"
+        quota = _cached_or_last_good(key) or {
+            "ok": False, "error": "Claude quota cache is warming",
+        }
+        out.append({"account_id": src["id"], "account": src["label"],
+                    "is_default": src["is_default"], **quota})
+    return out
+
+
+def api_quota(force=False, cache_only=False, fresh_codex=False):
     s = get_settings()
     # 面板隐藏的 agent 不再拉额度（省钥匙串读取 / Anthropic usage 调用 / 限流消耗）
-    ttl = s.get("quota_interval", CLAUDE_QUOTA_TTL)   # 用户可调的额度查询间隔（Claude/Codex 共用）
-    # 手动刷新（🔄）：清掉额度缓存键，逼一次真实重拉，不再只回读上次缓存——否则把查询
-    # 间隔调大（如 1 小时）后点刷新也拿不到新数据。带 10s 防连点闸，避免狂点把接口打到 429。
+    ttl = s.get("quota_interval", CLAUDE_QUOTA_TTL)
+    # 手动刷新分别处理两端：Claude 清缓存并受 10s 防连点保护；Codex 交给自己的
+    # app-server 客户端和 3s 去重，不再因刷新 Codex 顺带消耗 Anthropic 额度接口。
+    forced_claude_accts = None
     if force:
-        global _last_force_quota
+        global _last_force_claude_quota
         now = time.time()
         with _cache_lock:
-            if now - _last_force_quota >= 10:
-                _last_force_quota = now
+            if now - _last_force_claude_quota >= 10:
+                _last_force_claude_quota = now
                 for k in [k for k in _ttl_cache
-                          if k.startswith("claude_quota") or k.startswith("codex_quota")]:
+                          if k.startswith("claude_quota")]:
                     _ttl_cache.pop(k, None)
-    claude_accts = _claude_quota_accounts(ttl) if s.get("show_claude", True) else []
-    codex_accts = _codex_quota_accounts(ttl) if s.get("show_codex", True) else []
+        forced_claude_accts = _force_quota_refreshes(s, ttl)
+    elif fresh_codex and s.get("show_codex", True):
+        _codex_quota_manager.ensure_fresh(CODEX_OPEN_STALE_SECS)
+    else:
+        _codex_quota_manager.ensure_fresh(CODEX_RECONCILE_SECS)
+
+    if s.get("show_claude", True):
+        if forced_claude_accts is not None:
+            claude_accts = forced_claude_accts
+        else:
+            claude_accts = _claude_quota_accounts_cached() if cache_only \
+                else _claude_quota_accounts(ttl)
+    else:
+        claude_accts = []
+    codex_accts = _codex_quota_accounts() if s.get("show_codex", True) else []
     # 向后兼容：claude/codex 仍为「主账号」单对象；新增 accounts 列表供 carousel/轮转
     if claude_accts:
         primary_claude = claude_accts[0]
     elif not s.get("show_claude", True):
         primary_claude = {"ok": False, "hidden": True}   # 隐藏 → 不拉取
+    elif cache_only:
+        primary_claude = {"ok": False, "error": "Claude quota cache is warming"}
     else:
         primary_claude = _resilient("claude_quota", ttl, _claude_quota)
     if codex_accts:
@@ -1101,7 +1826,10 @@ def api_quota(force=False):
     elif not s.get("show_codex", True):
         primary_codex = {"ok": False, "hidden": True}
     else:
-        primary_codex = _resilient("codex_quota", ttl, _codex_quota)
+        primary_codex = {"ok": False, "no_quota": True,
+                         "error": "Codex account not found"}
+    with _quota_change:
+        revision = _quota_revision
     return {"claude": primary_claude,
             "codex": primary_codex,
             "accounts": {"claude": claude_accts, "codex": codex_accts},
@@ -1111,7 +1839,27 @@ def api_quota(force=False):
                         "value_dim": s.get("menubar_value_dim", "shortest"),
                         "color_dim": s.get("menubar_color_dim", "shortest"),
                         "rotate_secs": s.get("menubar_rotate_secs", 0)},
+            "quota_revision": revision,
+            "quota_boot_id": _quota_boot_id,
             "ts": time.time()}
+
+
+def api_quota_changes(query):
+    try:
+        after = max(0, int(query.get("after", ["0"])[0]))
+    except (TypeError, ValueError):
+        after = 0
+    try:
+        timeout = max(1.0, min(30.0, float(query.get("timeout", ["25"])[0])))
+    except (TypeError, ValueError):
+        timeout = 25.0
+    client_boot = str(query.get("boot", [""])[0])[:80]
+    with _quota_change:
+        if client_boot == _quota_boot_id and after >= _quota_revision:
+            _quota_change.wait_for(lambda: _quota_revision > after, timeout=timeout)
+        revision = _quota_revision
+    return {"boot_id": _quota_boot_id, "revision": revision,
+            "quota": api_quota(cache_only=True)}
 
 
 def api_diag():
@@ -2482,47 +3230,249 @@ _CODEX_HOOKS = Path.home() / ".codex" / "hooks.json"
 _CODEX_WRAPPER = DATA_DIR / "codex-notify.sh"
 _CODEX_LEGACY_STOP_WRAPPER = DATA_DIR / "codex-stop-hook.sh"
 _CODEX_LEGACY_REPO_STOP_WRAPPER = Path(__file__).resolve().parent / "scripts" / "codex-stop-hook.sh"
-_CODEX_MARK = "codex-notify.sh"
-_CODEX_OUR_MARKS = (_CODEX_MARK, "127.0.0.1:7777/api/event")
+_CODEX_EVENT_ENDPOINT = "127.0.0.1:7777/api/event"
 _CODEX_LEGACY_STOP_MARK = str(_CODEX_LEGACY_STOP_WRAPPER)
 
 
+def _toml_root_lines(text):
+    """Yield physical root-level TOML lines, excluding strings/comments/arrays."""
+    i = 0
+    quote, triple, comment = None, False, False
+    square_depth = curly_depth = 0
+    at_line_start = True
+    while i < len(text):
+        if at_line_start:
+            if quote is None and square_depth == 0 and curly_depth == 0:
+                line_end = text.find("\n", i)
+                if line_end < 0:
+                    line_end = len(text)
+                yield i, text[i:line_end]
+            at_line_start = False
+        ch = text[i]
+        if comment:
+            if ch == "\n":
+                comment = False
+                at_line_start = True
+            i += 1
+            continue
+        if quote:
+            delimiter = quote * (3 if triple else 1)
+            if text.startswith(delimiter, i):
+                i += len(delimiter)
+                quote, triple = None, False
+                continue
+            if quote == '"' and ch == "\\":
+                i += 2
+                continue
+            if ch == "\n" and not triple:
+                raise ValueError("unterminated TOML string")
+            if ch == "\n":
+                at_line_start = True
+            i += 1
+            continue
+        if ch == "#":
+            comment = True
+        elif ch in ("'", '"'):
+            triple = text.startswith(ch * 3, i)
+            quote = ch
+            i += 3 if triple else 1
+            continue
+        elif ch == "[":
+            square_depth += 1
+        elif ch == "]":
+            square_depth = max(0, square_depth - 1)
+        elif ch == "{":
+            curly_depth += 1
+        elif ch == "}":
+            curly_depth = max(0, curly_depth - 1)
+        elif ch == "\n":
+            at_line_start = True
+        i += 1
+    if quote is not None:
+        raise ValueError("unterminated TOML string")
+
+
+def _toml_first_table_start(text):
+    for start, line in _toml_root_lines(text):
+        if line.lstrip().startswith("["):
+            return start
+    return len(text)
+
+
+def _toml_key_value_start(line, wanted):
+    """Return the value offset for a matching bare/basic/literal TOML key."""
+    i = len(line) - len(line.lstrip(" \t"))
+    if i >= len(line):
+        return None
+    if line[i] in ("'", '"'):
+        quote = line[i]
+        start = i
+        i += 1
+        while i < len(line):
+            if quote == '"' and line[i] == "\\":
+                i += 2
+                continue
+            if line[i] == quote:
+                i += 1
+                break
+            i += 1
+        else:
+            raise ValueError("unterminated quoted TOML key")
+        raw_key = line[start:i]
+        if quote == "'":
+            key = raw_key[1:-1]
+        else:
+            try:
+                key = ast.literal_eval(raw_key)
+            except (SyntaxError, ValueError):
+                return None
+    else:
+        match = re.match(r"[A-Za-z0-9_-]+", line[i:])
+        if not match:
+            return None
+        key = match.group(0)
+        i += len(key)
+    while i < len(line) and line[i] in " \t":
+        i += 1
+    if key != wanted or i >= len(line) or line[i] != "=":
+        return None
+    i += 1
+    while i < len(line) and line[i] in " \t":
+        i += 1
+    return i
+
+
+def _codex_root_notify_assignment(text):
+    """Return the exact root `notify = [...]` span, including multiline arrays."""
+    notify_start = notify_end = None
+    for start, line in _toml_root_lines(text):
+        if line.lstrip().startswith("["):
+            break
+        value_start = _toml_key_value_start(line, "notify")
+        if value_start is not None:
+            notify_start = start
+            notify_end = start + value_start
+            break
+    if notify_start is None:
+        return None
+    pos = notify_end
+    if pos >= len(text) or text[pos] != "[":
+        raise ValueError("Codex notify must be a TOML array")
+    array_start = pos
+    depth, quote, triple, comment = 0, None, False, False
+    while pos < len(text):
+        ch = text[pos]
+        if comment:
+            if ch in "\r\n":
+                comment = False
+            pos += 1
+            continue
+        if quote:
+            delimiter = quote * (3 if triple else 1)
+            if text.startswith(delimiter, pos):
+                pos += len(delimiter)
+                quote, triple = None, False
+                continue
+            if quote == '"' and ch == "\\":
+                pos += 2
+            else:
+                pos += 1
+            continue
+        if ch == "#":
+            comment = True
+            pos += 1
+            continue
+        if ch in ("'", '"'):
+            triple = text.startswith(ch * 3, pos)
+            quote = ch
+            pos += 3 if triple else 1
+            continue
+        if ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+            if depth == 0:
+                array_end = pos + 1
+                line_end = text.find("\n", array_end)
+                if line_end < 0:
+                    line_end = len(text)
+                suffix = text[array_end:line_end].strip()
+                if suffix and not suffix.startswith("#"):
+                    raise ValueError("invalid text after Codex notify array")
+                assignment_end = line_end + (line_end < len(text))
+                return notify_start, assignment_end, text[array_start:array_end]
+            if depth < 0:
+                break
+        pos += 1
+    raise ValueError("unterminated Codex notify array")
+
+
 def _codex_read_notify(text):
-    """从 config.toml 文本里取 notify 数组（优先 tomllib，回退正则单行）。"""
+    """Read the root notify array without requiring Python 3.11's tomllib."""
+    assignment = _codex_root_notify_assignment(text)
+    if assignment is None:
+        return None
     try:
         import tomllib
         v = tomllib.loads(text).get("notify")
-        return v if isinstance(v, list) else None
+        if isinstance(v, list) and all(isinstance(item, str) for item in v):
+            return v
     except Exception:
-        # notify 是根键；只检查首个 TOML table 之前，避免误改 [profiles.*].notify。
-        table = re.search(r'^[ \t]*\[', text, re.M)
-        root = text[:table.start()] if table else text
-        m = re.search(r'^[ \t]*notify[ \t]*=[ \t]*(\[.*\])[ \t]*$', root, re.M)
-        if not m:
-            return None
-        try:
-            return json.loads(m.group(1))   # TOML 单行数组与 JSON 数组语法兼容（双引号字符串）
-        except ValueError:
-            return None
+        pass
+    try:
+        value = ast.literal_eval(assignment[2])
+    except (SyntaxError, ValueError) as exc:
+        raise ValueError("unsupported Codex notify TOML array") from exc
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ValueError("Codex notify must contain only strings")
+    return value
 
 
 def _codex_set_notify(text, arr):
-    """把 config.toml 文本里的 notify 行替换/插入为 arr（仅动 notify 单行，其余原样）。
-    arr=None 表示删除 notify 行。返回新文本。用 [ \t]* 避免误吃上一空行。"""
+    """Replace/remove the complete root notify assignment, including multiline forms."""
     line = None if arr is None else "notify = " + json.dumps(arr, ensure_ascii=False)
-    table = re.search(r'^[ \t]*\[', text, re.M)
-    cut = table.start() if table else len(text)
-    root, rest = text[:cut], text[cut:]
-    if re.search(r'^[ \t]*notify[ \t]*=', root, re.M):
-        if line is None:
-            root = re.sub(r'^[ \t]*notify[ \t]*=.*\n?', '', root, count=1, flags=re.M)
-        else:
-            root = re.sub(r'^[ \t]*notify[ \t]*=.*$', line, root, count=1, flags=re.M)
-        return root + rest
+    assignment = _codex_root_notify_assignment(text)
+    if assignment is not None:
+        start, end, _raw = assignment
+        replacement = "" if line is None else line + "\n"
+        return text[:start] + replacement + text[end:]
     if not line:
         return text
+    cut = _toml_first_table_start(text)
+    root, rest = text[:cut], text[cut:]
     separator = "" if not root or root.endswith("\n") else "\n"
     return root + separator + line + "\n" + rest
+
+
+def _codex_notify_arg_is_ours(value):
+    text = str(value)
+    if _CODEX_EVENT_ENDPOINT in text:
+        return True
+    try:
+        path = Path(os.path.expandvars(os.path.expanduser(text)))
+        real = os.path.realpath(path)
+    except (OSError, ValueError):
+        return False
+    exact = {
+        os.path.realpath(_CODEX_WRAPPER),
+        os.path.realpath(Path(__file__).resolve().parent / "scripts" / "codex-notify.sh"),
+    }
+    if real in exact:
+        return True
+    try:
+        parent_is_data = os.path.realpath(path.parent) == os.path.realpath(DATA_DIR)
+    except (OSError, ValueError):
+        return False
+    return parent_is_data and re.fullmatch(
+        r"codex-notify(?:-[0-9a-f]{12})?[.]sh", path.name) is not None
+
+
+def _codex_notify_direct_is_ours(arr):
+    if not isinstance(arr, list) or not arr:
+        return False
+    direct = arr[:arr.index("--previous-notify")] \
+        if "--previous-notify" in arr else arr
+    return any(_codex_notify_arg_is_ours(value) for value in direct)
 
 
 def _codex_notify_is_ours(arr):
@@ -2533,15 +3483,18 @@ def _codex_notify_is_ours(arr):
     """
     if not isinstance(arr, list):
         return False
-    joined = " ".join(str(x) for x in arr)
-    return any(mark in joined for mark in _CODEX_OUR_MARKS)
-
-
-def _codex_notify_direct_is_ours(arr):
-    if not isinstance(arr, list) or not arr:
-        return False
-    command = str(arr[0])
-    return any(mark in command for mark in _CODEX_OUR_MARKS)
+    if _codex_notify_direct_is_ours(arr):
+        return True
+    for i, value in enumerate(arr[:-1]):
+        if value != "--previous-notify":
+            continue
+        try:
+            nested = json.loads(arr[i + 1])
+        except (TypeError, ValueError):
+            continue
+        if _codex_notify_is_ours(nested):
+            return True
+    return False
 
 
 def _codex_notify_without_ours(arr):
@@ -2569,110 +3522,272 @@ def _codex_notify_without_ours(arr):
     return out
 
 
-def _write_codex_wrapper(restore_notify, forward_notify=None):
+def _write_codex_wrapper(restore_notify, forward_notify=None,
+                         config=None, wrapper=None):
     """Generate wrapper with separate forwarding and uninstall restoration targets."""
+    config = Path(config) if config is not None else _CODEX_CONFIG
+    wrapper = Path(wrapper) if wrapper is not None else _CODEX_WRAPPER
     fwd = (" ".join(shlex.quote(x) for x in forward_notify) + ' "$@"') \
         if forward_notify else 'true'
-    restore = json.dumps(restore_notify, ensure_ascii=False) \
-        if restore_notify is not None else "null"
+    restore = repr(json.dumps(restore_notify, ensure_ascii=False))
     sh = f'''#!/bin/sh
 # AgentDeck Codex notify wrapper（自动安装/链式转发/自清理，勿手改）
 APP="/Applications/AgentDeck.app"
-SELF={shlex.quote(str(DATA_DIR))}
 curl -sf -m 3 -X POST http://127.0.0.1:7777/api/event \\
   -H 'Content-Type: application/json' --data-binary "$1" >/dev/null 2>&1
 {fwd}   # 链式转发回原 notify（如 Computer Use）
 [ -d "$APP" ] && exit 0
 # App 已卸载 → 还原 config.toml 的 notify、删 wrapper（drag-trash 也能净；不破坏原工具）
-python3 - "$HOME/.codex/config.toml" >/dev/null 2>&1 <<'PY'
-import re,sys,json,os,tempfile
+if python3 - {shlex.quote(str(config))} >/dev/null 2>&1 <<'PY'
+import ast,re,sys,json,os,tempfile
 p=sys.argv[1]
 try: t=open(p).read()
-except Exception: raise SystemExit
-orig={restore}
+except Exception: raise SystemExit(1)
+orig=json.loads({restore})
 line=None if orig is None else "notify = "+json.dumps(orig,ensure_ascii=False)
-table=re.search(r'^[ \\t]*\\[',t,re.M); cut=table.start() if table else len(t)
-root,rest=t[:cut],t[cut:]
-if re.search(r'^[ \\t]*notify[ \\t]*=',root,re.M):
-    root=re.sub(r'^[ \\t]*notify[ \\t]*=.*\\n?','',root,count=1,flags=re.M) if line is None else re.sub(r'^[ \\t]*notify[ \\t]*=.*$',line,root,count=1,flags=re.M)
-t=root+rest
+def root_lines(s):
+    i=0; quote=None; triple=False; comment=False
+    square=0; curly=0; at_start=True
+    while i<len(s):
+        if at_start:
+            if quote is None and square==0 and curly==0:
+                end=s.find('\\n',i)
+                if end<0:end=len(s)
+                yield i,s[i:end]
+            at_start=False
+        ch=s[i]
+        if comment:
+            if ch=='\\n':comment=False;at_start=True
+            i+=1;continue
+        if quote:
+            delimiter=quote*(3 if triple else 1)
+            if s.startswith(delimiter,i):
+                i+=len(delimiter);quote=None;triple=False;continue
+            if quote=='"' and ch=='\\\\':i+=2;continue
+            if ch=='\\n' and not triple:raise ValueError
+            if ch=='\\n':at_start=True
+            i+=1;continue
+        if ch=='#':comment=True
+        elif ch in ("'",'"'):
+            triple=s.startswith(ch*3,i);quote=ch;i+=3 if triple else 1;continue
+        elif ch=='[':square+=1
+        elif ch==']':square=max(0,square-1)
+        elif ch=='{{':curly+=1
+        elif ch=='}}':curly=max(0,curly-1)
+        elif ch=='\\n':at_start=True
+        i+=1
+    if quote is not None:raise ValueError
+def table_start(s):
+    for start,row in root_lines(s):
+        if row.lstrip().startswith('['):return start
+    return len(s)
+def value_start(row,wanted):
+    i=len(row)-len(row.lstrip(' \\t'))
+    if i>=len(row):return None
+    if row[i] in ("'",'"'):
+        quote=row[i];begin=i;i+=1
+        while i<len(row):
+            if quote=='"' and row[i]=='\\\\':i+=2;continue
+            if row[i]==quote:i+=1;break
+            i+=1
+        else:raise ValueError
+        if quote=="'":key=row[begin+1:i-1]
+        else:
+            try:key=ast.literal_eval(row[begin:i])
+            except (SyntaxError,ValueError):return None
+    else:
+        m=re.match(r'[A-Za-z0-9_-]+',row[i:])
+        if not m:return None
+        key=m.group(0);i+=len(key)
+    while i<len(row) and row[i] in ' \\t':i+=1
+    if key!=wanted or i>=len(row) or row[i]!='=':return None
+    i+=1
+    while i<len(row) and row[i] in ' \\t':i+=1
+    return i
+def span(s):
+    start_at=end_at=None
+    for start,row in root_lines(s):
+        if row.lstrip().startswith('['):break
+        offset=value_start(row,'notify')
+        if offset is not None:start_at=start;end_at=start+offset;break
+    if start_at is None:return None
+    i=end_at
+    if i>=len(s) or s[i]!='[':raise ValueError
+    depth=0; quote=None; triple=False; comment=False
+    while i<len(s):
+        ch=s[i]
+        if comment:
+            comment=ch not in '\\r\\n'; i+=1; continue
+        if quote:
+            delimiter=quote*(3 if triple else 1)
+            if s.startswith(delimiter,i):
+                i+=len(delimiter); quote=None; triple=False; continue
+            i+=2 if quote=='"' and ch=='\\\\' else 1; continue
+        if ch=='#':comment=True; i+=1; continue
+        if ch in ("'",'"'):
+            triple=s.startswith(ch*3,i); quote=ch; i+=3 if triple else 1; continue
+        if ch=='[':depth+=1
+        elif ch==']':
+            depth-=1
+            if depth==0:
+                end=s.find('\\n',i+1)
+                return start_at, len(s) if end<0 else end+1
+        i+=1
+    raise ValueError
+try: current=span(t)
+except ValueError: raise SystemExit(1)
+if current:
+    replacement="" if line is None else line+"\\n"
+    t=t[:current[0]]+replacement+t[current[1]:]
+elif line is not None:
+    cut=table_start(t)
+    prefix=t[:cut]; suffix=t[cut:]
+    t=prefix+("" if not prefix or prefix.endswith("\\n") else "\\n")+line+"\\n"+suffix
+mode=os.stat(p).st_mode & 0o777
 fd,tmp=tempfile.mkstemp(prefix='.config.toml.',dir=os.path.dirname(p))
+os.fchmod(fd,mode)
 with os.fdopen(fd,'w') as f: f.write(t); f.flush(); os.fsync(f.fileno())
 os.replace(tmp,p)
 PY
-rm -f "$SELF/codex-notify.sh"
+then
+  rm -f {shlex.quote(str(wrapper))}
+fi
 exit 0
 '''
     try:
-        _atomic_write_text(_CODEX_WRAPPER, sh, mode=0o755)
+        _atomic_write_text(wrapper, sh, mode=0o755)
         return True
     except OSError:
         return False
 
 
-def _install_codex_notify():
+def _install_codex_notify(config=None, wrapper=None, state_key="codex_prev_notify"):
     """幂等：备份原 notify → 写转发 wrapper → 把 notify 指向 wrapper（不破坏原工具）。返回是否改动。"""
-    if not _CODEX_CONFIG.exists():
-        return False   # 没装 Codex 就不动
+    config = Path(config) if config is not None else _CODEX_CONFIG
+    wrapper_path = Path(wrapper) if wrapper is not None else _CODEX_WRAPPER
+    if not config.exists():
+        try:
+            config.parent.mkdir(parents=True, exist_ok=True)
+            _atomic_write_text(config, "")
+        except OSError:
+            return False
     try:
-        text = _CODEX_CONFIG.read_text()
-    except OSError:
+        text = config.read_text()
+        cur = _codex_read_notify(text)
+    except (OSError, ValueError):
         return False
-    cur = _codex_read_notify(text)
-    wrapper = str(_CODEX_WRAPPER)
+    wrapper_command = str(wrapper_path)
     st = _integration_state()
-    prev = st.get("codex_prev_notify")
+    prev = st.get(state_key)
 
     if _codex_notify_is_ours(prev):
         prev = _codex_notify_without_ours(prev)
-        st["codex_prev_notify"] = prev
+        st[state_key] = prev
         _integration_state_save(st)
 
     # Computer Use 等外部 owner 可能已把 AgentDeck 放进自己的 previous-notify。
     # 此时保留外部 owner 为根，AgentDeck wrapper 不再反向调用 owner，彻底断开环。
     if (_codex_notify_is_ours(cur) and not _codex_notify_direct_is_ours(cur)):
         cleaned = _codex_notify_without_ours(cur)
-        st["codex_prev_notify"] = cleaned
+        st[state_key] = cleaned
         _integration_state_save(st)
-        return _write_codex_wrapper(cleaned, forward_notify=None)
+        return _write_codex_wrapper(
+            cleaned, forward_notify=None, config=config, wrapper=wrapper_path)
 
     # AgentDeck 自己持有根槽时，wrapper 在 POST 后顺序调用原外部 notify。
     if not _codex_notify_direct_is_ours(cur):
-        st["codex_prev_notify"] = cur
+        st[state_key] = cur
         _integration_state_save(st)
-    prev = st.get("codex_prev_notify")
-    if not _write_codex_wrapper(prev, forward_notify=prev):
+    prev = st.get(state_key)
+    if not _write_codex_wrapper(
+            prev, forward_notify=prev, config=config, wrapper=wrapper_path):
         return False
     try:
-        updated = _codex_set_notify(text, [wrapper])
+        updated = _codex_set_notify(text, [wrapper_command])
         if updated == text:
             return False
-        _atomic_write_text(_CODEX_CONFIG, updated)
+        _atomic_write_text(config, updated)
         return True
     except OSError:
         return False
 
 
-def _remove_codex_notify():
+def _remove_codex_notify(config=None, wrapper=None,
+                         state_key="codex_prev_notify"):
     """还原 config.toml 的 notify 为原值（备份里取），删 wrapper。"""
+    config = Path(config) if config is not None else _CODEX_CONFIG
+    wrapper_path = Path(wrapper) if wrapper is not None else _CODEX_WRAPPER
     st = _integration_state()
-    if _CODEX_CONFIG.exists():
+    if config.exists():
         try:
-            text = _CODEX_CONFIG.read_text()
+            text = config.read_text()
             cur = _codex_read_notify(text)
             if _codex_notify_direct_is_ours(cur):
-                updated = _codex_set_notify(text, st.get("codex_prev_notify"))
-                _atomic_write_text(_CODEX_CONFIG, updated)
+                updated = _codex_set_notify(text, st.get(state_key))
+                _atomic_write_text(config, updated)
             elif _codex_notify_is_ours(cur):
                 # 外部 owner 的链中只摘掉 AgentDeck，保留 owner 及其它 previous notify。
                 updated = _codex_set_notify(text, _codex_notify_without_ours(cur))
-                _atomic_write_text(_CODEX_CONFIG, updated)
-        except OSError:
+                _atomic_write_text(config, updated)
+        except (OSError, ValueError):
             pass
     try:
-        _CODEX_WRAPPER.unlink()
+        wrapper_path.unlink()
     except OSError:
         pass
+
+
+def _codex_notify_targets():
+    """One notify owner per quota-capable CODEX_HOME."""
+    targets = []
+    for src in codex_sources():
+        if src.get("session_only"):
+            continue
+        if src.get("is_default"):
+            wrapper = _CODEX_WRAPPER
+            state_key = "codex_prev_notify"
+        else:
+            digest = hashlib.sha256(
+                os.path.realpath(src["path"]).encode()).hexdigest()[:12]
+            wrapper = DATA_DIR / f"codex-notify-{digest}.sh"
+            state_key = f"codex_prev_notify_{digest}"
+        targets.append({
+            "config": src["path"] / "config.toml",
+            "wrapper": wrapper,
+            "state_key": state_key,
+        })
+    return targets
+
+
+def _saved_codex_notify_targets(state=None):
+    state = state if isinstance(state, dict) else _integration_state()
+    out = []
+    for raw in state.get("codex_notify_targets", []):
+        if not isinstance(raw, dict):
+            continue
+        config = raw.get("config")
+        wrapper = raw.get("wrapper")
+        state_key = raw.get("state_key")
+        if not all(isinstance(value, str) and value for value
+                   in (config, wrapper, state_key)):
+            continue
+        wrapper_path = Path(wrapper)
+        try:
+            wrapper_parent = os.path.realpath(wrapper_path.parent)
+        except (OSError, ValueError):
+            continue
+        if (wrapper_parent != os.path.realpath(DATA_DIR)
+                or not wrapper_path.name.startswith("codex-notify")
+                or wrapper_path.suffix != ".sh"
+                or Path(config).name != "config.toml"
+                or not state_key.startswith("codex_prev_notify")):
+            continue
+        out.append({
+            "config": Path(config),
+            "wrapper": wrapper_path,
+            "state_key": state_key,
+        })
+    return out
 
 
 def _codex_legacy_stop_entry_is_ours(entry):
@@ -2743,15 +3858,45 @@ def install_integration():
         _remove_legacy_codex_stop_hook()
         if _install_claude_hook():
             st = _integration_state(); st["claude_hook"] = True; _integration_state_save(st)
-        if _install_codex_notify():
-            st = _integration_state(); st["codex_notify"] = True; _integration_state_save(st)
+        targets = _codex_notify_targets()
+        current_configs = {os.path.realpath(target["config"]) for target in targets}
+        st = _integration_state()
+        stale_state_keys = []
+        for target in _saved_codex_notify_targets(st):
+            if os.path.realpath(target["config"]) not in current_configs:
+                _remove_codex_notify(**target)
+                stale_state_keys.append(target["state_key"])
+        changed = False
+        for target in targets:
+            changed = _install_codex_notify(**target) or changed
+        st = _integration_state()
+        for state_key in stale_state_keys:
+            st.pop(state_key, None)
+        st["codex_notify_targets"] = [
+            {key: str(target[key]) for key in ("config", "wrapper", "state_key")}
+            for target in targets
+        ]
+        if changed:
+            st["codex_notify"] = True
+        _integration_state_save(st)
 
 
 def remove_integration():
     """卸载 / 关开关时调用：还原我们的所有改动。"""
     with _integration_lock:
         _remove_claude_hook()
-        _remove_codex_notify()
+        st = _integration_state()
+        targets = _saved_codex_notify_targets(st) + _codex_notify_targets()
+        seen = set()
+        for target in targets:
+            key = os.path.realpath(target["config"])
+            if key in seen:
+                continue
+            seen.add(key)
+            _remove_codex_notify(**target)
+        # 升级自旧版 integration.json 时没有 target 列表，仍还原默认槽。
+        if os.path.realpath(_CODEX_CONFIG) not in seen:
+            _remove_codex_notify()
         _remove_legacy_codex_stop_hook()
         for f in (_HOOK_WRAPPER, INTEGRATION_FILE):
             try:
@@ -2899,6 +4044,12 @@ def _is_temp_cwd(cwd):
 def api_event(body):
     """接收 Claude Stop hook / Codex notify 包装脚本推来的完成事件。"""
     s = get_settings()
+    # 额度实时更新与“是否展示完成弹丸”是两条独立链路。即使用户关闭完成提醒，
+    # Codex notify 仍按 thread-id 精确刷新对应 rollout，不能退回 30s/10min 轮询。
+    if body.get("type") == "agent-turn-complete":
+        _codex_quota_manager.note_turn_complete(
+            body.get("thread-id") or body.get("thread_id") or "",
+            body.get("cwd") or "")
     if not s["notify_session_done"]:
         return {"ok": True, "skipped": "disabled"}
     tool, title, project, duration = None, "", "", None
@@ -3216,30 +4367,35 @@ def api_focus(body):
 # ------------------------------------------------- 额度采样 / 告警 / 历史曲线
 
 _alert_state = {}   # (tool, account_id, window_id) -> "normal" | "warn" | "crit"
+_alert_state_lock = threading.RLock()
 ALERT_STATE_FILE = DATA_DIR / "alert_state.json"
 
 
 def _alert_state_load():
     """告警状态跨重启持久化：同一次越阈只通知一次，重启不重发。"""
     try:
-        for k, v in json.loads(ALERT_STATE_FILE.read_text()).items():
-            parts = k.split("|", 2)
-            if len(parts) == 2:   # v2.1.2 及更早：仅主账号
-                tool, win = parts
-                account = "default"
-            elif len(parts) == 3:
-                tool, account, win = parts
-            else:
-                continue
-            _alert_state[(tool, account, win)] = v
+        loaded = json.loads(ALERT_STATE_FILE.read_text())
+        with _alert_state_lock:
+            for k, v in loaded.items():
+                parts = k.split("|", 2)
+                if len(parts) == 2:   # v2.1.2 及更早：仅主账号
+                    tool, win = parts
+                    account = "default"
+                elif len(parts) == 3:
+                    tool, account, win = parts
+                else:
+                    continue
+                _alert_state[(tool, account, win)] = v
     except (OSError, ValueError):
         pass
 
 
 def _alert_state_save():
     try:
-        _atomic_write_text(ALERT_STATE_FILE, json.dumps(
-            {f"{t}|{a}|{w}": v for (t, a, w), v in _alert_state.items()}))
+        with _alert_state_lock:
+            payload = {f"{t}|{a}|{w}": v
+                       for (t, a, w), v in _alert_state.items()}
+        _atomic_write_text(ALERT_STATE_FILE, json.dumps(payload))
     except OSError:
         pass
 
@@ -3269,22 +4425,23 @@ def _check_alerts(tool_name, windows, account_id="default", account_label="",
     display_tool = tool_name
     if show_account and account_label:
         display_tool = f"{tool_name} · {account_label}"
-    for w in windows:
-        key = (tool_name, account_id or "default", w.get("id") or w.get("label"))
-        pct = w.get("used_percent") or 0
-        prev = _alert_state.get(key, "normal")
-        cur = "crit" if pct >= crit_th else "warn" if pct >= warn_th else "normal"
-        # 按 id 本地化窗口标签（通知用当前语言，不受采样时缓存影响）
-        label = labels.get(w.get("id") or "", w.get("label", ""))
-        if cur != prev:
-            if cur == "crit":
-                _push_alert(tool_name, strs["crit"].format(tool=display_tool, label=label, pct=pct), "crit", sound)
-            elif cur == "warn" and prev == "normal":
-                _push_alert(tool_name, strs["warn"].format(tool=display_tool, label=label, pct=pct), "warn")
-            elif cur == "normal" and prev in ("warn", "crit") and s["notify_reset"]:
-                _push_alert(tool_name, strs["reset"].format(tool=display_tool, label=label, pct=pct), "reset", sound)
-            _alert_state[key] = cur
-            _alert_state_save()
+    with _alert_state_lock:
+        for w in windows:
+            key = (tool_name, account_id or "default", w.get("id") or w.get("label"))
+            pct = w.get("used_percent") or 0
+            prev = _alert_state.get(key, "normal")
+            cur = "crit" if pct >= crit_th else "warn" if pct >= warn_th else "normal"
+            # 按 id 本地化窗口标签（通知用当前语言，不受采样时缓存影响）
+            label = labels.get(w.get("id") or "", w.get("label", ""))
+            if cur != prev:
+                if cur == "crit":
+                    _push_alert(tool_name, strs["crit"].format(tool=display_tool, label=label, pct=pct), "crit", sound)
+                elif cur == "warn" and prev == "normal":
+                    _push_alert(tool_name, strs["warn"].format(tool=display_tool, label=label, pct=pct), "warn")
+                elif cur == "normal" and prev in ("warn", "crit") and s["notify_reset"]:
+                    _push_alert(tool_name, strs["reset"].format(tool=display_tool, label=label, pct=pct), "reset", sound)
+                _alert_state[key] = cur
+                _alert_state_save()
 
 
 def _sample_once():
@@ -4200,11 +5357,30 @@ def api_resume(body):
 # ----------------------------------------------------------------- HTTP 层
 
 _LOCAL_HTTP_HOSTS = {f"127.0.0.1:{PORT}", f"localhost:{PORT}"}
+_quota_wait_slots = threading.BoundedSemaphore(4)
 
 
 def _local_http_host(headers):
     """Only the loopback origin may address daemon APIs (DNS-rebinding barrier)."""
     return headers.get("Host", "").strip().lower() in _LOCAL_HTTP_HOSTS
+
+
+def _local_long_poll_request(headers):
+    """Reject browser cross-site requests that could occupy daemon worker threads."""
+    if not _local_http_host(headers):
+        return False
+    fetch_site = headers.get("Sec-Fetch-Site", "").strip().lower()
+    if fetch_site and fetch_site not in ("same-origin", "none"):
+        return False
+    origin = headers.get("Origin", "")
+    if not origin:
+        return True
+    try:
+        parsed = urllib.parse.urlparse(origin)
+    except ValueError:
+        return False
+    return parsed.scheme == "http" and parsed.netloc.lower() in _LOCAL_HTTP_HOSTS
+
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "agentdeck/1.0"
@@ -4230,8 +5406,24 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, {"ok": True, "pid": os.getpid(),
                                  "version": VERSION})
             elif path == "/api/quota":
+                force = query.get("force", ["0"])[0] in ("1", "true")
+                fresh_codex = query.get("fresh_codex", ["0"])[0] in ("1", "true")
+                if not _local_long_poll_request(self.headers):
+                    return self._send(403, {"error": "forbidden"})
                 self._send(200, api_quota(
-                    force=query.get("force", ["0"])[0] in ("1", "true")))
+                    force=force,
+                    cache_only=query.get("cached", ["0"])[0] in ("1", "true"),
+                    fresh_codex=fresh_codex))
+            elif path == "/api/quota/changes":
+                if not _local_long_poll_request(self.headers):
+                    self._send(403, {"error": "forbidden"})
+                elif not _quota_wait_slots.acquire(blocking=False):
+                    self._send(429, {"error": "too many quota watchers"})
+                else:
+                    try:
+                        self._send(200, api_quota_changes(query))
+                    finally:
+                        _quota_wait_slots.release()
             elif path == "/api/diag":
                 self._send(200, api_diag())
             elif path == "/api/sessions":
@@ -4272,6 +5464,8 @@ class Handler(BaseHTTPRequestHandler):
                            "text/html; charset=utf-8")
             else:
                 self._send(404, {"error": "not found"})
+        except (BrokenPipeError, ConnectionResetError):
+            pass
         except Exception as exc:
             self._send(500, {"error": str(exc)})
 
@@ -4333,12 +5527,17 @@ def main():
     _alert_state_load()
     _ensure_session_index_started()
     install_integration()   # 启动即自动接好完成事件钩子（幂等、只合并不覆盖）
+    _codex_quota_manager.start()
     threading.Thread(target=_parent_watchdog, daemon=True).start()
     threading.Thread(target=_sampler_loop, daemon=True).start()
     threading.Thread(target=_keepawake_loop, daemon=True).start()
     server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     print(f"agentdeckd listening on http://127.0.0.1:{PORT}")
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    finally:
+        server.server_close()
+        _codex_quota_manager.stop()
 
 
 if __name__ == "__main__":

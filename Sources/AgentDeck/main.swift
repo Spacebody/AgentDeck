@@ -630,6 +630,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         // 设置变更 → 即时重绘菜单栏（语言/常显用量/告警阈值等，等价 v1 "sync" 桥消息）
         store.onSettingsChanged = { [weak self] in self?.updateIconState() }
+        store.onQuotaChanged = { [weak self] in self?.updateIconState() }
 
         ensureBackend { [weak self] in
             DispatchQueue.main.async {
@@ -1207,7 +1208,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     // MARK: - 额度状态映射到 icon 颜色
     func updateIconState() {
-        guard let url = URL(string: "\(kBase)/api/quota") else { return }
+        // 菜单栏只读 daemon 已有快照，绝不因 Codex 实时更新顺带触发慢速 Claude 出站。
+        guard let url = URL(string: "\(kBase)/api/quota?cached=1") else { return }
         kDirectSession.dataTask(with: url) { [weak self] data, _, _ in
             guard let data,
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]

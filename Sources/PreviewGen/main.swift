@@ -3,9 +3,9 @@
 import Foundation
 import AgentDeckKit
 
-// 用法：PreviewGen [overview|codexonly|visibilityoff|visibilityon|quotacases|quotadual|quotaduplicate|quotaharmony|charts|chartsfiltered|sessions|settings|widget|widgetsizes|widgetfour|widgetstress|root|widgetroot] [outPath]
+// 用法：PreviewGen [overview|codexonly|visibilityoff|visibilityon|quotacases|quotadual|quotaclaude|quotaduplicate|quotaharmony|charts|chartsfiltered|sessions|settings|widget|widgetsizes|widgetfour|widgetstress|root|widgetroot] [outPath]
 var args = Array(CommandLine.arguments.dropFirst())
-let mode = ["overview", "codexonly", "visibilityoff", "visibilityon", "quotacases", "quotadual", "quotaduplicate", "quotaharmony", "charts", "chartsfiltered",
+let mode = ["overview", "codexonly", "visibilityoff", "visibilityon", "quotacases", "quotadual", "quotaclaude", "quotaduplicate", "quotaharmony", "charts", "chartsfiltered",
             "sessions", "settings", "widget", "widgetsizes", "widgetfour", "widgetstress", "root", "widgetroot", "carousel"].contains(args.first)
     ? args.removeFirst() : "overview"
 let outPath = args.first ?? "/tmp/agentdeck-\(mode).png"
@@ -23,6 +23,7 @@ let data = MainActor.assumeIsolated { () -> Data? in
     case "visibilityon": return PreviewRender.agentVisibilityOnPNG()
     case "quotacases": return PreviewRender.quotaCasesPNG()
     case "quotadual":  return PreviewRender.quotaDualCasesPNG()
+    case "quotaclaude": return PreviewRender.quotaClaudeCasesPNG()
     case "quotaduplicate": return PreviewRender.quotaDuplicatePNG()
     case "quotaharmony": return PreviewRender.quotaHarmonyPNG()
     case "charts":     return PreviewRender.chartsPNG()

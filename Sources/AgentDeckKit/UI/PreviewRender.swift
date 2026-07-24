@@ -43,7 +43,7 @@ public enum PreviewRender {
         store.settings["show_claude"] = .bool(false)
         store.settings["show_codex"] = .bool(true)
         store.quota = PreviewSamples.response
-        return png(AgentDeckRootView(previewStore: store, version: "2.4.0")
+        return png(AgentDeckRootView(previewStore: store, version: "2.5.0")
             .frame(width: 420, height: 920), scale: scale)
     }
 
@@ -54,19 +54,21 @@ public enum PreviewRender {
         store.settings["show_claude"] = .bool(true)
         store.settings["show_codex"] = .bool(true)
         store.quota = PreviewSamples.codexOnlyResponse
-        return png(AgentDeckRootView(previewStore: store, version: "2.4.0")
+        return png(AgentDeckRootView(previewStore: store, version: "2.5.0")
             .frame(width: 420, height: 920), scale: scale)
     }
 
     /// 额度卡窗口数矩阵：1 个用整行条，2...5 个用左环右 1...4 条。
     public static func quotaCasesPNG(scale: CGFloat = 2) -> Data? {
+        let sampledNow = ISO8601DateFormatter().string(from: Date())
         let one = quotaNode([
             PreviewSamples.win("seven_day", "周限额", 23, resetIn: 6 * 86400),
         ])
         let two = quotaNode([
-            PreviewSamples.win("seven_day", "周限额", 84, resetIn: 3 * 86400),
-            PreviewSamples.win("five_hour", "5 小时窗口", 35, resetIn: 2 * 3600),
-        ])
+            PreviewSamples.win("seven_day", "周限额", 53, resetIn: 4 * 86400),
+            PreviewSamples.win("gpt-5.3-codex-spark", "GPT-5.3-Codex-Spark", 0,
+                               resetIn: 6 * 86400),
+        ], sampledAt: sampledNow)
         let three = quotaNode([
             PreviewSamples.win("seven_day", "周限额", 62, resetIn: 3 * 86400),
             PreviewSamples.win("five_hour", "5 小时窗口", 35, resetIn: 2 * 3600),
@@ -116,6 +118,50 @@ public enum PreviewRender {
                 dualQuotaCase("双 Agent · 1 + 1 个额度", claude: one, codex: one)
                 dualQuotaCase("双 Agent · 2 + 1 个额度", claude: two, codex: one)
                 dualQuotaCase("双 Agent · 3 + 2 个额度", claude: three, codex: two)
+            }
+        }, scale: scale)
+    }
+
+    /// Claude 宽卡矩阵：验证 1 个额度整行条，以及 2...5 个额度的 1:2 环条布局。
+    public static func quotaClaudeCasesPNG(scale: CGFloat = 2) -> Data? {
+        let one = quotaNode([
+            PreviewSamples.win("seven_day", "周限额", 23, resetIn: 6 * 86400),
+        ])
+        let two = quotaNode([
+            PreviewSamples.win("five_hour", "5 小时窗口", 35, resetIn: 2 * 3600),
+            PreviewSamples.win("seven_day", "周限额", 62, resetIn: 3 * 86400),
+        ])
+        let three = quotaNode([
+            PreviewSamples.win("five_hour", "5 小时窗口", 35, resetIn: 2 * 3600),
+            PreviewSamples.win("seven_day", "周限额", 62, resetIn: 3 * 86400),
+            PreviewSamples.win("seven_day_opus", "周限额 · Opus", 88,
+                               resetIn: 3 * 86400),
+        ])
+        let four = quotaNode([
+            PreviewSamples.win("five_hour", "5 小时窗口", 35, resetIn: 2 * 3600),
+            PreviewSamples.win("seven_day", "周限额", 62, resetIn: 3 * 86400),
+            PreviewSamples.win("seven_day_sonnet", "周限额 · Sonnet", 71,
+                               resetIn: 3 * 86400),
+            PreviewSamples.win("seven_day_opus", "周限额 · Opus", 88,
+                               resetIn: 3 * 86400),
+        ])
+        let five = quotaNode([
+            PreviewSamples.win("five_hour", "5 小时窗口", 35, resetIn: 2 * 3600),
+            PreviewSamples.win("seven_day", "周限额", 62, resetIn: 3 * 86400),
+            PreviewSamples.win("seven_day_sonnet", "周限额 · Sonnet", 71,
+                               resetIn: 3 * 86400),
+            PreviewSamples.win("seven_day_opus", "周限额 · Opus", 88,
+                               resetIn: 3 * 86400),
+            PreviewSamples.win("seven_day_oauth_apps", "周限额 · OAuth Apps", 0,
+                               resetIn: 3 * 86400),
+        ])
+        return png(PanelChrome(height: 1120) {
+            VStack(spacing: 12) {
+                quotaCase("Claude · 1 个额度", brand: .claude, node: one)
+                quotaCase("Claude · 2 个额度", brand: .claude, node: two)
+                quotaCase("Claude · 3 个额度", brand: .claude, node: three)
+                quotaCase("Claude · 4 个额度", brand: .claude, node: four)
+                quotaCase("Claude · 5 个额度", brand: .claude, node: five)
             }
         }, scale: scale)
     }
@@ -293,16 +339,18 @@ public enum PreviewRender {
         }, scale: scale)
     }
 
-    private static func quotaNode(_ windows: [QuotaWindow]) -> QuotaNode {
+    private static func quotaNode(_ windows: [QuotaWindow],
+                                  sampledAt: String? = nil) -> QuotaNode {
         QuotaNode(ok: true, hidden: false, accountId: nil, account: nil, isDefault: true,
-                  kind: nil, windows: windows, error: nil, noQuota: nil, sampledAt: nil,
+                  kind: nil, windows: windows, error: nil, noQuota: nil, sampledAt: sampledAt,
                   stale: nil, credits: nil, raw: nil)
     }
 
-    private static func quotaCase(_ title: String, node: QuotaNode) -> some View {
+    private static func quotaCase(_ title: String, brand: Brand = .codex,
+                                  node: QuotaNode) -> some View {
         VStack(alignment: .leading, spacing: 5) {
             Text(title).font(.system(size: 10, weight: .semibold)).foregroundStyle(Theme.ink2)
-            QuotaCardView(brand: .codex, node: node)
+            QuotaCardView(brand: brand, node: node)
         }
     }
 

@@ -65,6 +65,14 @@ actor APIClient {
         // A cache-version upgrade may require one full 30-day JSONL rebuild.
         // Keep the stricter default for every other loopback endpoint.
         if path == "/api/usage" { request.timeoutInterval = 45 }
+        // 手动额度刷新可能等待正在执行的 Codex 校准，再查询多个账号。
+        // 普通缓存读取仍保留 20s，只有明确 force 时放宽。
+        if path == "/api/quota", query["force"] == "1" {
+            request.timeoutInterval = 120
+        }
+        // 额度变化端点由 daemon 最多挂起 30s；客户端超时须略长于服务端，
+        // 否则正常心跳会被误判为断线并形成重连循环。
+        if path == "/api/quota/changes" { request.timeoutInterval = 35 }
         let (data, resp) = try await session.data(for: request)
         try Self.check(resp)
         return try decoder.decode(T.self, from: data)

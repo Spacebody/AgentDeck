@@ -52,6 +52,63 @@ func hasUnattemptedSettingChanges(
     }
 }
 
+/// Serializes quota snapshots arriving from ordinary requests and the daemon's push channel.
+/// Push snapshots cover failures from requests already in flight, but a matching-revision
+/// ordinary response may still be more complete (for example, freshly fetched Claude quota).
+struct QuotaSnapshotGate {
+    private(set) var bootId = ""
+    private(set) var revision = 0
+    private var nextRequest = 0
+    private var pushCoveredThroughRequest = 0
+    private var lastAppliedRequest = 0
+
+    mutating func beginRequest() -> Int {
+        nextRequest += 1
+        return nextRequest
+    }
+
+    func canReportFailure(for request: Int) -> Bool {
+        request > pushCoveredThroughRequest
+            && request >= lastAppliedRequest
+            && request == nextRequest
+    }
+
+    mutating func accept(
+        bootId incomingBoot: String?,
+        revision incomingRevision: Int?,
+        request: Int?
+    ) -> Bool {
+        let incomingBoot = incomingBoot ?? ""
+        let incomingRevision = incomingRevision ?? 0
+
+        let sameBoot = !incomingBoot.isEmpty && incomingBoot == bootId
+        if sameBoot {
+            if incomingRevision < revision { return false }
+            if request == nil, incomingRevision == revision { return false }
+        }
+        if let request, request < lastAppliedRequest {
+            // A slower request may still carry a newer daemon snapshot. Request order
+            // only breaks ties; revision order remains authoritative within one boot.
+            guard sameBoot && incomingRevision > revision else { return false }
+        }
+
+        if let request {
+            lastAppliedRequest = max(lastAppliedRequest, request)
+        } else {
+            pushCoveredThroughRequest = nextRequest
+        }
+        if !incomingBoot.isEmpty {
+            if incomingBoot != bootId {
+                bootId = incomingBoot
+                revision = incomingRevision
+            } else {
+                revision = max(revision, incomingRevision)
+            }
+        }
+        return true
+    }
+}
+
 @MainActor
 public final class AppStore: ObservableObject {
     // 仅初始化默认值，无需主线程隔离 → nonisolated，便于主壳在属性声明处直接构造。
@@ -59,6 +116,8 @@ public final class AppStore: ObservableObject {
 
     /// 设置变更后回调（主壳据此即时重绘菜单栏图标，等价 v1 的 "sync" 桥消息）。
     public var onSettingsChanged: (() -> Void)?
+    /// daemon 额度 revision 变化后回调；主壳据此即时重绘菜单栏，不等 20s 兜底轮询。
+    public var onQuotaChanged: (() -> Void)?
 
     @Published var quota: QuotaResponse?
     @Published var usage: UsageResponse?
@@ -97,6 +156,7 @@ public final class AppStore: ObservableObject {
 
     private let api = APIClient.shared
     private var pollTask: Task<Void, Never>?
+    private var quotaWatchTask: Task<Void, Never>?
     private var searchTask: Task<Void, Never>?
     private var sessionIndexRetryTask: Task<Void, Never>?
     private var sessionCursor: String?
@@ -108,6 +168,7 @@ public final class AppStore: ObservableObject {
     private var settingsMutationVersion = 0
     private var settingMutationVersions: [String: Int] = [:]
     private var acknowledgedSettingVersions: [String: Int] = [:]
+    private var quotaGate = QuotaSnapshotGate()
 
     private var refreshInterval: Double { Double(max(5, settings["refresh_interval"]?.intVal ?? 30)) }
 
@@ -123,25 +184,26 @@ public final class AppStore: ObservableObject {
                 try? await Task.sleep(nanoseconds: UInt64(secs * 1_000_000_000))
             }
         }
+        quotaWatchTask?.cancel()
+        quotaWatchTask = Task { [weak self] in
+            await self?.watchQuotaChanges()
+        }
     }
     public func stop() {
         pollTask?.cancel(); pollTask = nil
+        quotaWatchTask?.cancel(); quotaWatchTask = nil
         searchTask?.cancel(); searchTask = nil
         sessionIndexRetryTask?.cancel(); sessionIndexRetryTask = nil
         agentVisibilityRefreshTask?.cancel(); agentVisibilityRefreshTask = nil
     }
 
-    /// 开面板时调用：只走缓存做一次「即时同步」，不强刷。
-    /// 关键——菜单栏图标(main.swift)与面板读的是 daemon 同一份额度缓存（key=claude_quota/codex_quota，
-    /// TTL=quota_interval）。面板若在开窗时强刷(force)，会去打 Anthropic：①期间面板仍显示上一轮旧值、
-    /// 要等数秒出站返回才更新（"打开面板还没更新"）；②强刷拿到的新鲜值会高于菜单栏的缓存值，两者数字对不上
-    /// （"没保持一致节奏"）；③还会吃掉 daemon 的 10s 防连点闸，紧接着点🔄手动刷新被去重而"刷了没反应"。
-    /// 故开窗只做本地快刷（<50ms 读缓存）即与菜单栏对齐；要拿实时最新值由用户点🔄(force)显式触发。
-    public func refreshOnOpen() async { await refresh() }
+    /// 开面板立即读取 daemon 快照；Codex 超过 30s 未经官方校准时只在后台发起校准，
+    /// 返回路径不等待出站。Claude 仍走原缓存，避免开窗动作消耗其限流严格的 usage 接口。
+    public func refreshOnOpen() async { await refresh(freshCodex: true) }
 
     /// force=true 时给 /api/quota 带 ?force=1 绕过后端额度缓存、强制重采（对应 v1 手动刷新 refreshAll(true)）；
     /// 周期轮询用 false 走缓存，避免每轮都出站打 Anthropic。
-    public func refresh(force: Bool = false) async {
+    public func refresh(force: Bool = false, freshCodex: Bool = false) async {
         // 6 个接口并发拉取（旧实现串行 → 启动/手动刷新要等全部之和；quota 还出站打 Anthropic 最慢，
         // 串行时它把整屏都拖住）。APIClient 是 actor，并发 get 在各自 await 网络处挂起、互不阻塞。
         // 只在默认列表仍处于第一页时参与周期刷新；用户已加载更多时不把长列表
@@ -150,7 +212,14 @@ public final class AppStore: ObservableObject {
         let needSessions = sessionQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && sessionPageCount <= 1 && !sessionsLoading
         let sessionParams = sessionRequestParams(cursor: nil)
-        async let quotaR:    QuotaResponse?    = try? await api.get("/api/quota", query: force ? ["force": "1"] : [:])
+        let quotaQuery: [String: String] = {
+            var query: [String: String] = [:]
+            if force { query["force"] = "1" }
+            if freshCodex { query["fresh_codex"] = "1" }
+            return query
+        }()
+        let quotaRequest = quotaGate.beginRequest()
+        async let quotaR:    QuotaResponse?    = try? await api.get("/api/quota", query: quotaQuery)
         async let usageR:    UsageResponse?    = try? await api.get("/api/usage")
         async let activeR:   ActiveResponse?   = try? await api.get("/api/active")
         async let eventsR:   EventsResponse?   = try? await api.get("/api/events", query: ["recent": "4"])
@@ -174,8 +243,58 @@ public final class AppStore: ObservableObject {
             applySessionPage(s, reset: true, generation: sessionGeneration)
         }
         let (q, up) = await (quotaR, updateR)
-        if let q { quota = q; online = true } else { online = false }
+        if let q {
+            applyQuota(q, request: quotaRequest)
+        } else if quotaGate.canReportFailure(for: quotaRequest) {
+            online = false
+        }
         if let up { update = up }
+    }
+
+    /// 单一长轮询连接接收额度 revision。服务端 25s 心跳、客户端 35s 超时；
+    /// 无变化时不发布 ObservableObject 更新，daemon 重启则用 bootId 立即重建游标。
+    private func watchQuotaChanges() async {
+        var retryNanos: UInt64 = 500_000_000
+        while !Task.isCancelled {
+            do {
+                let response: QuotaChangesResponse = try await api.get(
+                    "/api/quota/changes",
+                    query: [
+                        "after": String(quotaGate.revision),
+                        "boot": quotaGate.bootId,
+                        "timeout": "25",
+                    ])
+                guard !Task.isCancelled else { return }
+                online = true
+                _ = applyQuota(
+                    response.quota,
+                    bootId: response.bootId,
+                    revision: response.revision,
+                    request: nil)
+                retryNanos = 500_000_000
+            } catch {
+                guard !Task.isCancelled else { return }
+                try? await Task.sleep(nanoseconds: retryNanos)
+                retryNanos = min(retryNanos * 2, 5_000_000_000)
+            }
+        }
+    }
+
+    @discardableResult
+    private func applyQuota(
+        _ response: QuotaResponse,
+        bootId: String? = nil,
+        revision: Int? = nil,
+        request: Int?
+    ) -> Bool {
+        guard quotaGate.accept(
+            bootId: bootId ?? response.quotaBootId,
+            revision: revision ?? response.quotaRevision,
+            request: request) else { return false }
+        quota = response
+        online = true
+        onQuotaChanged?()
+        return true
     }
 
     // MARK: 设置
@@ -328,9 +447,12 @@ public final class AppStore: ObservableObject {
         guard agentOn("claude") || agentOn("codex") else { return }
         agentVisibilityRefreshTask = Task { [weak self] in
             guard let self else { return }
+            let quotaRequest = self.quotaGate.beginRequest()
             let refreshed: QuotaResponse? = try? await self.api.get("/api/quota")
             guard !Task.isCancelled else { return }
-            if let refreshed { self.quota = refreshed; self.online = true }
+            if let refreshed {
+                self.applyQuota(refreshed, request: quotaRequest)
+            }
             self.agentVisibilityRefreshTask = nil
         }
     }

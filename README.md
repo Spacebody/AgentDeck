@@ -42,7 +42,7 @@ AgentDeck 将 Claude Code 与 Codex 的额度监控、会话管理与用量统�
 - 实时聚合 Claude 官方额度（5 小时 / 7 天窗口）与 Codex rate limits
 - 多账号并行：自动发现多个 Claude 配置目录（`CLAUDE_CONFIG_DIR` / `~/.claude-*` / shell 启动文件），逐账号查询额度，面板轮播切换、菜单栏可按间隔轮显各账号
 - 菜单栏常显用量百分比（可配置显示单端 / 双端 / 隐藏；数字与变色各自可选 5h / 周 / 最吃紧窗口）
-- 额度查询间隔可调（默认 10 分钟，可至 6 小时），按需降低官方接口调用频率以缓解多账号限流
+- Claude 额度查询间隔可调（默认 10 分钟，可至 6 小时）；Codex 由完成事件实时更新，并由 CLI 自带 app-server 周期校准
 - 窗口重置进度条；额度临界与回满的系统通知（阈值可配置）
 
 **会话管理**
@@ -136,7 +136,8 @@ scripts/             图标与 DMG 背景生成、Codex notify 包装、CSRF 回
 | Claude 额度 | 钥匙串中 Claude Code 的 OAuth 凭据 → `api.anthropic.com/api/oauth/usage` | 以用户本人凭据查询本人额度；多账号时按配置目录各自精确取对应凭据 |
 | 版本检查 | `agentdeck.yilin.dev/version.json`（静态清单，6 小时缓存） | 仅比对版本号，不携带凭据或本机信息；可在设置中关闭 |
 | Claude 用量 / 会话 | 解析已发现的各 Claude 配置目录下 `projects/**/*.jsonl` | token 统计、成本估算；会话标题、路径等头部元数据增量写入本地 SQLite 索引 |
-| Codex 额度 / 用量 / 会话 | 解析本地 `~/.codex/sessions` rollout 文件 | 同上；搜索和分页只读元数据索引，不逐次扫描原始会话 |
+| Codex 额度 | Codex CLI `app-server` 的 `account/rateLimits/read`，完成事件时辅以对应 rollout 的最新快照 | 不读取或转发登录 token；app-server 不可用时自动降级到有界本地解析 |
+| Codex 用量 / 会话 | 解析本地 `~/.codex/sessions` rollout 文件 | token 统计；搜索和分页只读元数据索引，不逐次扫描原始会话 |
 | 完成事件 | AgentDeck 自动安装的 Claude Stop hook / Codex notify wrapper 回调（见会话完成提醒集成） | 完成提醒与事件流 |
 
 运行时产物：数据目录 `~/Library/Application Support/AgentDeck/`，日志 `~/Library/Logs/AgentDeck.log`。其中 `claude_usage_cache.json`、`codex_usage_cache.json` 与 `session_index.sqlite3` 均为可重建缓存；会话索引只保存标题、项目、路径、分支、时间与文件指纹，不保存完整对话正文。`pins.json` 是置顶状态真源，`path_mappings.json` 保存用户确认的工程迁移路径；删除数据库不会丢失这两类用户状态，只会触发后台重建索引。

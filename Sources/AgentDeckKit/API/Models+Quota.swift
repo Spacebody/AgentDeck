@@ -8,7 +8,35 @@ struct QuotaResponse: Decodable {
     let codex: QuotaNode?
     let accounts: QuotaAccounts?
     let menubar: MenubarConfig?
+    let quotaRevision: Int?
+    let quotaBootId: String?
     let ts: Double?
+
+    init(
+        claude: QuotaNode?,
+        codex: QuotaNode?,
+        accounts: QuotaAccounts?,
+        menubar: MenubarConfig?,
+        quotaRevision: Int? = nil,
+        quotaBootId: String? = nil,
+        ts: Double?
+    ) {
+        self.claude = claude
+        self.codex = codex
+        self.accounts = accounts
+        self.menubar = menubar
+        self.quotaRevision = quotaRevision
+        self.quotaBootId = quotaBootId
+        self.ts = ts
+    }
+}
+
+/// `/api/quota/changes` 长轮询响应。bootId 处理 daemon 重启后 revision 回绕；
+/// quota 始终来自 daemon 内存快照，不会在实时通道里触发慢速外部查询。
+struct QuotaChangesResponse: Decodable {
+    let bootId: String
+    let revision: Int
+    let quota: QuotaResponse
 }
 
 struct QuotaAccounts: Decodable {
