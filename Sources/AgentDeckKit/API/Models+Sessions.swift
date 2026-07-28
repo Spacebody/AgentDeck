@@ -8,6 +8,8 @@ struct SessionsResponse: Decodable {
     let total: Int?
     let hasMore: Bool?
     let nextCursor: String?
+    let revision: Int?
+    let cursorStale: Bool?
     let indexing: Bool?
     let indexedAt: Double?
     let indexProgress: SessionIndexProgress?

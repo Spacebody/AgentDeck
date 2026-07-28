@@ -50,6 +50,29 @@ class HTTPBoundaryTests(unittest.TestCase):
         self.assertEqual(sent, [(429, {"error": "too many quota watchers"})])
         changes.assert_not_called()
 
+    def test_event_long_poll_requires_same_origin_and_rejects_excess_waiters(self):
+        handler = object.__new__(daemon.Handler)
+        handler.path = "/api/events?since=1&wait=25"
+        sent = []
+        handler._send = lambda code, payload, ctype="": sent.append((code, payload))
+        with mock.patch.object(daemon, "api_events") as events:
+            handler.headers = {
+                "Host": "127.0.0.1:7777",
+                "Sec-Fetch-Site": "cross-site",
+                "Origin": "https://attacker.example",
+            }
+            handler.do_GET()
+            self.assertEqual(sent, [(403, {"error": "forbidden"})])
+            events.assert_not_called()
+
+            sent.clear()
+            handler.headers = {"Host": "127.0.0.1:7777"}
+            slots = SimpleNamespace(acquire=lambda blocking=False: False)
+            with mock.patch.object(daemon, "_event_wait_slots", slots):
+                handler.do_GET()
+            self.assertEqual(sent, [(429, {"error": "too many event watchers"})])
+            events.assert_not_called()
+
     def test_cross_site_request_cannot_trigger_quota_refresh(self):
         for query in ("", "force=1", "fresh_codex=1"):
             with self.subTest(query=query):
@@ -76,6 +99,110 @@ class HTTPBoundaryTests(unittest.TestCase):
         handler._send = lambda code, payload, ctype="": sent.append((code, payload))
         handler.do_GET()
         self.assertEqual(sent, [(403, {"error": "forbidden"})])
+
+
+class EventLongPollTests(unittest.TestCase):
+    def setUp(self):
+        with daemon._events_change:
+            self.events = list(daemon._events)
+            self.event_seq = daemon._event_seq
+            self.event_keys = list(daemon._event_keys)
+            self.event_key_set = set(daemon._event_key_set)
+            self.event_key_times = dict(daemon._event_key_times)
+            daemon._events.clear()
+            daemon._event_keys.clear()
+            daemon._event_key_set.clear()
+            daemon._event_key_times.clear()
+            daemon._event_seq = 0
+
+    def tearDown(self):
+        with daemon._events_change:
+            daemon._events.clear()
+            daemon._events.extend(self.events)
+            daemon._event_keys.clear()
+            daemon._event_keys.extend(self.event_keys)
+            daemon._event_key_set.clear()
+            daemon._event_key_set.update(self.event_key_set)
+            daemon._event_key_times.clear()
+            daemon._event_key_times.update(self.event_key_times)
+            daemon._event_seq = self.event_seq
+            daemon._events_change.notify_all()
+
+    def test_event_long_poll_wakes_when_event_is_queued(self):
+        result = {}
+
+        def wait_for_event():
+            result.update(daemon.api_events({
+                "since": ["0"], "wait": ["1"],
+                "boot": [daemon._event_boot_id],
+            }))
+
+        waiter = threading.Thread(target=wait_for_event)
+        waiter.start()
+        time.sleep(0.05)
+        self.assertTrue(waiter.is_alive())
+
+        event = {
+            "id": 1, "tool": "codex", "session": "session-1",
+            "cwd": "/tmp/project", "title": "done", "project": "project",
+            "duration": 1, "ts": time.time(),
+        }
+        with daemon._events_change:
+            daemon._event_seq = 1
+            daemon._events.append(event)
+            daemon._events_change.notify_all()
+
+        waiter.join(timeout=0.5)
+        self.assertFalse(waiter.is_alive())
+        self.assertEqual(result["events"], [event])
+        self.assertEqual(result["last"], 1)
+
+    def test_stale_boot_returns_without_waiting_on_reset_sequence(self):
+        started = time.monotonic()
+        result = daemon.api_events({
+            "since": ["77"], "wait": ["1"], "boot": ["old-boot"],
+        })
+
+        self.assertLess(time.monotonic() - started, 0.2)
+        self.assertEqual(result["boot_id"], daemon._event_boot_id)
+        self.assertEqual(result["events"], [])
+
+    def test_same_turn_is_deduplicated_but_later_turn_with_same_title_is_kept(self):
+        base = {
+            "type": "agent-turn-complete",
+            "thread-id": "019fa64d-043a-7512-aaf1-3a7a58f36c9d",
+            "cwd": "/Users/test/project",
+            "input-messages": ["same title"],
+        }
+        settings = dict(daemon.DEFAULT_SETTINGS, notify_session_done=True)
+        with mock.patch.object(daemon, "get_settings", return_value=settings), \
+                mock.patch.object(daemon._codex_quota_manager, "note_turn_complete"), \
+                mock.patch.object(daemon, "_events_persist"), \
+                mock.patch.object(daemon, "_request_session_index_scan"):
+            first = daemon.api_event({**base, "turn-id": "turn-1"})
+            duplicate = daemon.api_event({**base, "turn-id": "turn-1"})
+            later = daemon.api_event({**base, "turn-id": "turn-2"})
+
+        self.assertEqual(first["queued"], 1)
+        self.assertEqual(duplicate["skipped"], "duplicate")
+        self.assertEqual(later["queued"], 2)
+
+    def test_stable_turn_remains_deduplicated_after_heuristic_window(self):
+        key = daemon._event_key({
+            "tool": "codex", "session": "session-1", "cwd": "/work/project",
+            "title": "same title", "turn": "turn-1",
+        })
+        self.assertTrue(daemon._remember_event_key(key, 100))
+        self.assertFalse(daemon._remember_event_key(key, 160))
+
+    def test_heuristic_same_title_is_allowed_after_short_retry_window(self):
+        key = daemon._event_key({
+            "tool": "codex", "session": "session-1", "cwd": "/work/project",
+            "title": "same title",
+        })
+        self.assertTrue(daemon._remember_event_key(key, 100))
+        self.assertFalse(daemon._remember_event_key(key, 101))
+        self.assertTrue(daemon._remember_event_key(key, 103))
 
 
 class ClaudeQuotaTests(unittest.TestCase):
@@ -705,14 +832,19 @@ class SessionIndexTests(unittest.TestCase):
         original = daemon._session_file_info
         with mock.patch.object(daemon, "_session_file_info", wraps=original) as parse:
             daemon._session_index_scan()
+            revision = daemon._query_session_index(limit=10)["revision"]
             self.assertEqual(parse.call_count, 3)
             daemon._session_index_scan()
             self.assertEqual(parse.call_count, 3)
+            self.assertEqual(
+                daemon._query_session_index(limit=10)["revision"], revision)
             with paths[0].open("a") as handle:
                 handle.write(json.dumps({"type": "event_msg", "payload": {
                     "type": "agent_message", "message": "later"}}) + "\n")
             daemon._session_index_scan()
             self.assertEqual(parse.call_count, 3)
+            self.assertGreater(
+                daemon._query_session_index(limit=10)["revision"], revision)
 
     def test_keyset_pagination_returns_every_session_once(self):
         base = self.source()
@@ -729,6 +861,21 @@ class SessionIndexTests(unittest.TestCase):
             cursor = page["next_cursor"]
         self.assertEqual(len(seen), 75)
         self.assertEqual(len(set(seen)), 75)
+
+    def test_changed_index_invalidates_cursor_and_returns_new_first_page(self):
+        base = self.source()
+        for index in range(6):
+            self.write_codex(base, index, f"session {index}")
+        daemon._session_index_scan()
+        first = daemon._query_session_index(limit=2)
+        target = daemon._query_session_index(limit=10)["sessions"][-1]
+
+        daemon.api_pin({"pinned": True, "session": target})
+        refreshed = daemon._query_session_index(
+            limit=2, cursor=first["next_cursor"])
+
+        self.assertTrue(refreshed["cursor_stale"])
+        self.assertEqual(refreshed["sessions"][0]["id"], target["id"])
 
     def test_same_session_id_isolated_by_account_for_pin_and_preview(self):
         default = self.source("default")
@@ -833,7 +980,7 @@ class SessionIndexTests(unittest.TestCase):
         self.write_codex(base, 1, "first")
         daemon._session_index_scan()
         malformed = daemon.base64.urlsafe_b64encode(json.dumps({
-            "v": 1, "scope": daemon._cursor_scope("", "all")
+            "v": 2, "scope": daemon._cursor_scope("", "all")
         }).encode()).decode().rstrip("=")
         result = daemon._query_session_index(limit=10, cursor=malformed)
         self.assertEqual(result["total"], 1)
@@ -1436,6 +1583,16 @@ class CodexQuotaRealtimeTests(unittest.TestCase):
 
         self.assertEqual(result["skipped"], "disabled")
         refresh.assert_called_once_with(body["thread-id"], body["cwd"])
+
+    def test_turn_completion_after_quota_manager_stop_is_ignored(self):
+        manager = daemon.CodexQuotaManager()
+        manager.stop()
+
+        with mock.patch.object(daemon, "_codex_rollout_for_thread") as locate:
+            manager.note_turn_complete("stopped-thread", "/work/project")
+
+        locate.assert_not_called()
+        self.assertNotIn("stopped-thread", manager._pending_threads)
 
     def test_older_rollout_event_cannot_replace_newer_official_snapshot(self):
         manager = daemon.CodexQuotaManager()

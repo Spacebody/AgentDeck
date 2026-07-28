@@ -9,6 +9,9 @@ struct SessionsView: View {
     var filter: String = "all"
     var total: Int = 0
     var hasMore: Bool = false
+    var page: Int = 1
+    var pageCount: Int = 1
+    var pageSize: Int = 20
     var loading: Bool = false
     var indexing: Bool = false
     var loadFailed: Bool = false
@@ -22,7 +25,9 @@ struct SessionsView: View {
     /// 搜索词/工具筛选由 AppStore 持有，切换 Tab 后仍保持一致。
     var onSearch: (String) -> Void = { _ in }
     var onFilter: (String) -> Void = { _ in }
-    var onLoadMore: () -> Void = {}
+    var onPreviousPage: () -> Void = {}
+    var onNextPage: () -> Void = {}
+    var onPageSize: (Int) -> Void = { _ in }
     /// 预览期可注入：默认展开某行 + 预置预览内容（静态渲染验证用）。
     var initialExpanded: String? = nil
     var seededPreviews: [String: [PreviewMsg]] = [:]
@@ -32,11 +37,15 @@ struct SessionsView: View {
     @State private var previewOrder: [String] = []
     @State private var previewMtimes: [String: Double] = [:]
     @State private var latestMtimes: [String: Double] = [:]
+    @State private var showingCustomPageSize = false
+    @State private var customPageSizeText = ""
     @FocusState private var searchFocused: Bool
+    @FocusState private var customPageSizeFocused: Bool
 
     init(sessions: [SessionItem], scrollable: Bool = true,
          query: String = "", filter: String = "all", total: Int = 0,
-         hasMore: Bool = false, loading: Bool = false,
+         hasMore: Bool = false, page: Int = 1, pageCount: Int = 1,
+         pageSize: Int = 20, loading: Bool = false,
          indexing: Bool = false, loadFailed: Bool = false,
          onResume: @escaping (SessionItem) -> Void = { _ in },
          onCopy: @escaping (SessionItem) -> Void = { _ in },
@@ -46,16 +55,21 @@ struct SessionsView: View {
          loadPreview: @escaping (SessionItem) async -> [PreviewMsg] = { _ in [] },
          onSearch: @escaping (String) -> Void = { _ in },
          onFilter: @escaping (String) -> Void = { _ in },
-         onLoadMore: @escaping () -> Void = {},
+         onPreviousPage: @escaping () -> Void = {},
+         onNextPage: @escaping () -> Void = {},
+         onPageSize: @escaping (Int) -> Void = { _ in },
          initialExpanded: String? = nil, seededPreviews: [String: [PreviewMsg]] = [:]) {
         self.sessions = sessions; self.scrollable = scrollable
         self.query = query; self.filter = filter; self.total = total
         self.hasMore = hasMore; self.loading = loading
+        self.page = page; self.pageCount = pageCount; self.pageSize = pageSize
         self.indexing = indexing; self.loadFailed = loadFailed
         self.onResume = onResume; self.onCopy = onCopy; self.onPin = onPin
         self.onRelocate = onRelocate; self.onForgetPath = onForgetPath
         self.loadPreview = loadPreview
-        self.onSearch = onSearch; self.onFilter = onFilter; self.onLoadMore = onLoadMore
+        self.onSearch = onSearch; self.onFilter = onFilter
+        self.onPreviousPage = onPreviousPage; self.onNextPage = onNextPage
+        self.onPageSize = onPageSize
         self.initialExpanded = initialExpanded; self.seededPreviews = seededPreviews
         _expandedKey = State(initialValue: initialExpanded)
         _previews = State(initialValue: seededPreviews)
@@ -70,8 +84,10 @@ struct SessionsView: View {
             header
             if sessions.isEmpty {
                 emptyState
+                if page > 1 { pagination }
             } else {
                 if scrollable { ScrollView { rows }.scrollIndicators(.hidden) } else { rows }
+                pagination
             }
         }
         .onChange(of: sessions.map { "\($0.rowKey)|\($0.mtime)" }) { _ in
@@ -97,7 +113,6 @@ struct SessionsView: View {
             }
             if indexing { statusRow("session.indexing", spinning: true) }
             if loadFailed { statusRow("session.loadFailed", spinning: false) }
-            if hasMore { loadMoreButton }
         }
     }
 
@@ -120,16 +135,135 @@ struct SessionsView: View {
         .frame(maxWidth: .infinity).padding(.vertical, 9)
     }
 
-    private var loadMoreButton: some View {
-        Button(action: onLoadMore) {
-            HStack(spacing: 6) {
-                if loading { ProgressView().controlSize(.small).scaleEffect(0.7) }
-                else { Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold)) }
-                Text(L("session.loadMore")).font(.system(size: 9.5, weight: .semibold))
+    private var pagination: some View {
+        HStack(spacing: 8) {
+            Menu {
+                ForEach(Array(Set([10, 20, 30, 50, pageSize])).sorted(), id: \.self) { size in
+                    Button {
+                        onPageSize(size)
+                    } label: {
+                        if size == pageSize {
+                            Label("\(size)", systemImage: "checkmark")
+                        } else {
+                            Text("\(size)")
+                        }
+                    }
+                }
+                Divider()
+                Button {
+                    customPageSizeText = String(pageSize)
+                    DispatchQueue.main.async { showingCustomPageSize = true }
+                } label: {
+                    Label(L("session.customPageSize"), systemImage: "number")
+                }
+            } label: {
+                HStack(spacing: 4) {
+                    Text(L("session.perPage", ["n": "\(pageSize)"]))
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.system(size: 7.5, weight: .semibold))
+                }
+                .font(.system(size: 9.5, weight: .medium))
+                .foregroundStyle(Theme.ink2)
+                .padding(.horizontal, 9)
+                .frame(height: 26)
+                .background(Capsule().fill(Color.white.opacity(0.055)))
+                .overlay(Capsule().strokeBorder(Theme.edge, lineWidth: 1))
             }
-            .foregroundStyle(Theme.ink2).frame(maxWidth: .infinity).padding(.vertical, 8)
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .popover(isPresented: $showingCustomPageSize, arrowEdge: .bottom) {
+                customPageSizeEditor
+            }
+
+            Spacer(minLength: 4)
+
+            Text(L("session.pageOf", ["page": "\(page)", "pages": "\(pageCount)"]))
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(Theme.ink3)
+                .monospacedDigit()
+                .fixedSize()
+
+            pageButton(
+                system: "chevron.left", help: L("session.previousPage"),
+                disabled: page <= 1, action: onPreviousPage)
+            pageButton(
+                system: "chevron.right", help: L("session.nextPage"),
+                disabled: !hasMore, action: onNextPage)
         }
-        .buttonStyle(.plain).disabled(loading)
+        .frame(maxWidth: .infinity)
+        .padding(.top, 3)
+    }
+
+    static func parseCustomPageSize(_ input: String) -> Int? {
+        let text = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let value = Int(text), (5...100).contains(value) else { return nil }
+        return value
+    }
+
+    private var parsedCustomPageSize: Int? {
+        Self.parseCustomPageSize(customPageSizeText)
+    }
+
+    private var customPageSizeEditor: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(L("session.customPageSizeTitle"))
+                .font(.system(size: 12.5, weight: .semibold))
+                .foregroundStyle(Theme.ink)
+
+            TextField("", text: $customPageSizeText)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 12))
+                .multilineTextAlignment(.trailing)
+                .frame(width: 88)
+                .focused($customPageSizeFocused)
+                .onSubmit { applyCustomPageSize() }
+
+            Text(L("session.pageSizeRange"))
+                .font(.system(size: 10.5))
+                .foregroundStyle(parsedCustomPageSize == nil ? Theme.danger : Theme.ink3)
+
+            HStack(spacing: 8) {
+                Spacer()
+                Button(L("session.cancel")) {
+                    showingCustomPageSize = false
+                }
+                .buttonStyle(.bordered)
+
+                Button(L("session.applyPageSize")) {
+                    applyCustomPageSize()
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+                .disabled(parsedCustomPageSize == nil || loading)
+            }
+            .controlSize(.small)
+        }
+        .padding(14)
+        .frame(width: 230)
+        .onAppear { customPageSizeFocused = true }
+    }
+
+    private func applyCustomPageSize() {
+        guard let size = parsedCustomPageSize else { return }
+        onPageSize(size)
+        showingCustomPageSize = false
+    }
+
+    private func pageButton(
+        system: String, help: String, disabled: Bool, action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: system)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(disabled ? Theme.ink3.opacity(0.45) : Theme.ink2)
+                .frame(width: 26, height: 26)
+                .background(Circle().fill(Color.white.opacity(disabled ? 0.025 : 0.055)))
+                .overlay(Circle().strokeBorder(Theme.edge, lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .disabled(disabled || loading)
+        .help(help)
+        .accessibilityLabel(help)
     }
 
     private func toggle(_ s: SessionItem) {
@@ -170,7 +304,7 @@ struct SessionsView: View {
                 .foregroundStyle(Theme.ink).lineLimit(1)
                 .fixedSize(horizontal: true, vertical: false)
             if total > 0 {
-                Text("\(total)").font(.system(size: 9, weight: .semibold)).foregroundStyle(Theme.ink3)
+                Text("\(total)").font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.ink3)
                     .monospacedDigit()
             }
         }

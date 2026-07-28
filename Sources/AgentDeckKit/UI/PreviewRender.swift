@@ -43,7 +43,7 @@ public enum PreviewRender {
         store.settings["show_claude"] = .bool(false)
         store.settings["show_codex"] = .bool(true)
         store.quota = PreviewSamples.response
-        return png(AgentDeckRootView(previewStore: store, version: "2.5.1")
+        return png(AgentDeckRootView(previewStore: store, version: "2.6.0")
             .frame(width: 420, height: 920), scale: scale)
     }
 
@@ -54,7 +54,7 @@ public enum PreviewRender {
         store.settings["show_claude"] = .bool(true)
         store.settings["show_codex"] = .bool(true)
         store.quota = PreviewSamples.codexOnlyResponse
-        return png(AgentDeckRootView(previewStore: store, version: "2.5.1")
+        return png(AgentDeckRootView(previewStore: store, version: "2.6.0")
             .frame(width: 420, height: 920), scale: scale)
     }
 
@@ -231,7 +231,7 @@ public enum PreviewRender {
         let firstKey = PreviewSamples.sessions.first!.rowKey
         return png(PanelChrome(height: 560) {
             SessionsView(sessions: PreviewSamples.sessions, scrollable: false,
-                         total: 92, hasMore: true,
+                         total: 92, hasMore: true, page: 2, pageCount: 5, pageSize: 20,
                          initialExpanded: firstKey, seededPreviews: [firstKey: PreviewSamples.previewMsgs])
         }, scale: scale)
     }

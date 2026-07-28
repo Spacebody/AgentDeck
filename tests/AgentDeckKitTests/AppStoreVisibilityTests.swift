@@ -182,6 +182,18 @@ final class AppStoreVisibilityTests: XCTestCase {
         XCTAssertEqual(gate.revision, 1)
     }
 
+    @MainActor
+    func testSessionPageCountUsesSelectedPageSize() {
+        let store = AppStore()
+        store.sessionsTotal = 95
+
+        store.sessionPageSize = 20
+        XCTAssertEqual(store.sessionPageCount, 5)
+
+        store.sessionPageSize = 50
+        XCTAssertEqual(store.sessionPageCount, 2)
+    }
+
     func testNamedCodexWindowsRetainTheirKnownDuration() {
         let weekly = QuotaWindow(
             id: "seven_day_codex-bengalfox", label: "GPT-5.3-Codex-Spark",

@@ -452,6 +452,11 @@ final class IslandController {
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+    private struct StoredEventCursor: Codable {
+        let bootId: String
+        let lastEventId: Int
+    }
+
     /// 界面缩放系数（随「字体大小」设置）。UserDefaults 持久化保证启动即生效；
     /// 窗口尺寸的存取均以「未缩放基准值」为准（存÷取×），避免缩放系数复利叠加。
     var uiScale: CGFloat = {
@@ -522,9 +527,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         w.invalidateShadow()
     }
 
-    /// 恢复用的面板基准尺寸（未缩放）：有保存值用保存值（允许小于默认），否则用默认。
+    /// 恢复用的面板基准尺寸（未缩放）。自动测高可能在数据尚未加载时得到很小的值，
+    /// 因此已保存高度只用于记住更高的内容，不能把下次打开压到默认高度以下。
     func savedPanelW() -> CGFloat { let v = UserDefaults.standard.double(forKey: "panelW"); return v > 0 ? CGFloat(v) : kPanelW }
-    func savedPanelH() -> CGFloat { let v = UserDefaults.standard.double(forKey: "panelH"); return v > 0 ? CGFloat(v) : kPanelH }
+    func savedPanelH() -> CGFloat {
+        let v = CGFloat(UserDefaults.standard.double(forKey: "panelH"))
+        return max(kPanelH, v)
+    }
 
     private func savePanelSize(_ w: NSWindow) {
         let d = UserDefaults.standard
@@ -547,11 +556,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var widgetHost: HostController?
     var backend: Process?
     var pollTimer: Timer?
-    var eventTimer: Timer?
+    var eventTask: Task<Void, Never>?
     var lastEventId = 0
-    var eventsPrimed = false
     var eventBootId: String?
-    var retiredEventBootIds = Set<String>()
     var loaded = false
     // 菜单栏明暗变化 → 重绘混色图标，改用系统主题分布式通知（见 didFinishLaunching），不再 KVO 自激
 
@@ -579,7 +586,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let vis = screen.visibleFrame
         let f = p.frame
         let maxH = f.maxY - (vis.minY + 8)            // 顶边到屏幕底的可用高
-        let h = min(max(target, 200 * uiScale), maxH)  // 下限 200，上限屏幕可用
+        // 数据加载前的短暂空态不能把主面板压矮并持久化；正常屏幕至少维持默认高度，
+        // 小屏幕仍由 maxH 封顶，超出内容继续交给内部 ScrollView。
+        let h = min(max(target, kPanelH * uiScale), maxH)
         guard abs(h - f.height) > 2 else { return }    // 抖动抑制
         lastFitH = h
         p.setFrame(NSRect(x: f.minX, y: f.maxY - h, width: f.width, height: h), display: true)
@@ -605,6 +614,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var mbPrimary: [MBItem] = []   // 每 tool 仅主账号一段，不轮转时显示（=今天行为）
     var rotateSecs = 0
     var rotateIdx = 0
+
+    override init() {
+        let defaults = UserDefaults.standard
+        if let data = defaults.data(forKey: "eventCursor"),
+           let cursor = try? JSONDecoder().decode(StoredEventCursor.self, from: data),
+           !cursor.bootId.isEmpty, cursor.lastEventId >= 0 {
+            eventBootId = cursor.bootId
+            lastEventId = cursor.lastEventId
+        } else if let legacyBoot = defaults.string(forKey: "eventBootId"),
+                  !legacyBoot.isEmpty,
+                  defaults.object(forKey: "eventLastId") != nil {
+            // 旧版使用两个 key；仅在两者同时存在时迁移，避免异常退出留下高位孤立 ID。
+            eventBootId = legacyBoot
+            lastEventId = max(0, defaults.integer(forKey: "eventLastId"))
+        }
+        super.init()
+        if eventBootId != nil { persistEventCursor() }
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -659,11 +686,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         IslandController.shared.onTap = { [weak self] event in
             self?.focusSession(event)
         }
-        // 省电：完成事件轮询 2.5→5s + tolerance，唤醒减半且可被系统合并（完成提醒晚几秒可接受）。
-        eventTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.pollEvents() }
+        // daemon 事件长轮询：事件入队即唤醒，不依赖隐藏菜单栏 App 可能被 App Nap
+        // 延迟的 Timer；同一时刻只有一个请求，事件 id 仍负责端到端去重。
+        eventTask = Task { [weak self] in
+            await self?.watchEvents()
         }
-        eventTimer?.tolerance = 1.5
     }
 
     func focusSession(_ event: IslandController.Event?) {
@@ -685,62 +712,94 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }.resume()
     }
 
-    func pollEvents() {
-        guard let url = URL(string: "\(kBase)/api/events?since=\(lastEventId)") else { return }
-        kDirectSession.dataTask(with: url) { [weak self] data, _, _ in
-            guard let self, let data,
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let events = json["events"] as? [[String: Any]] else { return }
-            DispatchQueue.main.async {
-                if let boot = json["boot_id"] as? String {
-                    if self.retiredEventBootIds.contains(boot) { return }
-                    if let previous = self.eventBootId, previous != boot {
-                        self.retiredEventBootIds.insert(previous)
-                        self.eventBootId = boot
-                        self.lastEventId = 0
-                        // daemon 已过滤 replayed 事件；重新从 0 拉取时只会得到本次启动后
-                        // 真正发生的完成事件，因此可直接推送而无需再次静默 prime。
-                        self.eventsPrimed = true
-                        self.pollEvents()
-                        return
-                    }
-                    self.eventBootId = boot
-                }
-                if let secs = json["island_secs"] as? Double {
-                    IslandController.shared.dwellSecs = secs
-                } else if let secs = json["island_secs"] as? Int {
-                    IslandController.shared.dwellSecs = Double(secs)
-                }
-                if let loc = json["locale"] as? String { appLocale = loc }   // 三层语言一致
-                // 首次轮询只对齐游标不弹窗（壳重启而 daemon 存活时，避免重放历史事件）
-                let primed = self.eventsPrimed
-                self.eventsPrimed = true
-                for ev in events {
-                    // 按事件 id 去重：并发/重叠轮询（如休眠唤醒后）可能用同一 since 重复返回同一事件，
-                    // 仅当 id 严格大于已处理游标才弹，杜绝同一完成重复提醒。main 队列串行 → 无数据竞争。
-                    guard let id = ev["id"] as? Int, id > self.lastEventId else { continue }
-                    self.lastEventId = id
-                    guard primed else { continue }   // 首轮只推进游标、不弹
-                    let kind = ev["kind"] as? String ?? ""
-                    if kind == "alert", ev["sound"] as? Bool ?? false {
-                        NSSound(named: "Glass")?.play()   // 严重/恢复带提示音（设置 notify_sound）
-                    }
-                    IslandController.shared.push((
-                        tool: ev["tool"] as? String ?? "claude",
-                        title: ev["title"] as? String ?? "",
-                        project: ev["project"] as? String ?? "",
-                        session: ev["session"] as? String ?? "",
-                        cwd: ev["cwd"] as? String ?? "",
-                        kind: kind,
-                        level: ev["level"] as? String ?? ""))
-                }
-                // 推进游标到全局 last（跳过重放事件 id），下轮 since 不再回取
-                if let last = json["last"] as? Int { self.lastEventId = max(self.lastEventId, last) }
+    func watchEvents() async {
+        var retryNanos: UInt64 = 300_000_000
+        while !Task.isCancelled {
+            var components = URLComponents(string: "\(kBase)/api/events")
+            var items = [
+                URLQueryItem(name: "since", value: "\(lastEventId)"),
+                URLQueryItem(name: "wait", value: "25"),
+            ]
+            if let eventBootId {
+                items.append(URLQueryItem(name: "boot", value: eventBootId))
             }
-        }.resume()
+            components?.queryItems = items
+            guard let url = components?.url else { return }
+            var request = URLRequest(url: url)
+            request.timeoutInterval = 35
+            do {
+                let (data, response) = try await kDirectSession.data(for: request)
+                guard (response as? HTTPURLResponse)?.statusCode == 200,
+                      let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let events = json["events"] as? [[String: Any]] else {
+                    throw URLError(.badServerResponse)
+                }
+                _ = applyEventResponse(json, events: events)
+                retryNanos = 300_000_000
+            } catch {
+                if Task.isCancelled { return }
+                try? await Task.sleep(nanoseconds: retryNanos)
+                retryNanos = min(retryNanos * 2, 5_000_000_000)
+            }
+        }
+    }
+
+    private func applyEventResponse(
+        _ json: [String: Any], events: [[String: Any]]
+    ) -> Bool {
+        if let boot = json["boot_id"] as? String {
+            if let previous = eventBootId, previous != boot {
+                eventBootId = boot
+                lastEventId = 0
+                persistEventCursor()
+                return false
+            }
+            eventBootId = boot
+        }
+        if let secs = json["island_secs"] as? Double {
+            IslandController.shared.dwellSecs = secs
+        } else if let secs = json["island_secs"] as? Int {
+            IslandController.shared.dwellSecs = Double(secs)
+        }
+        if let loc = json["locale"] as? String { appLocale = loc }
+        for ev in events {
+            guard let id = ev["id"] as? Int, id > lastEventId else { continue }
+            lastEventId = id
+            let kind = ev["kind"] as? String ?? ""
+            if kind == "alert", ev["sound"] as? Bool ?? false {
+                NSSound(named: "Glass")?.play()
+            }
+            IslandController.shared.push((
+                tool: ev["tool"] as? String ?? "claude",
+                title: ev["title"] as? String ?? "",
+                project: ev["project"] as? String ?? "",
+                session: ev["session"] as? String ?? "",
+                cwd: ev["cwd"] as? String ?? "",
+                kind: kind,
+                level: ev["level"] as? String ?? ""))
+        }
+        if let last = json["last"] as? Int { lastEventId = max(lastEventId, last) }
+        persistEventCursor()
+        return true
+    }
+
+    private func persistEventCursor() {
+        let defaults = UserDefaults.standard
+        guard let eventBootId,
+              let data = try? JSONEncoder().encode(StoredEventCursor(
+                bootId: eventBootId, lastEventId: lastEventId
+              )) else {
+            defaults.removeObject(forKey: "eventCursor")
+            return
+        }
+        // boot + id 必须作为同一份 Data 原子落盘；分开写会在异常退出时形成高位孤立 ID。
+        defaults.set(data, forKey: "eventCursor")
+        defaults.removeObject(forKey: "eventLastId")
+        defaults.removeObject(forKey: "eventBootId")
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        eventTask?.cancel()
         backend?.terminate()
     }
 
@@ -933,8 +992,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // 尺寸：恢复用户上次拖拽的大小，高度不超过屏幕可视范围
         let bFrame = bw.convertToScreen(button.convert(button.bounds, to: nil))
         let vis = (bw.screen ?? NSScreen.main!).visibleFrame
-        // 直接用「上次保存的尺寸」恢复（不再跟默认值取 max——那会禁止用户把面板改小，
-        // 表现为「拉小后重开又变回默认大小」）。最小尺寸由窗口 minSize(420×600) 兜底；高度按屏高封顶。
+        // 宽度恢复用户上次拖拽值；高度恢复最近内容高度，但 savedPanelH 会以默认高度
+        // 为下限，避免启动空态把下次打开永久压矮。小屏幕仍按可用屏高封顶。
         let w = savedPanelW() * uiScale
         let maxH = bFrame.minY - 6 - (vis.minY + 8)   // 图标下沿到屏幕底的可用高度
         let h = min(savedPanelH() * uiScale, maxH)

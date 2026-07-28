@@ -131,6 +131,8 @@ public final class AppStore: ObservableObject {
     @Published var sessionFilter = "all"
     @Published var sessionsTotal = 0
     @Published var sessionsHasMore = false
+    @Published var sessionPage = 1
+    @Published var sessionPageSize = 20
     @Published var sessionsLoading = false
     @Published var sessionsIndexing = false
     @Published var sessionsLoadFailed = false
@@ -159,9 +161,9 @@ public final class AppStore: ObservableObject {
     private var quotaWatchTask: Task<Void, Never>?
     private var searchTask: Task<Void, Never>?
     private var sessionIndexRetryTask: Task<Void, Never>?
-    private var sessionCursor: String?
+    private var sessionNextCursor: String?
+    private var sessionPageCursors: [String?] = [nil]
     private var sessionRequestGeneration = 0
-    private var sessionPageCount = 0
     private var pendingSettingValues: [String: SettingValue] = [:]
     private var settingsSaveTask: Task<Void, Never>?
     private var agentVisibilityRefreshTask: Task<Void, Never>?
@@ -206,11 +208,11 @@ public final class AppStore: ObservableObject {
     public func refresh(force: Bool = false, freshCodex: Bool = false) async {
         // 6 个接口并发拉取（旧实现串行 → 启动/手动刷新要等全部之和；quota 还出站打 Anthropic 最慢，
         // 串行时它把整屏都拖住）。APIClient 是 actor，并发 get 在各自 await 网络处挂起、互不阻塞。
-        // 只在默认列表仍处于第一页时参与周期刷新；用户已加载更多时不把长列表
+        // 只在默认列表仍处于第一页时参与周期刷新；用户翻到后页时不把当前页
         // 突然替换回第一页。搜索由独立 generation 管理，轮询绝不覆盖搜索结果。
         let sessionGeneration = sessionRequestGeneration
         let needSessions = sessionQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && sessionPageCount <= 1 && !sessionsLoading
+            && sessionPage == 1 && !sessionsLoading
         let sessionParams = sessionRequestParams(cursor: nil)
         let quotaQuery: [String: String] = {
             var query: [String: String] = [:]
@@ -239,8 +241,10 @@ public final class AppStore: ObservableObject {
         if needSessions, let s,
            sessionGeneration == sessionRequestGeneration,
            sessionQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-           sessionPageCount <= 1, !sessionsLoading {
-            applySessionPage(s, reset: true, generation: sessionGeneration)
+           sessionPage == 1, !sessionsLoading {
+            applySessionPage(
+                s, targetPage: 1, requestedCursor: nil,
+                resetHistory: true, generation: sessionGeneration)
         }
         let (q, up) = await (quotaR, updateR)
         if let q {
@@ -324,6 +328,18 @@ public final class AppStore: ObservableObject {
             acknowledgedVersionsAtRequest: acknowledgementsAtRequest)
         applyCustomColors()
         I18N.locale = I18N.resolve(settings["language"]?.stringVal ?? "auto")
+        let loadedPageSize = min(100, max(5, settings["sessions_limit"]?.intVal ?? 20))
+        if loadedPageSize != sessionPageSize {
+            sessionPageSize = loadedPageSize
+            sessionRequestGeneration += 1
+            let generation = sessionRequestGeneration
+            searchTask?.cancel()
+            sessionIndexRetryTask?.cancel()
+            invalidateSessionNavigation()
+            searchTask = Task { [weak self] in
+                await self?.loadSessionPage(reset: true, generation: generation)
+            }
+        }
     }
 
     func loadTerminals() async {
@@ -332,6 +348,9 @@ public final class AppStore: ObservableObject {
 
     func setSetting(_ key: String, _ value: SettingValue) {
         stageSetting(key, value)
+        if key == "sessions_limit" {
+            sessionPageSize = min(100, max(5, value.intVal))
+        }
         normalizeNotificationThresholds(changed: key)
         applyCustomColors()
         if key == "language" { I18N.locale = I18N.resolve(value.stringVal) }
@@ -342,6 +361,7 @@ public final class AppStore: ObservableObject {
             let generation = sessionRequestGeneration
             searchTask?.cancel()
             sessionIndexRetryTask?.cancel()
+            invalidateSessionNavigation()
             searchTask = Task { [weak self] in
                 await self?.loadSessionPage(reset: true, generation: generation)
             }
@@ -507,15 +527,17 @@ public final class AppStore: ObservableObject {
     }
 
     func pin(_ s: SessionItem) async {
+        sessionRequestGeneration += 1
+        let generation = sessionRequestGeneration
+        searchTask?.cancel()
+        sessionIndexRetryTask?.cancel()
+        invalidateSessionNavigation()
         let session: [String: Any] = [
             "tool": s.tool, "id": s.id, "title": s.title ?? "", "cwd": s.cwd ?? "",
             "project": s.project ?? "", "branch": s.branch ?? "", "mtime": s.mtime,
             "account": s.account ?? "", "account_id": s.accountId ?? "",
         ]
         _ = try? await api.postJSON("/api/pin", body: ["pinned": !(s.pinned ?? false), "session": session])
-        sessionRequestGeneration += 1
-        let generation = sessionRequestGeneration
-        searchTask?.cancel()
         await loadSessionPage(reset: true, generation: generation)
     }
 
@@ -539,6 +561,7 @@ public final class AppStore: ObservableObject {
         let generation = sessionRequestGeneration
         searchTask?.cancel()
         sessionIndexRetryTask?.cancel()
+        invalidateSessionNavigation()
         let query = q.trimmingCharacters(in: .whitespacesAndNewlines)
         if query.isEmpty {
             searchTask = Task { [weak self] in
@@ -561,18 +584,54 @@ public final class AppStore: ObservableObject {
         let generation = sessionRequestGeneration
         searchTask?.cancel()
         sessionIndexRetryTask?.cancel()
+        invalidateSessionNavigation()
         searchTask = Task { [weak self] in
             await self?.loadSessionPage(reset: true, generation: generation)
         }
     }
 
-    func loadMoreSessions() {
-        guard sessionsHasMore, !sessionsLoading, sessionCursor != nil else { return }
-        sessionsLoading = true
+    func nextSessionPage() {
+        guard sessionsHasMore, !sessionsLoading, let cursor = sessionNextCursor else { return }
+        sessionRequestGeneration += 1
         let generation = sessionRequestGeneration
+        let targetPage = sessionPage + 1
         Task { [weak self] in
-            await self?.loadSessionPage(reset: false, generation: generation)
+            await self?.loadSessionPage(
+                cursor: cursor, targetPage: targetPage,
+                resetHistory: false, generation: generation)
         }
+    }
+
+    func previousSessionPage() {
+        guard sessionPage > 1, !sessionsLoading,
+              sessionPage - 2 < sessionPageCursors.count else { return }
+        sessionRequestGeneration += 1
+        let generation = sessionRequestGeneration
+        let targetPage = sessionPage - 1
+        let cursor = sessionPageCursors[targetPage - 1]
+        Task { [weak self] in
+            await self?.loadSessionPage(
+                cursor: cursor, targetPage: targetPage,
+                resetHistory: false, generation: generation)
+        }
+    }
+
+    func setSessionPageSize(_ size: Int) {
+        let normalized = min(100, max(5, size))
+        guard normalized != sessionPageSize else { return }
+        setSetting("sessions_limit", .int(normalized))
+    }
+
+    var sessionPageCount: Int {
+        max(1, Int(ceil(Double(sessionsTotal) / Double(max(1, sessionPageSize)))))
+    }
+
+    private func invalidateSessionNavigation() {
+        sessionPage = 1
+        sessionsHasMore = false
+        sessionNextCursor = nil
+        sessionPageCursors = [nil]
+        sessionsLoading = true
     }
 
     private func sessionRequestParams(cursor: String?) -> [String: String] {
@@ -587,28 +646,39 @@ public final class AppStore: ObservableObject {
             if claude != codex { effectiveTool = claude ? "claude" : "codex" }
         }
         if effectiveTool != "all" { params["tool"] = effectiveTool }
-        let perTool = min(100, max(5, settings["sessions_limit"]?.intVal ?? 15))
-        params["limit"] = String(perTool * (effectiveTool == "all" ? 2 : 1))
+        params["limit"] = String(sessionPageSize)
         if let cursor, !cursor.isEmpty { params["cursor"] = cursor }
         return params
     }
 
     private func loadSessionPage(reset: Bool, generation: Int) async {
+        await loadSessionPage(
+            cursor: nil, targetPage: 1,
+            resetHistory: reset, generation: generation)
+    }
+
+    private func loadSessionPage(
+        cursor: String?, targetPage: Int,
+        resetHistory: Bool, generation: Int
+    ) async {
         guard generation == sessionRequestGeneration else { return }
         if sessionFilter == "all" && !agentOn("claude") && !agentOn("codex") {
             sessions = []; sessionsTotal = 0; sessionsHasMore = false
             sessionsLoading = false; sessionsIndexing = false; sessionsLoadFailed = false
-            sessionCursor = nil; sessionPageCount = 1
+            sessionNextCursor = nil; sessionPageCursors = [nil]; sessionPage = 1
             return
         }
         sessionsLoading = true
         sessionsLoadFailed = false
-        let cursor = reset ? nil : sessionCursor
         do {
             let response: SessionsResponse = try await api.get(
                 "/api/sessions", query: sessionRequestParams(cursor: cursor))
             guard generation == sessionRequestGeneration, !Task.isCancelled else { return }
-            applySessionPage(response, reset: reset, generation: generation)
+            let cursorStale = response.cursorStale ?? false
+            applySessionPage(
+                response, targetPage: cursorStale ? 1 : targetPage,
+                requestedCursor: cursorStale ? nil : cursor,
+                resetHistory: resetHistory || cursorStale, generation: generation)
         } catch {
             guard generation == sessionRequestGeneration, !Task.isCancelled else { return }
             sessionsLoading = false
@@ -616,21 +686,22 @@ public final class AppStore: ObservableObject {
         }
     }
 
-    private func applySessionPage(_ response: SessionsResponse, reset: Bool, generation: Int) {
+    private func applySessionPage(
+        _ response: SessionsResponse, targetPage: Int,
+        requestedCursor: String?, resetHistory: Bool, generation: Int
+    ) {
         guard generation == sessionRequestGeneration else { return }
-        if reset {
-            sessions = response.sessions
-            sessionPageCount = 1
-        } else {
-            var seen = Set(sessions.map(\.rowKey))
-            for session in response.sessions where seen.insert(session.rowKey).inserted {
-                sessions.append(session)
-            }
-            sessionPageCount += 1
+        sessions = response.sessions
+        if resetHistory {
+            sessionPageCursors = [nil]
+        } else if targetPage > sessionPage {
+            sessionPageCursors = Array(sessionPageCursors.prefix(targetPage - 1))
+            sessionPageCursors.append(requestedCursor)
         }
+        sessionPage = targetPage
         sessionsTotal = response.total ?? sessions.count
         sessionsHasMore = response.hasMore ?? false
-        sessionCursor = response.nextCursor
+        sessionNextCursor = response.nextCursor
         sessionsIndexing = response.indexing ?? false
         sessionsLoading = false
         sessionsLoadFailed = response.indexError != nil

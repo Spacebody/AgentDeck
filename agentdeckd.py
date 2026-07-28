@@ -155,7 +155,7 @@ DEFAULT_SETTINGS = {
     "show_active": True,       # 活跃会话卡片
     "show_claude": True,       # 面板展示 Claude 板块（只用 Codex 的用户可关）
     "show_codex": True,        # 面板展示 Codex 板块（只用 Claude 的用户可关）
-    "sessions_limit": 15,      # 每端会话列表数量
+    "sessions_limit": 20,      # 会话列表每页数量
     "refresh_interval": 30,    # 前端自动刷新（秒）
     "sample_interval": 180,    # 历史曲线采样间隔（秒）——只影响记录密度，不决定查询频率
     "quota_interval": 600,     # Claude 额度查询间隔（秒）；Codex 使用事件驱动 + 独立校准
@@ -1399,12 +1399,15 @@ class CodexQuotaManager:
 
     def stop(self):
         self._stop.set()
-        with self._lock:
-            clients = list(self._clients.values())
-            self._clients.clear()
-        for client in clients:
-            client.retire()
-        self._executor.shutdown(wait=True, cancel_futures=True)
+        # 与强刷/对账共用 gate：先等当前批次收束，再关闭 executor。等待中的批次
+        # 随后拿到 gate 时会看到 _stop，不会向已关闭 executor 继续 submit。
+        with self._refresh_gate:
+            with self._lock:
+                clients = list(self._clients.values())
+                self._clients.clear()
+            for client in clients:
+                client.retire()
+            self._executor.shutdown(wait=True, cancel_futures=True)
 
     def _periodic_loop(self):
         while not self._stop.wait(CODEX_RECONCILE_SECS):
@@ -1488,6 +1491,8 @@ class CodexQuotaManager:
         return len(results) == len(sources) and all(results)
 
     def _run_refresh_locked(self):
+        if self._stop.is_set():
+            return False
         success = False
         try:
             success = self._refresh_all_locked()
@@ -1571,12 +1576,6 @@ class CodexQuotaManager:
     def note_turn_complete(self, thread_id, cwd=""):
         if not isinstance(thread_id, str) or not thread_id:
             return
-        now = time.monotonic()
-        with self._lock:
-            previous = self._pending_threads.get(thread_id, 0)
-            if now - previous < 2:
-                return
-            self._pending_threads[thread_id] = now
 
         def run():
             try:
@@ -1593,7 +1592,20 @@ class CodexQuotaManager:
                 with self._lock:
                     self._pending_threads.pop(thread_id, None)
 
-        self._executor.submit(run)
+        now = time.monotonic()
+        with self._lock:
+            if self._stop.is_set():
+                return
+            previous = self._pending_threads.get(thread_id, 0)
+            if now - previous < 2:
+                return
+            self._pending_threads[thread_id] = now
+            # stop() 也先获取 _lock 再关闭 executor；检查和 submit 处于同一临界区，
+            # 避免退出瞬间向已 shutdown 的线程池提交任务。
+            try:
+                self._executor.submit(run)
+            except RuntimeError:
+                self._pending_threads.pop(thread_id, None)
 
     def _apply(self, src, quota, observed_at, official=False):
         if not isinstance(quota, dict) or not quota.get("ok"):
@@ -2401,6 +2413,8 @@ def _session_index_scan():
                         writes += 1
                         if writes % 50 == 0 and writes != committed_writes:
                             _rebuild_session_rows(conn)
+                            _sync_pins_to_db(conn)
+                            _update_session_revision_if_changed(conn)
                             conn.commit()
                             committed_writes = writes
                         if offset % 25 == 0:
@@ -2410,6 +2424,7 @@ def _session_index_scan():
                 conn.execute("DELETE FROM session_file_state WHERE path=?", (path,))
             _rebuild_session_rows(conn)
             _sync_pins_to_db(conn)
+            _update_session_revision_if_changed(conn)
             now = time.time()
             conn.execute(
                 "INSERT OR REPLACE INTO session_meta(key, value) VALUES('indexed_at', ?)",
@@ -2459,12 +2474,53 @@ def _request_session_index_scan():
         _session_index_wake.set()
 
 
+def _session_revision(conn):
+    row = conn.execute(
+        "SELECT value FROM session_meta WHERE key='revision'").fetchone()
+    try:
+        return max(0, int(row["value"])) if row else 0
+    except (TypeError, ValueError):
+        return 0
+
+
+def _bump_session_revision(conn):
+    conn.execute("""
+        INSERT INTO session_meta(key, value) VALUES('revision', '1')
+        ON CONFLICT(key) DO UPDATE SET value=CAST(value AS INTEGER) + 1
+    """)
+
+
+def _update_session_revision_if_changed(conn):
+    """索引内容真正变化时才推进 revision；后台空扫描不能让正在浏览的游标失效。"""
+    digest = hashlib.sha256()
+    for row in conn.execute("""
+        SELECT tool, account_id, account, session_id, path, size, mtime, title,
+               cwd, project, branch, pinned, source_present
+        FROM session_index
+        ORDER BY tool, account_id, session_id
+    """):
+        digest.update(json.dumps(
+            list(row), ensure_ascii=False, separators=(",", ":")).encode())
+        digest.update(b"\n")
+    value = digest.hexdigest()
+    previous = conn.execute(
+        "SELECT value FROM session_meta WHERE key='snapshot_digest'").fetchone()
+    if previous and previous["value"] == value:
+        return False
+    conn.execute(
+        "INSERT OR REPLACE INTO session_meta(key, value) "
+        "VALUES('snapshot_digest', ?)", (value,))
+    _bump_session_revision(conn)
+    return True
+
+
 def _cursor_scope(query, tool):
     return hashlib.sha256(f"{query}\0{tool}".encode()).hexdigest()[:16]
 
 
-def _encode_session_cursor(row, scope):
-    payload = {"v": 1, "scope": scope, "p": int(row["pinned"]),
+def _encode_session_cursor(row, scope, revision):
+    payload = {"v": 2, "scope": scope, "rev": revision,
+               "p": int(row["pinned"]),
                "r": int(row["rank"]), "m": float(row["mtime"]),
                "t": row["tool"], "a": row["account_id"], "s": row["session_id"]}
     raw = json.dumps(payload, separators=(",", ":")).encode()
@@ -2477,13 +2533,15 @@ def _decode_session_cursor(raw, scope):
     try:
         padded = raw + "=" * (-len(raw) % 4)
         value = json.loads(base64.urlsafe_b64decode(padded).decode())
-        if not isinstance(value, dict) or value.get("v") != 1 or value.get("scope") != scope:
+        if not isinstance(value, dict) or value.get("v") != 2 or value.get("scope") != scope:
             return None
         normalized = {
+            "rev": int(value["rev"]),
             "p": int(value["p"]), "r": int(value["r"]), "m": float(value["m"]),
             "t": str(value["t"]), "a": str(value["a"]), "s": str(value["s"]),
         }
-        if normalized["p"] not in (0, 1) or not 0 <= normalized["r"] <= 3:
+        if (normalized["rev"] < 0 or normalized["p"] not in (0, 1)
+                or not 0 <= normalized["r"] <= 3):
             return None
         if normalized["t"] not in ("claude", "codex"):
             return None
@@ -2545,9 +2603,16 @@ def _query_session_index(query="", tool="all", limit=None, cursor=""):
 
     scope = _cursor_scope(q, tool)
     decoded = _decode_session_cursor(cursor, scope)
-    cursor_sql, cursor_params = _session_cursor_where(decoded) if decoded else ("", [])
     conn = _session_db_connect()
     try:
+        # total、rows 和 revision 必须来自同一 SQLite 读快照。
+        conn.execute("BEGIN")
+        revision = _session_revision(conn)
+        cursor_stale = bool(decoded and decoded["rev"] != revision)
+        if cursor_stale:
+            decoded = None
+        cursor_sql, cursor_params = \
+            _session_cursor_where(decoded) if decoded else ("", [])
         total = conn.execute(
             f"SELECT COUNT(*) FROM session_index WHERE {where_sql}",
             where_params).fetchone()[0]
@@ -2576,7 +2641,9 @@ def _query_session_index(query="", tool="all", limit=None, cursor=""):
     return {
         "sessions": sessions, "ts": time.time(), "query": q, "tool": tool,
         "total": total, "has_more": has_more,
-        "next_cursor": _encode_session_cursor(page[-1], scope) if has_more and page else None,
+        "next_cursor": _encode_session_cursor(page[-1], scope, revision)
+        if has_more and page else None,
+        "revision": revision, "cursor_stale": cursor_stale,
         # 仅首次无可用索引时要求前端轮询进度；已有快照的后台增量扫描不打扰 UI。
         "indexing": bool(status["indexing"] and not status["indexed_at"]),
         "indexed_at": status["indexed_at"],
@@ -2610,6 +2677,7 @@ def api_pin(body):
         conn = _session_db_connect()
         try:
             _sync_pins_to_db(conn)
+            _update_session_revision_if_changed(conn)
             conn.commit()
         finally:
             conn.close()
@@ -3040,13 +3108,16 @@ def api_preview(query):
 
 _events = deque(maxlen=50)
 _events_lock = threading.Lock()
+_events_change = threading.Condition(_events_lock)
 _events_file_lock = threading.Lock()
 _event_seq = 0
 _event_boot_id = uuid.uuid4().hex
 EVENTS_FILE = DATA_DIR / "events.jsonl"
 _event_keys = deque()
 _event_key_set = set()
-_EVENT_DEDUPE_MAX = 200
+_event_key_times = {}
+_EVENT_DEDUPE_MAX = 1000
+_EVENT_HEURISTIC_DEDUPE_SECS = 2
 
 
 def _event_key(evt):
@@ -3061,21 +3132,50 @@ def _event_key(evt):
     sid = evt.get("session") or ""
     cwd = evt.get("cwd") or ""
     title = evt.get("title") or ""
+    turn = evt.get("turn") or ""
+    if turn:
+        return f"turn\0{tool}\0{sid}\0{cwd}\0{turn}"
     if sid:
-        return f"{tool}\0{sid}\0{cwd}\0{title}"
+        return f"heuristic\0{tool}\0{sid}\0{cwd}\0{title}"
     if cwd or title:
-        return f"{tool}\0{cwd}\0{title}"
+        return f"heuristic\0{tool}\0{cwd}\0{title}"
     return None
 
 
-def _remember_event_key(key):
-    if not key or key in _event_key_set:
+def _remember_event_key(key, occurred_at=None):
+    if not key:
         return False
+    try:
+        now = float(occurred_at)
+    except (TypeError, ValueError):
+        now = time.time()
+    previous = _event_key_times.get(key)
+    stable = key.startswith("turn\0")
+    if previous is not None:
+        if stable or abs(now - previous) <= _EVENT_HEURISTIC_DEDUPE_SECS:
+            return False
+    _event_key_times[key] = now
     _event_key_set.add(key)
-    _event_keys.append(key)
+    _event_keys.append((key, now))
+
+    # 稳定 turn ID 在 LRU 容量内始终判重；旧客户端缺少 turn 时只做极短重试去重，
+    # 避免两个合法但同标题的连续任务被合并。
+    kept = deque()
+    for old, old_time in _event_keys:
+        if (old.startswith("heuristic\0")
+                and now - old_time > _EVENT_HEURISTIC_DEDUPE_SECS):
+            if _event_key_times.get(old) == old_time:
+                _event_key_times.pop(old, None)
+                _event_key_set.discard(old)
+            continue
+        kept.append((old, old_time))
+    _event_keys.clear()
+    _event_keys.extend(kept)
     while len(_event_keys) > _EVENT_DEDUPE_MAX:
-        old = _event_keys.popleft()
-        _event_key_set.discard(old)
+        old, old_time = _event_keys.popleft()
+        if _event_key_times.get(old) == old_time:
+            _event_key_times.pop(old, None)
+            _event_key_set.discard(old)
     return True
 
 
@@ -3922,7 +4022,7 @@ def _events_load():
             _event_seq += 1
             e["id"] = _event_seq
             e["replayed"] = True   # 回灌仅供「最近完成」卡；不得再次触发灵动岛
-            _remember_event_key(_event_key(e))
+            _remember_event_key(_event_key(e), e.get("ts"))
             _events.append(e)
 
 
@@ -4053,7 +4153,7 @@ def api_event(body):
             body.get("cwd") or "")
     if not s["notify_session_done"]:
         return {"ok": True, "skipped": "disabled"}
-    tool, title, project, duration = None, "", "", None
+    tool, title, project, duration, turn = None, "", "", None, ""
 
     sid = ""
     cwd = ""
@@ -4072,11 +4172,13 @@ def api_event(body):
         title = _clean_title(text)[:60]
         if t:
             duration = time.time() - t
+            turn = f"{t:.6f}"
         if duration is not None and duration < s["notify_done_min_secs"]:
             return {"ok": True, "skipped": "short"}
     elif body.get("type") == "agent-turn-complete":
         tool = "codex"
         sid = body.get("thread-id") or body.get("thread_id") or ""
+        turn = body.get("turn-id") or body.get("turn_id") or ""
         cwd = body.get("cwd") or ""
         project = Path(cwd).name if cwd else ""
         msgs = body.get("input_messages") or body.get("input-messages") or []
@@ -4095,25 +4197,48 @@ def api_event(body):
     # 空标题存为 ""，由前端 / Swift 壳按当前语言本地化「任务完成」回退
     evt = {"tool": tool, "session": sid, "cwd": cwd,
            "title": title or "", "project": project,
-           "duration": round(duration or 0), "ts": time.time()}
-    with _events_lock:
-        if not _remember_event_key(_event_key(evt)):
+           "duration": round(duration or 0), "turn": str(turn),
+           "ts": time.time()}
+    with _events_change:
+        if not _remember_event_key(_event_key(evt), evt["ts"]):
             return {"ok": True, "skipped": "duplicate"}
         _event_seq += 1
         _events.append({"id": _event_seq, **evt})
+        _events_change.notify_all()
     _events_persist(evt)
     _request_session_index_scan()   # 完成事件意味着对应 transcript 刚更新，尽快刷新索引 mtime
     return {"ok": True, "queued": _event_seq}
 
 
 def api_events(query):
-    with _events_lock:
-        recent = int(query.get("recent", ["0"])[0])
+    try:
+        recent = max(0, int(query.get("recent", ["0"])[0]))
+    except (TypeError, ValueError):
+        recent = 0
+    try:
+        since = max(0, int(query.get("since", ["0"])[0]))
+    except (TypeError, ValueError):
+        since = 0
+    try:
+        wait = min(25.0, max(0.0, float(query.get("wait", ["0"])[0])))
+    except (TypeError, ValueError):
+        wait = 0.0
+    client_boot = query.get("boot", [""])[0]
+
+    with _events_change:
         if recent:        # 「最近完成」卡：取末尾 N 条（新→旧）；排除额度告警事件（kind=alert）
             done = [e for e in _events if e.get("kind") != "alert"]
             return {"events": done[-recent:][::-1], "last": _event_seq,
                     "boot_id": _event_boot_id}
-        since = int(query.get("since", ["0"])[0])
+        # 隐藏的菜单栏 App 可能被 App Nap 节流；长轮询由事件入队直接唤醒。
+        # daemon 重启后 boot 不同必须立即返回，让客户端先把事件游标归零。
+        if wait and (not client_boot or client_boot == _event_boot_id):
+            deadline = time.monotonic() + wait
+            while _event_seq <= since:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                _events_change.wait(timeout=remaining)
         # 灵动岛通道：排除重启回灌的历史事件，只推真正新发生的
         evs = [e for e in _events if e["id"] > since and not e.get("replayed")]
         # locale 随该通道下发给 Swift 壳（菜单 / 灵动岛 / 通知本地化）
@@ -4408,9 +4533,10 @@ def _push_alert(tool, msg, level, sound=False):
     # tool 存小写（与会话完成事件一致）→ 壳层 appIcon 选对 Claude/Codex 图标；msg 里仍是显示名
     evt = {"tool": (tool or "").lower(), "kind": "alert", "level": level, "title": msg,
            "session": "", "cwd": "", "project": "", "sound": bool(sound), "ts": time.time()}
-    with _events_lock:
+    with _events_change:
         _event_seq += 1
         _events.append({"id": _event_seq, **evt})
+        _events_change.notify_all()
     _events_persist(evt)
 
 
@@ -5359,6 +5485,7 @@ def api_resume(body):
 
 _LOCAL_HTTP_HOSTS = {f"127.0.0.1:{PORT}", f"localhost:{PORT}"}
 _quota_wait_slots = threading.BoundedSemaphore(4)
+_event_wait_slots = threading.BoundedSemaphore(4)
 
 
 def _local_http_host(headers):
@@ -5450,7 +5577,17 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/terminals":
                 self._send(200, api_terminals())
             elif path == "/api/events":
-                self._send(200, api_events(query))
+                wants_wait = query.get("wait", ["0"])[0] not in ("", "0")
+                if wants_wait and not _local_long_poll_request(self.headers):
+                    self._send(403, {"error": "forbidden"})
+                elif wants_wait and not _event_wait_slots.acquire(blocking=False):
+                    self._send(429, {"error": "too many event watchers"})
+                else:
+                    try:
+                        self._send(200, api_events(query))
+                    finally:
+                        if wants_wait:
+                            _event_wait_slots.release()
             elif path == "/favicon.ico":
                 self._send(204, b"", "image/x-icon")
             elif path.startswith("/brand/") and re.fullmatch(r"[\w@.-]+\.png",

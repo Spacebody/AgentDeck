@@ -371,6 +371,8 @@ public struct AgentDeckRootView: View {
                 sessions: store.sessionsShown, scrollable: false,
                 query: store.sessionQuery, filter: store.sessionFilter,
                 total: store.sessionsTotal, hasMore: store.sessionsHasMore,
+                page: store.sessionPage, pageCount: store.sessionPageCount,
+                pageSize: store.sessionPageSize,
                 loading: store.sessionsLoading, indexing: store.sessionsIndexing,
                 loadFailed: store.sessionsLoadFailed,
                 onResume: resume, onCopy: copyCommand, onPin: pin,
@@ -378,7 +380,9 @@ public struct AgentDeckRootView: View {
                 loadPreview: { await store.preview($0) },
                 onSearch: { store.search($0) },
                 onFilter: { store.setSessionFilter($0) },
-                onLoadMore: { store.loadMoreSessions() })
+                onPreviousPage: { store.previousSessionPage() },
+                onNextPage: { store.nextSessionPage() },
+                onPageSize: { store.setSessionPageSize($0) })
         }
         .padding(.horizontal, 14).padding(.vertical, 12)
         .frame(maxWidth: .infinity, alignment: .top)
