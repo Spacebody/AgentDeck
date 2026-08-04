@@ -1190,6 +1190,49 @@ def _codex_executable():
     raise FileNotFoundError("Codex CLI not found")
 
 
+def _codex_process_env(executable):
+    """Give GUI-launched Codex wrappers access to their sibling runtime.
+
+    Finder apps normally inherit only the system PATH. Homebrew/npm Codex
+    launchers use ``/usr/bin/env node``, so the launcher can be executable while
+    its Node runtime is still invisible. Keep the daemon environment intact and
+    prepend one verified Node runtime directory for this child only.
+    """
+    env = os.environ.copy()
+    inherited = env.get("PATH") or os.defpath
+    launcher_dir = os.path.dirname(os.path.abspath(executable))
+    node = shutil.which("node", path=inherited)
+    candidates = [
+        node,
+        os.path.join(launcher_dir, "node"),
+        str(HOME / ".volta" / "bin" / "node"),
+        str(HOME / ".local" / "bin" / "node"),
+        str(HOME / ".local" / "share" / "mise" / "shims" / "node"),
+        "/opt/homebrew/bin/node",
+        "/usr/local/bin/node",
+    ]
+    runtime_dir = None
+    for candidate in dict.fromkeys(candidates):
+        if not candidate or not os.access(candidate, os.X_OK):
+            continue
+        resolved = os.path.realpath(candidate)
+        try:
+            binary_mode = os.stat(resolved).st_mode
+            directory_mode = os.stat(os.path.dirname(resolved)).st_mode
+        except OSError:
+            continue
+        # Fallback discovery must not make another local user's writable file
+        # the interpreter for a trusted absolute Codex launcher.
+        if binary_mode & 0o002 or directory_mode & 0o002:
+            continue
+        runtime_dir = os.path.dirname(resolved)
+        break
+    entries = [runtime_dir] if runtime_dir else []
+    entries.extend(part for part in inherited.split(os.pathsep) if part)
+    env["PATH"] = os.pathsep.join(dict.fromkeys(entries))
+    return env
+
+
 class _CodexAppServerClient:
     """Small synchronous JSONL client for one CODEX_HOME app-server child."""
 
@@ -1288,10 +1331,11 @@ class _CodexAppServerClient:
         if self._proc and self._proc.poll() is None:
             return
         self.close()
-        env = os.environ.copy()
+        executable = _codex_executable()
+        env = _codex_process_env(executable)
         env["CODEX_HOME"] = str(self.codex_home)
         self._proc = subprocess.Popen(
-            [_codex_executable(), "app-server", "--stdio"],
+            [executable, "app-server", "--stdio"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             env=env, bufsize=0)
         try:

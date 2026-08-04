@@ -1391,6 +1391,93 @@ class CodexQuotaRealtimeTests(unittest.TestCase):
                 client.read_rate_limits()
         popen.assert_not_called()
 
+    def test_app_server_path_includes_codex_launcher_directory(self):
+        client = daemon._CodexAppServerClient(Path("/tmp/codex-home"))
+        proc = SimpleNamespace(poll=lambda: None)
+        with tempfile.TemporaryDirectory() as td:
+            runtime = Path(td)
+            node = runtime / "node"
+            codex = runtime / "codex"
+            node.write_text("#!/bin/sh\nexit 0\n")
+            codex.write_text("#!/usr/bin/env node\n")
+            node.chmod(0o755)
+            codex.chmod(0o755)
+            try:
+                with mock.patch.dict(daemon.os.environ, {
+                        "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+                        }, clear=False), \
+                        mock.patch.object(
+                            daemon, "_codex_executable", return_value=str(codex)), \
+                        mock.patch.object(daemon.subprocess, "Popen",
+                                          return_value=proc) as popen, \
+                        mock.patch.object(client, "_request_locked",
+                                          return_value={}), \
+                        mock.patch.object(client, "_send_locked"):
+                    client._start_locked()
+
+                env = popen.call_args.kwargs["env"]
+                self.assertEqual(env["PATH"].split(os.pathsep)[0],
+                                 os.path.realpath(td))
+                self.assertIn("/usr/bin", env["PATH"].split(os.pathsep))
+                self.assertEqual(env["CODEX_HOME"], "/tmp/codex-home")
+            finally:
+                client._proc = None
+
+    def test_custom_codex_prefix_can_find_separate_homebrew_node(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            runtime = home / ".volta" / "bin"
+            runtime.mkdir(parents=True)
+            node = runtime / "node"
+            node.write_text("#!/bin/sh\nexit 0\n")
+            node.chmod(0o755)
+            with mock.patch.dict(daemon.os.environ, {
+                    "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+                    }, clear=False), \
+                    mock.patch.object(daemon, "HOME", home), \
+                    mock.patch.object(daemon.shutil, "which", return_value=None):
+                env = daemon._codex_process_env("/tmp/npm-prefix/bin/codex")
+
+            paths = env["PATH"].split(os.pathsep)
+            self.assertEqual(paths[0], os.path.realpath(runtime))
+            self.assertNotIn("/tmp/npm-prefix/bin", paths)
+
+    def test_codex_child_env_rejects_world_writable_node_fallback(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            runtime = home / ".volta" / "bin"
+            runtime.mkdir(parents=True)
+            node = runtime / "node"
+            node.write_text("#!/bin/sh\nexit 0\n")
+            node.chmod(0o777)
+            with mock.patch.dict(daemon.os.environ, {
+                    "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+                    }, clear=False), \
+                    mock.patch.object(daemon, "HOME", home), \
+                    mock.patch.object(daemon.shutil, "which", return_value=None):
+                env = daemon._codex_process_env("/tmp/npm-prefix/bin/codex")
+
+            self.assertNotIn(str(runtime), env["PATH"].split(os.pathsep))
+
+    def test_codex_child_env_resolves_sibling_node_across_process_boundary(self):
+        with tempfile.TemporaryDirectory() as td:
+            runtime = Path(td)
+            node = runtime / "node"
+            codex = runtime / "codex"
+            node.write_text("#!/bin/sh\nprintf codex-runtime-ok\n")
+            codex.write_text("#!/usr/bin/env node\n")
+            node.chmod(0o755)
+            codex.chmod(0o755)
+            with mock.patch.dict(daemon.os.environ, {
+                    "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+                    }, clear=False):
+                result = daemon.subprocess.run(
+                    [str(codex)], env=daemon._codex_process_env(str(codex)),
+                    capture_output=True, text=True, timeout=2)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "codex-runtime-ok")
+
     def test_force_refresh_waits_for_active_reconcile_before_starting(self):
         manager = daemon.CodexQuotaManager()
         manager._last_force = 0
