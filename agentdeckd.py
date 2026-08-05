@@ -15,6 +15,7 @@ import binascii
 import copy
 import concurrent.futures
 import hashlib
+import hmac
 import json
 import os
 import plistlib
@@ -22,6 +23,7 @@ import re
 import select
 import shlex
 import shutil
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -59,6 +61,8 @@ try:
     VERSION = (Path(__file__).resolve().parent / "VERSION").read_text().strip()
 except OSError:
     VERSION = "dev"
+_DAEMON_INSTANCE_ID = uuid.uuid4().hex
+_daemon_shutdown_requested = None
 SAMPLE_INTERVAL = 180          # 额度采样周期（秒）
 HISTORY_KEEP = 7 * 86400       # 历史保留 7 天
 # Claude 官方 usage 端点限流偏严：缓存 5 分钟（额度窗口是 5h/7d，无需更勤）。
@@ -740,8 +744,21 @@ APP="/Applications/AgentDeck.app"
 NEW={shlex.quote(str(stage / "AgentDeck.app"))}
 MOUNT={shlex.quote(str(mount))}
 TMP={shlex.quote(str(tmp))}
-DAEMON_PID={os.getpid()}
 OLD="$TMP/AgentDeck.old.app"
+APP_PATTERN='/Applications/AgentDeck[.]app/Contents/MacOS/AgentDeck$'
+DAEMON_PATTERN='/Applications/AgentDeck[.]app/Contents/Resources/agentdeckd[.]py$'
+wait_for_exit() {{
+  PATTERN="$1"
+  N=0
+  while /usr/bin/pgrep -f "$PATTERN" >/dev/null 2>&1 && [ "$N" -lt 300 ]; do
+    sleep 0.1
+    N=$((N + 1))
+  done
+  if /usr/bin/pgrep -f "$PATTERN" >/dev/null 2>&1; then
+    echo "AgentDeck processes did not exit safely" >&2
+    return 1
+  fi
+}}
 cleanup() {{
   /usr/bin/hdiutil detach "$MOUNT" >/dev/null 2>&1 || true
   /bin/rm -rf "$TMP"
@@ -756,8 +773,8 @@ restore() {{
 }}
 trap restore ERR INT TERM
 /usr/bin/osascript -e 'tell application "AgentDeck" to quit' >/dev/null 2>&1 || true
-sleep 1
-/bin/kill "$DAEMON_PID" >/dev/null 2>&1 || true
+wait_for_exit "$APP_PATTERN"
+wait_for_exit "$DAEMON_PATTERN"
 if [ -d "$APP" ]; then /bin/mv "$APP" "$OLD"; fi
 /bin/cp -R "$NEW" "$APP"
 /usr/bin/codesign --verify --deep --strict "$APP"
@@ -1240,6 +1257,8 @@ class _CodexAppServerClient:
         self.codex_home = Path(codex_home)
         self.notification_handler = notification_handler
         self._lock = threading.RLock()
+        self._process_lock = threading.Lock()
+        self._stop_requested = threading.Event()
         self._proc = None
         self._buffer = b""
         self._request_id = 0
@@ -1247,7 +1266,8 @@ class _CodexAppServerClient:
 
     def close(self):
         with self._lock:
-            proc, self._proc = self._proc, None
+            with self._process_lock:
+                proc, self._proc = self._proc, None
             self._buffer = b""
             if not proc:
                 return
@@ -1268,11 +1288,35 @@ class _CodexAppServerClient:
                         pass
                     except subprocess.TimeoutExpired:
                         pass
+            for stream in (proc.stdout, proc.stderr):
+                try:
+                    if stream:
+                        stream.close()
+                except OSError:
+                    pass
 
     def retire(self):
         with self._lock:
             self._retired = True
             self.close()
+
+    def interrupt(self):
+        """Stop an in-flight stdio request without waiting for its timeout."""
+        self._stop_requested.set()
+        with self._process_lock:
+            proc = self._proc
+            if proc and proc.poll() is None:
+                try:
+                    if proc.stdin:
+                        proc.stdin.close()
+                    proc.terminate()
+                    proc.wait(timeout=0.5)
+                except (OSError, subprocess.TimeoutExpired):
+                    try:
+                        proc.kill()
+                        proc.wait(timeout=1)
+                    except (OSError, subprocess.TimeoutExpired):
+                        pass
 
     def _send_locked(self, payload):
         if not self._proc or not self._proc.stdin:
@@ -1326,7 +1370,7 @@ class _CodexAppServerClient:
             return message.get("result") or {}
 
     def _start_locked(self):
-        if self._retired:
+        if self._retired or self._stop_requested.is_set():
             raise RuntimeError("Codex app-server client is retired")
         if self._proc and self._proc.poll() is None:
             return
@@ -1334,11 +1378,14 @@ class _CodexAppServerClient:
         executable = _codex_executable()
         env = _codex_process_env(executable)
         env["CODEX_HOME"] = str(self.codex_home)
-        self._proc = subprocess.Popen(
-            [executable, "app-server", "--stdio"],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            env=env, bufsize=0)
+        with self._process_lock:
+            self._proc = subprocess.Popen(
+                [executable, "app-server", "--stdio"],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, env=env, bufsize=0)
         try:
+            if self._stop_requested.is_set():
+                raise RuntimeError("Codex app-server client is stopping")
             result = self._request_locked("initialize", {
                 "clientInfo": {"name": "agentdeck", "version": VERSION},
             })
@@ -1441,17 +1488,44 @@ class CodexQuotaManager:
                          name="agentdeck-codex-quota-reconcile").start()
         self.request_reconcile()
 
+    @staticmethod
+    def _parallel_client_call(clients, method_name, timeout=2.0):
+        """Run bounded client teardown in parallel; one stuck child must not block exit."""
+        def run(client):
+            try:
+                getattr(client, method_name)()
+            except Exception:
+                pass
+
+        threads = [threading.Thread(
+            target=run, args=(client,), daemon=True,
+            name=f"agentdeck-codex-{method_name}") for client in clients]
+        for thread in threads:
+            thread.start()
+        deadline = time.monotonic() + timeout
+        for thread in threads:
+            thread.join(max(0.0, deadline - time.monotonic()))
+        return not any(thread.is_alive() for thread in threads)
+
     def stop(self):
         self._stop.set()
-        # 与强刷/对账共用 gate：先等当前批次收束，再关闭 executor。等待中的批次
-        # 随后拿到 gate 时会看到 _stop，不会向已关闭 executor 继续 submit。
-        with self._refresh_gate:
+        # 先打断进行中的 app-server stdio 等待，否则持有 refresh gate 的请求
+        # 最长可阻塞 12 秒。多 CODEX_HOME 必须并行收尾，避免退出时间线性增长。
+        with self._lock:
+            clients = list(self._clients.values())
+        self._parallel_client_call(clients, "interrupt")
+        # 与强刷/对账共用 gate：最多等待 5 秒让当前批次收束。安装器随后仍有
+        # 30 秒总等待窗口；这里不能因第三方 CLI 异常永久阻塞 HTTPServer 退出。
+        gate_acquired = self._refresh_gate.acquire(timeout=5)
+        try:
             with self._lock:
                 clients = list(self._clients.values())
                 self._clients.clear()
-            for client in clients:
-                client.retire()
-            self._executor.shutdown(wait=True, cancel_futures=True)
+            self._parallel_client_call(clients, "retire")
+            self._executor.shutdown(wait=False, cancel_futures=True)
+        finally:
+            if gate_acquired:
+                self._refresh_gate.release()
 
     def _periodic_loop(self):
         while not self._stop.wait(CODEX_RECONCILE_SECS):
@@ -5576,6 +5650,9 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == "/api/health":
                 self._send(200, {"ok": True, "pid": os.getpid(),
+                                 "parent_pid": os.getppid(),
+                                 "instance_id": _DAEMON_INSTANCE_ID,
+                                 "script_path": str(Path(__file__).resolve()),
                                  "version": VERSION})
             elif path == "/api/quota":
                 force = query.get("force", ["0"])[0] in ("1", "true")
@@ -5676,13 +5753,21 @@ class Handler(BaseHTTPRequestHandler):
                     "/api/settings": api_settings_save, "/api/event": api_event,
                     "/api/focus": api_focus, "/api/data": api_data,
                     "/api/update/install": api_update_install}
-        fn = handlers.get(path)
-        if not fn:
+        if path != "/api/shutdown" and path not in handlers:
             return self._send(404, {"error": "not found"})
         try:
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length) or b"{}")
-            self._send(200, fn(body))
+            if path == "/api/shutdown":
+                supplied = str(body.get("instance_id") or "") \
+                    if isinstance(body, dict) else ""
+                if not hmac.compare_digest(supplied, _DAEMON_INSTANCE_ID):
+                    return self._send(403, {"error": "forbidden"})
+                self._send(200, {"ok": True})
+                if _daemon_shutdown_requested is not None:
+                    _daemon_shutdown_requested.set()
+                return
+            self._send(200, handlers[path](body))
         except Exception as exc:
             self._send(500, {"error": str(exc)})
 
@@ -5690,7 +5775,7 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
-def _parent_watchdog():
+def _parent_watchdog(shutdown_requested, poll_secs=2):
     """壳进程（App）退出后自杀，避免后台 daemon 残留成孤儿。
     App 用 Process 拉起时 daemon 的父进程就是 App；App 一死，daemon 被 launchd
     收养、PPID 变为 1，据此退出。启动时若已是孤儿（PPID≤1，如 launchd 直拉）则不看守，
@@ -5698,22 +5783,59 @@ def _parent_watchdog():
     start_ppid = os.getppid()
     if start_ppid <= 1:
         return
-    while True:
-        time.sleep(10)   # 省电：10s 足够（App 退出后 daemon 至多多活 10s 再自杀），减少进程唤醒
+    while not shutdown_requested.wait(poll_secs):
         if os.getppid() != start_ppid:
-            os._exit(0)
+            shutdown_requested.set()
+            return
+
+
+def _daemon_shutdown_controller(server):
+    """Route signals/watchdog requests through serve_forever's graceful exit."""
+    shutdown_requested = threading.Event()
+
+    def request_shutdown(*_args):
+        shutdown_requested.set()
+
+    # shutdown() 必须从 serve_forever() 所在线程之外调用，否则会死锁。
+    threading.Thread(
+        target=lambda: (shutdown_requested.wait(), server.shutdown()),
+        daemon=True, name="agentdeck-shutdown").start()
+    signal.signal(signal.SIGTERM, request_shutdown)
+    signal.signal(signal.SIGINT, request_shutdown)
+    return shutdown_requested
+
+
+def _run_startup_task(name, task):
+    try:
+        task()
+    except Exception as exc:
+        print(f"agentdeckd {name} startup failed: {exc}", file=sys.stderr)
 
 
 def main():
+    global _daemon_shutdown_requested
     _events_load()
     _alert_state_load()
-    _ensure_session_index_started()
-    install_integration()   # 启动即自动接好完成事件钩子（幂等、只合并不覆盖）
+    server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+    # 长轮询连接不能阻塞进程收尾；额度 manager 及其 app-server 子进程仍由
+    # finally 同步关闭。
+    server.daemon_threads = True
+    shutdown_requested = _daemon_shutdown_controller(server)
+    _daemon_shutdown_requested = shutdown_requested
+
+    # 会话库初始化与 hook 适配可能随历史数据量变慢，不应阻塞 health 监听；
+    # API 自身也会按需确保索引已启动，两个任务均为幂等。
+    threading.Thread(target=_run_startup_task,
+                     args=("session index", _ensure_session_index_started),
+                     daemon=True, name="agentdeck-index-startup").start()
+    threading.Thread(target=_run_startup_task,
+                     args=("integration", install_integration),
+                     daemon=True, name="agentdeck-integration-startup").start()
     _codex_quota_manager.start()
-    threading.Thread(target=_parent_watchdog, daemon=True).start()
+    threading.Thread(target=_parent_watchdog,
+                     args=(shutdown_requested,), daemon=True).start()
     threading.Thread(target=_sampler_loop, daemon=True).start()
     threading.Thread(target=_keepawake_loop, daemon=True).start()
-    server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     print(f"agentdeckd listening on http://127.0.0.1:{PORT}")
     try:
         server.serve_forever()

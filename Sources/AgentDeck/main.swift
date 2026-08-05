@@ -1,11 +1,27 @@
 // AgentDeck — 菜单栏壳：状态栏 icon + 自定义 HUD 玻璃面板(原生 SwiftUI) + 后端守护
 import Cocoa
+import Darwin
 import ServiceManagement
 import SwiftUI
 import AgentDeckKit
 
 let kPort = 7777
 let kBase = "http://127.0.0.1:\(kPort)"          // 原生请求 / 浏览器打开用
+
+struct BackendHealth {
+    let alive: Bool
+    let version: String?
+    let pid: pid_t?
+    let parentPID: pid_t?
+    let instanceID: String?
+    let scriptPath: String?
+
+    func belongs(to appPID: pid_t, version expected: String) -> Bool {
+        alive && version == expected && parentPID == appPID
+    }
+}
+
+typealias BackendReadyCallback = @MainActor @Sendable () -> Void
 
 // App→自身 daemon 的连接必须绕过系统代理：某些企业安全软件装的是系统级 PAC，会把
 // 127.0.0.1 也改道到 SOCKS（代理到不了回环）→ WebView/URLSession 连不上本机后端。
@@ -555,6 +571,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var panelHost: HostController?
     var widgetHost: HostController?
     var backend: Process?
+    var backendTransitioning = false
+    var backendReadyWaiters: [BackendReadyCallback] = []
     var pollTimer: Timer?
     var eventTask: Task<Void, Never>?
     var lastEventId = 0
@@ -675,7 +693,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         // 省电：菜单栏图标刷新 15→20s + 大 tolerance，让系统合并唤醒（避免进「能耗显著」列表）。
         pollTimer = Timer.scheduledTimer(withTimeInterval: 20, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.updateIconState() }
+            Task { @MainActor in
+                self?.ensureBackend {}
+                self?.updateIconState()
+            }
         }
         pollTimer?.tolerance = 8
         DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
@@ -1182,12 +1203,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc func openBrowser() { NSWorkspace.shared.open(URL(string: kBase)!) }
 
     @objc func restartBackend() {
-        backend?.terminate()
-        backend = nil
-        killStaleBackend()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            self?.spawnBackend()
-        }
+        guard !backendTransitioning else { return }
+        ensureBackend(forceRestart: true) {}
     }
 
     @objc func quit() { NSApp.terminate(nil) }
@@ -1208,30 +1225,80 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return dir + "/AgentDeck.log"
     }
 
-    func ensureBackend(then done: @escaping () -> Void) {
-        let mine = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
-        healthCheck { [weak self] alive, version in
-            guard let self = self else { return }
-            // 端口上跑着同版本 daemon 才复用；版本不符（装了新版仍占着旧后端）则清掉换新——
-            // daemon 是常驻进程，磁盘换了 .py 也不会自动重载，必须强制重起才跑新代码。
-            if alive, version == mine { done(); return }
-            if alive { self.killStaleBackend() }
-            self.spawnBackend()
-            // 等后端起来再加载页面，最多重试 10 次
-            self.waitHealthy(retries: 10, then: done)
+    func ensureBackend(
+        forceRestart: Bool = false, then done: @escaping BackendReadyCallback
+    ) {
+        backendReadyWaiters.append(done)
+        guard !backendTransitioning else { return }
+        backendTransitioning = true
+        let mine = appVersion
+        let appPID = ProcessInfo.processInfo.processIdentifier
+        healthCheck { [weak self] health in
+            guard let self else { return }
+            // 同版本不等于同实例：快速重开时旧 daemon 仍会短暂健康，随后因旧父
+            // App 消失而退出。只有 parent_pid 明确指向当前 App 才允许复用。
+            if !forceRestart, health.belongs(to: appPID, version: mine) {
+                self.finishBackendTransition()
+                return
+            }
+            self.replaceBackend(health)
         }
     }
 
-    func waitHealthy(retries: Int, then done: @escaping () -> Void) {
-        healthCheck { [weak self] alive, _ in
-            if alive || retries <= 0 { done(); return }
+    private func replaceBackend(_ health: BackendHealth) {
+        if let owned = backend, owned.isRunning {
+            stopOwnedBackend(owned) { [weak self] in self?.spawnAndWait() }
+            return
+        }
+        backend = nil
+        if health.alive, let instanceID = health.instanceID {
+            handleForeignBackend(health, instanceID: instanceID)
+        } else if health.alive {
+            // 兼容还没有 instance_id 的旧 daemon：不依据健康响应中的纯数值 PID
+            // 发信号，等待其父进程 watchdog 自行退出，避免 PID 复用误伤。
+            waitForForeignBackendExit(instanceID: nil, retries: 20)
+        } else {
+            spawnAndWait()
+        }
+    }
+
+    private func spawnAndWait() {
+        spawnBackend()
+        waitHealthy(retries: 20)
+    }
+
+    private func waitHealthy(retries: Int) {
+        let mine = appVersion
+        let appPID = ProcessInfo.processInfo.processIdentifier
+        healthCheck { [weak self] health in
+            guard let self else { return }
+            if health.belongs(to: appPID, version: mine) {
+                self.finishBackendTransition()
+                return
+            }
+            if health.alive, let instanceID = health.instanceID {
+                self.handleForeignBackend(health, instanceID: instanceID)
+                return
+            }
+            if retries <= 0 {
+                NSLog("AgentDeck: backend did not become healthy")
+                self.finishBackendTransition()
+                return
+            }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                self?.waitHealthy(retries: retries - 1, then: done)
+                self.waitHealthy(retries: retries - 1)
             }
         }
     }
 
-    func healthCheck(_ cb: @escaping (Bool, String?) -> Void) {
+    private func finishBackendTransition() {
+        backendTransitioning = false
+        let waiters = backendReadyWaiters
+        backendReadyWaiters.removeAll()
+        waiters.forEach { $0() }
+    }
+
+    func healthCheck(_ cb: @escaping (BackendHealth) -> Void) {
         var req = URLRequest(url: URL(string: "\(kBase)/api/health")!)
         req.timeoutInterval = 2
         kDirectSession.dataTask(with: req) { data, _, _ in
@@ -1240,16 +1307,107 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 try? JSONSerialization.jsonObject(with: $0) as? [String: Any]
             }
             DispatchQueue.main.async {
-                cb(obj?["ok"] as? Bool ?? false, obj?["version"] as? String)
+                cb(BackendHealth(
+                    alive: obj?["ok"] as? Bool ?? false,
+                    version: obj?["version"] as? String,
+                    pid: (obj?["pid"] as? NSNumber)?.int32Value,
+                    parentPID: (obj?["parent_pid"] as? NSNumber)?.int32Value,
+                    instanceID: obj?["instance_id"] as? String,
+                    scriptPath: obj?["script_path"] as? String))
             }
         }.resume()
     }
 
-    func killStaleBackend() {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-        p.arguments = ["-f", "agentdeckd.py"]
-        try? p.run(); p.waitUntilExit()
+    private func handleForeignBackend(_ health: BackendHealth, instanceID: String) {
+        let ownerIsAlive = health.parentPID.map { Darwin.kill($0, 0) == 0 } ?? false
+        // 所有 App 对 owner 使用同一排序：高版本优先；同版本优先 /Applications，
+        // 其余路径稳定排序。这样旧 App 会共享新版 daemon，跨 bundle 也不会互相抢占。
+        if BackendOwnerPolicy.shouldShare(
+            currentVersion: appVersion,
+            currentScript: backendScript(),
+            remoteVersion: health.version,
+            remoteScript: health.scriptPath,
+            remoteOwnerIsAlive: ownerIsAlive
+        ) {
+            finishBackendTransition()
+            return
+        }
+        requestBackendShutdown(instanceID: instanceID) { [weak self] in
+            self?.waitForForeignBackendExit(instanceID: instanceID, retries: 20)
+        }
+    }
+
+    private func requestBackendShutdown(
+        instanceID: String, then done: @escaping BackendReadyCallback
+    ) {
+        var req = URLRequest(url: URL(string: "\(kBase)/api/shutdown")!)
+        req.httpMethod = "POST"
+        req.timeoutInterval = 2
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: [
+            "instance_id": instanceID
+        ])
+        kDirectSession.dataTask(with: req) { _, _, _ in
+            DispatchQueue.main.async(execute: done)
+        }.resume()
+    }
+
+    private func waitForForeignBackendExit(instanceID: String?, retries: Int) {
+        healthCheck { [weak self] health in
+            guard let self else { return }
+            if !health.alive {
+                self.spawnAndWait()
+                return
+            }
+            if health.belongs(to: ProcessInfo.processInfo.processIdentifier,
+                              version: self.appVersion) {
+                self.finishBackendTransition()
+                return
+            }
+            if let currentInstanceID = health.instanceID,
+               currentInstanceID != instanceID {
+                // 原目标已退出但端口被另一个实例抢占：对新实例重新做 bundle/owner
+                // 判定和令牌交接，不能继续等待旧令牌直至超时后误用 foreign daemon。
+                self.handleForeignBackend(health, instanceID: currentInstanceID)
+                return
+            }
+            if retries <= 0 {
+                NSLog("AgentDeck: foreign backend did not exit (instance \(instanceID ?? "legacy"))")
+                self.finishBackendTransition()
+                return
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                self.waitForForeignBackendExit(instanceID: instanceID,
+                                               retries: retries - 1)
+            }
+        }
+    }
+
+    private func stopOwnedBackend(
+        _ process: Process, then done: @escaping BackendReadyCallback
+    ) {
+        backend = nil
+        if process.isRunning { process.terminate() }
+        waitForOwnedProcessExit(process, retries: 50, then: done)
+    }
+
+    private func waitForOwnedProcessExit(
+        _ process: Process, retries: Int, then done: @escaping BackendReadyCallback
+    ) {
+        if !process.isRunning {
+            done()
+            return
+        }
+        if retries <= 0 {
+            // 不对纯数值 PID 强杀；daemon 的 TERM handler 正常应在此窗口内收尾，
+            // 若未退出则留给后续轮询继续恢复，避免 PID 复用误伤。
+            NSLog("AgentDeck: owned backend did not exit after terminate")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: done)
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            self?.waitForOwnedProcessExit(process, retries: retries - 1, then: done)
+        }
     }
 
     func spawnBackend() {

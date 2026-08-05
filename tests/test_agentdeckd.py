@@ -1,4 +1,5 @@
 import json
+import io
 import os
 import plistlib
 import tempfile
@@ -17,6 +18,48 @@ def _jsonl(path, events):
 
 
 class HTTPBoundaryTests(unittest.TestCase):
+    def test_health_exposes_daemon_and_parent_process_identity(self):
+        handler = object.__new__(daemon.Handler)
+        handler.path = "/api/health"
+        handler.headers = {"Host": "127.0.0.1:7777"}
+        sent = []
+        handler._send = lambda code, payload, ctype="": sent.append((code, payload))
+        with mock.patch.object(daemon.os, "getpid", return_value=123), \
+                mock.patch.object(daemon.os, "getppid", return_value=456):
+            handler.do_GET()
+
+        self.assertEqual(sent[0][0], 200)
+        self.assertEqual(sent[0][1]["pid"], 123)
+        self.assertEqual(sent[0][1]["parent_pid"], 456)
+        self.assertEqual(sent[0][1]["instance_id"], daemon._DAEMON_INSTANCE_ID)
+        self.assertEqual(sent[0][1]["script_path"], str(Path(daemon.__file__).resolve()))
+
+    def test_shutdown_requires_matching_daemon_instance(self):
+        def invoke(instance_id):
+            payload = json.dumps({"instance_id": instance_id}).encode()
+            handler = object.__new__(daemon.Handler)
+            handler.path = "/api/shutdown"
+            handler.headers = {
+                "Host": "127.0.0.1:7777",
+                "Content-Type": "application/json",
+                "Content-Length": str(len(payload)),
+            }
+            handler.rfile = io.BytesIO(payload)
+            sent = []
+            handler._send = lambda code, body, ctype="": sent.append((code, body))
+            requested = threading.Event()
+            with mock.patch.object(daemon, "_daemon_shutdown_requested", requested):
+                handler.do_POST()
+            return sent, requested
+
+        sent, requested = invoke("wrong-instance")
+        self.assertEqual(sent, [(403, {"error": "forbidden"})])
+        self.assertFalse(requested.is_set())
+
+        sent, requested = invoke(daemon._DAEMON_INSTANCE_ID)
+        self.assertEqual(sent, [(200, {"ok": True})])
+        self.assertTrue(requested.is_set())
+
     def test_only_loopback_hosts_are_accepted(self):
         self.assertTrue(daemon._local_http_host({"Host": "127.0.0.1:7777"}))
         self.assertTrue(daemon._local_http_host({"Host": "LOCALHOST:7777"}))
@@ -99,6 +142,57 @@ class HTTPBoundaryTests(unittest.TestCase):
         handler._send = lambda code, payload, ctype="": sent.append((code, payload))
         handler.do_GET()
         self.assertEqual(sent, [(403, {"error": "forbidden"})])
+
+
+class DaemonLifecycleTests(unittest.TestCase):
+    def test_parent_watchdog_requests_graceful_shutdown(self):
+        requested = threading.Event()
+        with mock.patch.object(daemon.os, "getppid", side_effect=[123, 1]), \
+                mock.patch.object(daemon.os, "_exit") as hard_exit:
+            worker = threading.Thread(
+                target=daemon._parent_watchdog,
+                args=(requested, 0.001))
+            worker.start()
+            worker.join(timeout=1)
+
+        self.assertFalse(worker.is_alive())
+        self.assertTrue(requested.is_set())
+        hard_exit.assert_not_called()
+
+    def test_sigterm_wakes_shutdown_thread(self):
+        shutdown_called = threading.Event()
+        server = SimpleNamespace(shutdown=shutdown_called.set)
+        handlers = {}
+
+        def register(sig, callback):
+            handlers[sig] = callback
+
+        with mock.patch.object(daemon.signal, "signal", side_effect=register):
+            requested = daemon._daemon_shutdown_controller(server)
+        handlers[daemon.signal.SIGTERM](daemon.signal.SIGTERM, None)
+
+        self.assertTrue(requested.wait(timeout=1))
+        self.assertTrue(shutdown_called.wait(timeout=1))
+
+    def test_sigterm_stops_a_real_http_server_loop(self):
+        server = daemon.ThreadingHTTPServer(("127.0.0.1", 0), daemon.Handler)
+        server.daemon_threads = True
+        handlers = {}
+        with mock.patch.object(
+                daemon.signal, "signal",
+                side_effect=lambda sig, callback: handlers.__setitem__(sig, callback)):
+            requested = daemon._daemon_shutdown_controller(server)
+        worker = threading.Thread(target=server.serve_forever)
+        worker.start()
+        try:
+            handlers[daemon.signal.SIGTERM](daemon.signal.SIGTERM, None)
+            worker.join(timeout=1)
+            self.assertTrue(requested.is_set())
+            self.assertFalse(worker.is_alive())
+        finally:
+            requested.set()
+            server.shutdown()
+            server.server_close()
 
 
 class EventLongPollTests(unittest.TestCase):
@@ -1390,6 +1484,102 @@ class CodexQuotaRealtimeTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "retired"):
                 client.read_rate_limits()
         popen.assert_not_called()
+
+    def test_interrupted_app_server_client_cannot_start(self):
+        client = daemon._CodexAppServerClient(Path("/tmp/codex-home"))
+        client.interrupt()
+        with mock.patch.object(daemon.subprocess, "Popen") as popen:
+            with self.assertRaisesRegex(RuntimeError, "retired"):
+                client.read_rate_limits()
+        popen.assert_not_called()
+
+    def test_interrupt_releases_a_real_blocked_app_server_read(self):
+        client = daemon._CodexAppServerClient(Path("/tmp/codex-home"))
+        proc = daemon.subprocess.Popen(
+            ["/bin/cat"], stdin=daemon.subprocess.PIPE,
+            stdout=daemon.subprocess.PIPE, stderr=daemon.subprocess.DEVNULL,
+            bufsize=0)
+        with client._process_lock:
+            client._proc = proc
+        entered = threading.Event()
+        errors = []
+
+        def blocked_read():
+            with client._lock:
+                entered.set()
+                try:
+                    client._read_message_locked(time.monotonic() + 12)
+                except Exception as exc:
+                    errors.append(exc)
+
+        worker = threading.Thread(target=blocked_read)
+        worker.start()
+        self.assertTrue(entered.wait(timeout=1))
+        client.interrupt()
+        worker.join(timeout=2)
+        try:
+            self.assertFalse(worker.is_alive())
+            self.assertIsNotNone(proc.poll())
+            self.assertTrue(errors)
+        finally:
+            client.close()
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=1)
+
+    def test_manager_stop_interrupts_refresh_before_waiting_for_gate(self):
+        manager = daemon.CodexQuotaManager()
+        gate_held = threading.Event()
+        release_gate = threading.Event()
+        client = SimpleNamespace(
+            interrupt=mock.Mock(side_effect=release_gate.set),
+            retire=mock.Mock())
+        manager._clients = {"default": client}
+
+        def active_refresh():
+            with manager._refresh_gate:
+                gate_held.set()
+                release_gate.wait(timeout=1)
+
+        worker = threading.Thread(target=active_refresh)
+        worker.start()
+        self.assertTrue(gate_held.wait(timeout=1))
+        manager.stop()
+        worker.join(timeout=1)
+
+        self.assertFalse(worker.is_alive())
+        client.interrupt.assert_called_once_with()
+        client.retire.assert_called_once_with()
+
+    def test_manager_stop_interrupts_multiple_clients_in_parallel(self):
+        manager = daemon.CodexQuotaManager()
+        all_started = threading.Event()
+        lock = threading.Lock()
+        started = 0
+
+        def interrupt():
+            nonlocal started
+            with lock:
+                started += 1
+                if started == 4:
+                    all_started.set()
+            all_started.wait(timeout=1.5)
+
+        clients = [SimpleNamespace(
+            interrupt=mock.Mock(side_effect=interrupt),
+            retire=mock.Mock()) for _ in range(4)]
+        manager._clients = {str(index): client
+                            for index, client in enumerate(clients)}
+
+        started_at = time.monotonic()
+        manager.stop()
+        elapsed = time.monotonic() - started_at
+
+        self.assertTrue(all_started.is_set())
+        self.assertLess(elapsed, 1.0)
+        for client in clients:
+            client.interrupt.assert_called_once_with()
+            client.retire.assert_called_once_with()
 
     def test_app_server_path_includes_codex_launcher_directory(self):
         client = daemon._CodexAppServerClient(Path("/tmp/codex-home"))

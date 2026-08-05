@@ -137,9 +137,21 @@ EOF
 }
 
 stop_running() {
-  pkill -x AgentDeck 2>/dev/null || true
-  pkill -f agentdeckd.py 2>/dev/null || true
-  sleep 0.5
+  local app_pattern daemon_pattern pattern n
+  app_pattern='/Applications/AgentDeck[.]app/Contents/MacOS/AgentDeck$'
+  daemon_pattern='/Applications/AgentDeck[.]app/Contents/Resources/agentdeckd[.]py$'
+  osascript -e 'tell application "AgentDeck" to quit' >/dev/null 2>&1 || true
+  for pattern in "$app_pattern" "$daemon_pattern"; do
+    n=0
+    while pgrep -f "$pattern" >/dev/null 2>&1 && [ "$n" -lt 300 ]; do
+      sleep 0.1
+      n=$((n + 1))
+    done
+    if pgrep -f "$pattern" >/dev/null 2>&1; then
+      echo "✗ AgentDeck 进程未能安全退出，已中止安装" >&2
+      return 1
+    fi
+  done
 }
 
 case "${1:-build}" in
@@ -175,27 +187,40 @@ case "${1:-build}" in
     hdiutil create -volname "$VOL" -srcfolder "$STAGE" -ov -format UDRW "$RW" >/dev/null
     MOUNT_DIR="/Volumes/$VOL"
     hdiutil attach "$RW" -noautoopen >/dev/null
-    osascript <<EOF
-tell application "Finder"
-  tell disk "$VOL"
-    open
-    set current view of container window to icon view
-    set toolbar visible of container window to false
-    set statusbar visible of container window to false
-    set the bounds of container window to {200, 120, 740, 480}
-    set vo to the icon view options of container window
-    set arrangement of vo to not arranged
-    set icon size of vo to 104
-    set text size of vo to 12
-    set background picture of vo to file ".background:bg.png"
-    set position of item "AgentDeck.app" of container window to {140, 185}
-    set position of item "Applications" of container window to {400, 185}
-    update without registering applications
-    delay 1
-    close
-  end tell
-end tell
+    # Finder 偶尔会卡在 update AppleEvent；布局是装饰性步骤，限定等待时间后降级为
+    # 标准 App + Applications 安装盘，不能因此阻塞签名、公证和整个发版流程。
+    LAYOUT_RESULT="$(osascript <<EOF
+try
+  with timeout of 15 seconds
+    tell application "Finder"
+      tell disk "$VOL"
+        open
+        set current view of container window to icon view
+        set toolbar visible of container window to false
+        set statusbar visible of container window to false
+        set the bounds of container window to {200, 120, 740, 480}
+        set vo to the icon view options of container window
+        set arrangement of vo to not arranged
+        set icon size of vo to 104
+        set text size of vo to 12
+        set background picture of vo to file ".background:bg.png"
+        set position of item "AgentDeck.app" of container window to {140, 185}
+        set position of item "Applications" of container window to {400, 185}
+        update without registering applications
+        delay 1
+        close
+      end tell
+    end tell
+  end timeout
+  return "ok"
+on error errorMessage number errorNumber
+  return "error " & errorNumber & ": " & errorMessage
+end try
 EOF
+)"
+    if [ "$LAYOUT_RESULT" != "ok" ]; then
+      echo "  ⚠️ Finder 布局失败，使用标准安装盘布局（${LAYOUT_RESULT}）"
+    fi
     sync
     hdiutil detach "$MOUNT_DIR" >/dev/null
     hdiutil convert "$RW" -format UDZO -o "$FINAL" >/dev/null
