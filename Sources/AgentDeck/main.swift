@@ -301,25 +301,46 @@ final class HostController: NSViewController {
 @MainActor
 final class IslandController {
     static let shared = IslandController()
-    typealias Event = (tool: String, title: String, project: String,
-                       session: String, cwd: String,
-                       kind: String, level: String)   // kind="alert" 时为额度告警弹丸
-    private var queue: [Event] = []
+    typealias Event = IslandEvent
+    private var queue = IslandEventQueue()
     private var showing = false
     private var window: KeyPanel?
     private var current: Event?
+    private var shownAt: Date?
+    private var scheduledDismissAt: Date?
+    private var dismissWorkItem: DispatchWorkItem?
     var onTap: ((Event?) -> Void)?
     var dwellSecs: Double = 5   // 停留时长，由设置经 /api/events 下发
 
     func push(_ event: Event) {
-        queue.append(event)
+        queue.enqueue(event)
+        accelerateCurrentIfNeeded()
         maybeShow()
     }
 
+    private func accelerateCurrentIfNeeded() {
+        guard showing, !queue.isEmpty, let window, let shownAt else { return }
+        scheduleDismiss(window, at: IslandQueueTiming.deadline(
+            shownAt: shownAt, configuredDwell: dwellSecs, hasPending: true))
+    }
+
+    private func scheduleDismiss(_ target: KeyPanel, at deadline: Date) {
+        if let scheduledDismissAt, scheduledDismissAt <= deadline { return }
+        dismissWorkItem?.cancel()
+        self.scheduledDismissAt = deadline
+        let work = DispatchWorkItem { [weak self, weak target] in
+            guard let self, let target, self.window === target else { return }
+            self.dismiss()
+        }
+        dismissWorkItem = work
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + max(0, deadline.timeIntervalSinceNow), execute: work)
+    }
+
     private func maybeShow() {
-        guard !showing, !queue.isEmpty else { return }
+        guard !showing, let event = queue.popFirst() else { return }
         showing = true
-        display(queue.removeFirst())
+        display(event)
     }
 
     private func brandIcon(for tool: String) -> NSImage {
@@ -431,14 +452,11 @@ final class IslandController {
         }, completionHandler: { [weak p] in
             p?.invalidateShadow()
         })
-        let shownAt = Date()
-        let myWindow = p
-        DispatchQueue.main.asyncAfter(deadline: .now() + dwellSecs) { [weak self] in
-            // 防止 dwell 期间面板已被点击关闭后误关下一条
-            guard let self, self.window === myWindow,
-                  Date().timeIntervalSince(shownAt) >= self.dwellSecs - 0.1 else { return }
-            self.dismiss()
-        }
+        let startedAt = Date()
+        shownAt = startedAt
+        // 用户设置用于正常展示；有待播事件时缩短停留以追赶，但不跳过任何完成通知。
+        scheduleDismiss(p, at: IslandQueueTiming.deadline(
+            shownAt: startedAt, configuredDwell: dwellSecs, hasPending: !queue.isEmpty))
     }
 
     @objc private func tapped() {
@@ -448,6 +466,10 @@ final class IslandController {
 
     private func dismiss(fast: Bool = false) {
         guard let p = window else { showing = false; maybeShow(); return }
+        dismissWorkItem?.cancel()
+        dismissWorkItem = nil
+        scheduledDismissAt = nil
+        shownAt = nil
         window = nil
         NSAnimationContext.runAnimationGroup({ ctx in
             ctx.duration = fast ? 0.15 : 0.28
@@ -790,14 +812,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             if kind == "alert", ev["sound"] as? Bool ?? false {
                 NSSound(named: "Glass")?.play()
             }
-            IslandController.shared.push((
+            IslandController.shared.push(IslandEvent(
                 tool: ev["tool"] as? String ?? "claude",
                 title: ev["title"] as? String ?? "",
                 project: ev["project"] as? String ?? "",
                 session: ev["session"] as? String ?? "",
                 cwd: ev["cwd"] as? String ?? "",
                 kind: kind,
-                level: ev["level"] as? String ?? ""))
+                level: ev["level"] as? String ?? "",
+                dedupeKey: ev["dedupe_key"] as? String ?? ""))
         }
         if let last = json["last"] as? Int { lastEventId = max(lastEventId, last) }
         persistEventCursor()

@@ -1419,6 +1419,24 @@ class CodexQuotaRealtimeTests(unittest.TestCase):
         self.assertEqual(quota["windows"][1]["label"], "GPT-5.3-Codex-Spark")
         self.assertEqual(quota["credits"]["balance"], "0")
 
+    def test_rollout_snapshot_preserves_named_limit_identity(self):
+        quota = daemon._codex_quota_from_rollout_limits({
+            "limit_id": "codex_bengalfox",
+            "limit_name": "GPT-5.3-Codex-Spark",
+            "primary": {
+                "used_percent": 0,
+                "window_minutes": 10080,
+                "resets_at": time.time() + 86400,
+            },
+        }, "2026-08-07T14:17:42Z")
+
+        self.assertEqual(quota["windows"], [{
+            "id": "seven_day_codex-bengalfox",
+            "label": "GPT-5.3-Codex-Spark",
+            "used_percent": 0.0,
+            "resets_at": quota["windows"][0]["resets_at"],
+        }])
+
     def test_sparse_app_server_notification_never_overwrites_full_snapshot(self):
         manager = daemon.CodexQuotaManager()
         try:
@@ -1924,6 +1942,36 @@ class CodexQuotaRealtimeTests(unittest.TestCase):
         finally:
             manager.stop()
 
+    def test_named_rollout_update_preserves_official_base_limit(self):
+        manager = daemon.CodexQuotaManager()
+        src = {
+            "id": "default", "label": "默认", "path": Path("/tmp/codex-home-3"),
+            "is_default": True, "session_only": False,
+        }
+        official = {"ok": True, "windows": [
+            {"id": "seven_day", "label": "周限额",
+             "used_percent": 89, "resets_at": time.time() + 86400},
+            {"id": "seven_day_codex-bengalfox", "label": "Spark",
+             "used_percent": 0, "resets_at": time.time() + 86400},
+        ]}
+        local = {"ok": True, "windows": [
+            {"id": "seven_day_codex-bengalfox", "label": "Spark",
+             "used_percent": 1, "resets_at": time.time() + 86400},
+        ]}
+        try:
+            with mock.patch.object(daemon, "_remember_last_good"), \
+                    mock.patch.object(daemon, "_bump_quota_revision"), \
+                    mock.patch.object(daemon, "_check_alerts"):
+                manager._apply(src, official, 100, official=True)
+                manager._apply(src, local, 101, official=False)
+            windows = manager.quota_for_source(src)["windows"]
+            self.assertEqual([w["id"] for w in windows], [
+                "seven_day_codex-bengalfox", "seven_day"])
+            self.assertEqual(windows[0]["used_percent"], 1)
+            self.assertEqual(windows[1]["used_percent"], 89)
+        finally:
+            manager.stop()
+
     def test_quota_change_long_poll_wakes_on_revision(self):
         old_revision = daemon._quota_revision
         try:
@@ -1981,6 +2029,72 @@ class QuotaSamplingTests(unittest.TestCase):
         ])
         self.assertEqual(sample["x5h"], 17)
         self.assertEqual(sample["x7d"], 61)
+
+    def test_sampler_never_confirms_codex_reset(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            payload = {
+                "claude": {"ok": True, "windows": [{
+                    "id": "seven_day", "used_percent": 10,
+                }]},
+                "codex": {"ok": True, "windows": [{
+                    "id": "seven_day", "used_percent": 90,
+                }]},
+                "accounts": {"claude": [], "codex": []},
+            }
+            with mock.patch.multiple(
+                    daemon, DATA_DIR=root, HISTORY_FILE=root / "history.jsonl"), \
+                    mock.patch.object(daemon, "api_quota", return_value=payload), \
+                    mock.patch.object(daemon, "_check_alerts") as alerts:
+                daemon._sample_once()
+
+        self.assertEqual(alerts.call_count, 2)
+        self.assertEqual(alerts.call_args_list[0].args[0], "Claude")
+        self.assertTrue(alerts.call_args_list[0].kwargs["allow_reset"])
+        self.assertEqual(alerts.call_args_list[1].args[0], "Codex")
+        self.assertFalse(alerts.call_args_list[1].kwargs["allow_reset"])
+
+    def test_unofficial_snapshot_cannot_confirm_quota_reset(self):
+        key = ("Codex", "default", "seven_day")
+        settings = dict(daemon.DEFAULT_SETTINGS, notify_enabled=True,
+                        notify_reset=True)
+        previous = daemon._alert_state
+        daemon._alert_state = {key: "warn"}
+        window = [{"id": "seven_day", "label": "周限额", "used_percent": 0}]
+        try:
+            with mock.patch.object(daemon, "get_settings", return_value=settings), \
+                    mock.patch.object(daemon, "_push_alert") as push, \
+                    mock.patch.object(daemon, "_alert_state_save"):
+                daemon._check_alerts("Codex", window, allow_reset=False)
+                self.assertEqual(daemon._alert_state[key], "warn")
+                push.assert_not_called()
+
+                daemon._check_alerts("Codex", window, allow_reset=True)
+                self.assertEqual(daemon._alert_state[key], "normal")
+                self.assertEqual(push.call_args.args[2], "reset")
+        finally:
+            daemon._alert_state = previous
+
+    def test_unofficial_snapshot_cannot_downgrade_critical_alert(self):
+        key = ("Codex", "default", "seven_day")
+        settings = dict(daemon.DEFAULT_SETTINGS, notify_enabled=True,
+                        notify_warn=80, notify_crit=95)
+        previous = daemon._alert_state
+        daemon._alert_state = {key: "crit"}
+        window = [{"id": "seven_day", "label": "周限额", "used_percent": 85}]
+        try:
+            with mock.patch.object(daemon, "get_settings", return_value=settings), \
+                    mock.patch.object(daemon, "_push_alert") as push, \
+                    mock.patch.object(daemon, "_alert_state_save"):
+                daemon._check_alerts("Codex", window, allow_reset=False)
+                self.assertEqual(daemon._alert_state[key], "crit")
+                push.assert_not_called()
+
+                daemon._check_alerts("Codex", window, allow_reset=True)
+                self.assertEqual(daemon._alert_state[key], "warn")
+                push.assert_not_called()
+        finally:
+            daemon._alert_state = previous
 
 
 class PersistenceAndUpdateTests(unittest.TestCase):

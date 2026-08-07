@@ -1130,9 +1130,11 @@ def _codex_quota_from_app_server(result, sampled_at=None):
 def _codex_quota_from_rollout_limits(rate_limits, sampled_at=None):
     if not isinstance(rate_limits, dict):
         return None
+    limit_id = str(rate_limits.get("limit_id") or "codex")
+    limit_name = str(rate_limits.get("limit_name") or "")
     windows = []
     for key, secondary in (("primary", False), ("secondary", True)):
-        window = _codex_window(rate_limits.get(key), secondary=secondary)
+        window = _codex_window(rate_limits.get(key), limit_id, limit_name, secondary)
         if window:
             windows.append(window)
     if not windows:
@@ -1447,11 +1449,6 @@ def _codex_rollout_for_thread(thread_id):
     return path, _codex_source_for_path(path)
 
 
-def _is_base_codex_window(window_id):
-    return (window_id in ("five_hour", "seven_day", "primary")
-            or re.fullmatch(r"win_\d+", str(window_id or "")) is not None)
-
-
 class CodexQuotaManager:
     """Authoritative in-memory Codex quota state with local event and official repair paths."""
 
@@ -1737,11 +1734,10 @@ class CodexQuotaManager:
             if old and observed_at + 0.001 < old["observed_at"]:
                 return False
             if not official and old:
-                extras = [window for window in old["quota"].get("windows", [])
-                          if not _is_base_codex_window(window.get("id"))]
                 existing_ids = {window.get("id") for window in value.get("windows", [])}
                 value["windows"] = value.get("windows", []) + [
-                    window for window in extras if window.get("id") not in existing_ids]
+                    window for window in old["quota"].get("windows", [])
+                    if window.get("id") not in existing_ids]
                 if value.get("credits") is None:
                     value["credits"] = old["quota"].get("credits")
             state = {
@@ -1759,7 +1755,8 @@ class CodexQuotaManager:
             if get_settings().get("show_codex", True):
                 accounts = self._sources()
                 _check_alerts("Codex", value.get("windows", []), src["id"],
-                              src["label"], len(accounts) > 1)
+                              src["label"], len(accounts) > 1,
+                              allow_reset=official)
         return changed
 
     def quota_for_source(self, src):
@@ -4644,12 +4641,13 @@ def _alert_state_save():
         pass
 
 
-def _push_alert(tool, msg, level, sound=False):
+def _push_alert(tool, msg, level, sound=False, dedupe_key=""):
     """额度告警走事件流（壳层用灵动岛弹丸统一渲染），不再用 osascript 系统通知。
     kind=alert 标记：「最近完成」卡过滤掉，灵动岛通道照常推送。"""
     global _event_seq
     # tool 存小写（与会话完成事件一致）→ 壳层 appIcon 选对 Claude/Codex 图标；msg 里仍是显示名
     evt = {"tool": (tool or "").lower(), "kind": "alert", "level": level, "title": msg,
+           "dedupe_key": str(dedupe_key or ""),
            "session": "", "cwd": "", "project": "", "sound": bool(sound), "ts": time.time()}
     with _events_change:
         _event_seq += 1
@@ -4659,7 +4657,7 @@ def _push_alert(tool, msg, level, sound=False):
 
 
 def _check_alerts(tool_name, windows, account_id="default", account_label="",
-                  show_account=False):
+                  show_account=False, allow_reset=True):
     s = get_settings()
     if not s["notify_enabled"]:
         return
@@ -4679,12 +4677,25 @@ def _check_alerts(tool_name, windows, account_id="default", account_label="",
             # 按 id 本地化窗口标签（通知用当前语言，不受采样时缓存影响）
             label = labels.get(w.get("id") or "", w.get("label", ""))
             if cur != prev:
+                severity = {"normal": 0, "warn": 1, "crit": 2}
+                # 非官方局部快照只能提升告警级别；任何下降都等待官方快照确认，
+                # 否则 crit -> warn -> crit 会重复发送严重告警。
+                if not allow_reset and severity[cur] < severity[prev]:
+                    continue
+                alert_key = f"{tool_name}|{account_id or 'default'}|{key[2]}"
                 if cur == "crit":
-                    _push_alert(tool_name, strs["crit"].format(tool=display_tool, label=label, pct=pct), "crit", sound)
+                    _push_alert(tool_name, strs["crit"].format(tool=display_tool, label=label, pct=pct),
+                                "crit", sound, alert_key)
                 elif cur == "warn" and prev == "normal":
-                    _push_alert(tool_name, strs["warn"].format(tool=display_tool, label=label, pct=pct), "warn")
-                elif cur == "normal" and prev in ("warn", "crit") and s["notify_reset"]:
-                    _push_alert(tool_name, strs["reset"].format(tool=display_tool, label=label, pct=pct), "reset", sound)
+                    _push_alert(tool_name, strs["warn"].format(tool=display_tool, label=label, pct=pct),
+                                "warn", dedupe_key=alert_key)
+                elif cur == "normal" and prev in ("warn", "crit"):
+                    # Rollout 是低延迟但可能稀疏的局部快照；额度回满必须由官方
+                    # app-server 快照确认，避免旧/错窗数据制造 reset -> warn 抖动。
+                    if s["notify_reset"]:
+                        _push_alert(tool_name, strs["reset"].format(
+                            tool=display_tool, label=label, pct=pct),
+                            "reset", sound, alert_key)
                 _alert_state[key] = cur
                 _alert_state_save()
 
@@ -4705,15 +4716,19 @@ def _sample_once():
                 sample["x5h"] = w["used_percent"]
             elif w.get("id") == "seven_day":
                 sample["x7d"] = w["used_percent"]
+    # Codex 的 warn/crit 仍可由采样补检，但 reset 只能由 CodexQuotaManager
+    # 应用官方快照时确认，避免把 rollout 局部值当成完整快照。
     account_groups = q.get("accounts") or {}
-    for key, tool_name, primary in (("claude", "Claude", cl), ("codex", "Codex", cx)):
+    for key, tool_name, primary in (("claude", "Claude", cl),
+                                    ("codex", "Codex", cx)):
         accounts = account_groups.get(key) or ([primary] if primary.get("ok") else [])
         show_account = len(accounts) > 1
         for account in accounts:
             if account.get("ok"):
                 _check_alerts(tool_name, account.get("windows", []),
                               str(account.get("account_id") or "default"),
-                              str(account.get("account") or ""), show_account)
+                              str(account.get("account") or ""), show_account,
+                              allow_reset=key != "codex")
     if len(sample) > 1:
         DATA_DIR.mkdir(exist_ok=True)
         with open(HISTORY_FILE, "a") as f:
