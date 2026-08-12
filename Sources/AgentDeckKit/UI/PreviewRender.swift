@@ -43,7 +43,7 @@ public enum PreviewRender {
         store.settings["show_claude"] = .bool(false)
         store.settings["show_codex"] = .bool(true)
         store.quota = PreviewSamples.response
-        return png(AgentDeckRootView(previewStore: store, version: "2.6.2")
+        return png(AgentDeckRootView(previewStore: store, version: "2.7.5")
             .frame(width: 420, height: 920), scale: scale)
     }
 
@@ -54,7 +54,7 @@ public enum PreviewRender {
         store.settings["show_claude"] = .bool(true)
         store.settings["show_codex"] = .bool(true)
         store.quota = PreviewSamples.codexOnlyResponse
-        return png(AgentDeckRootView(previewStore: store, version: "2.6.2")
+        return png(AgentDeckRootView(previewStore: store, version: "2.7.5")
             .frame(width: 420, height: 920), scale: scale)
     }
 
@@ -239,7 +239,23 @@ public enum PreviewRender {
     /// 设置页（全展开，不滚动以便整图自检）。
     public static func settingsPNG(scale: CGFloat = 2) -> Data? {
         png(PanelChrome(height: 1480) {
-            SettingsView(values: PreviewSamples.settingsValues, scrollable: false, version: "1.26.0")
+            SettingsView(values: PreviewSamples.settingsValues, scrollable: false, version: "2.7.5")
+        }, scale: scale)
+    }
+
+    /// Agent 管理子页：所有 Agent 同级纵向展示面板、状态栏和主题色设置。
+    public static func agentSettingsPNG(scale: CGFloat = 2) -> Data? {
+        png(PanelChrome(height: 420) {
+            VStack(spacing: 10) {
+                HStack(spacing: 8) {
+                    Image(systemName: "chevron.left")
+                    Text(L("set.agentManager")).font(.rounded(17, weight: .bold))
+                    Spacer()
+                }
+                .foregroundStyle(Theme.ink)
+                SettingsView(values: PreviewSamples.settingsValues, scrollable: false,
+                             page: .agents, version: "2.7.5")
+            }
         }, scale: scale)
     }
 
@@ -311,7 +327,7 @@ public enum PreviewRender {
         // mock 使用 120% 字体；真实窗口也会同步放大，预览必须匹配外框尺寸，
         // 否则 ScaledContainer 会被固定 420pt 画布裁掉左右边缘。
         let fontScale = previewFontScale
-        return png(AgentDeckRootView(previewStore: mockStore(), version: "1.26.0")
+        return png(AgentDeckRootView(previewStore: mockStore(), version: "2.7.5")
             .frame(width: 420 * fontScale, height: 1040 * fontScale), scale: scale)
     }
 
@@ -322,20 +338,33 @@ public enum PreviewRender {
         }, scale: scale)
     }
 
-    /// 多账号 carousel（两个 Claude 账号翻页 + 圆点）。
+    /// 拍平 carousel（同 Agent 多账号 + 不同 Agent 均为同级页面）。
     public static func carouselPNG(scale: CGFloat = 2) -> Data? {
         let acct2 = QuotaNode(
             ok: true, hidden: false, accountId: "acct2", account: "work@co", isDefault: false, kind: "oauth",
             windows: [PreviewSamples.win("seven_day", "周限额", 44, resetIn: 6 * 86400),
                       PreviewSamples.win("five_hour", "5 小时窗口", 71, resetIn: 1.1 * 3600)],
             error: nil, noQuota: nil, sampledAt: nil, stale: nil, credits: nil, raw: nil)
-        return png(PanelChrome(height: 320) {
-            EqualHeightQuotaRow(spacing: 10) {
-                QuotaCarousel(brand: .claude, accounts: [PreviewSamples.claude, acct2],
-                              presentation: .panelDual, reservePageIndicator: true)
-                QuotaCarousel(brand: .codex, accounts: [PreviewSamples.codex],
-                              presentation: .panelDual, reservePageIndicator: true)
-            }
+        let qoder = QuotaNode(
+            ok: true, hidden: false, accountId: "default", account: "默认", isDefault: true,
+            kind: "teams", windows: [
+                PreviewSamples.win("total", "综合额度", 36, resetIn: 5 * 86400),
+                PreviewSamples.win("plan", "套餐额度", 41, resetIn: 5 * 86400),
+            ], error: nil, noQuota: nil, sampledAt: nil, stale: nil, credits: nil, raw: nil)
+        let response = QuotaResponse(
+            claude: PreviewSamples.claude, codex: PreviewSamples.codex, qoder: qoder,
+            agents: [
+                AgentQuota(id: "claude", name: "Claude", hidden: false,
+                           accounts: [PreviewSamples.claude, acct2]),
+                AgentQuota(id: "codex", name: "Codex", hidden: false,
+                           accounts: [PreviewSamples.codex]),
+                AgentQuota(id: "qoder", name: "Qoder", hidden: false,
+                           accounts: [qoder]),
+            ], accounts: QuotaAccounts(claude: [PreviewSamples.claude, acct2],
+                                       codex: [PreviewSamples.codex], qoder: [qoder]),
+            menubar: nil, ts: nil)
+        return png(PanelChrome(height: 360) {
+            FlatQuotaCarousel(pages: response.flatPages(), autoRotate: false)
         }, scale: scale)
     }
 
@@ -387,7 +416,7 @@ public enum PreviewRender {
         s.sessions = PreviewSamples.sessions
         s.settings = PreviewSamples.settingsValues
         s.settings["font_scale"] = .int(Int((previewFontScale * 100).rounded()))
-        s.update = UpdateInfo(current: "1.25.17", latest: "1.26.0", available: true,
+        s.update = UpdateInfo(current: "2.7.5", latest: "2.8.0", available: true,
                               url: "https://github.com/Spacebody/AgentDeck/releases",
                               dmg: nil, notesUrl: nil)
         return s

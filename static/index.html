@@ -18,6 +18,8 @@
   --claude-deep: #e8744f;
   --codex: #8be9e2;
   --codex-deep: #4fd1c5;
+  --qoder: #a78bfa;
+  --qoder-deep: #7c3aed;
   --ok: #7ee2a8;
   --warn: #ffc46b;
   --danger: #ff7a8a;
@@ -221,7 +223,7 @@ body.wgt #aurora { opacity: .14; }
 }
 
 /* ----- 额度区 ----- */
-#quota { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; animation-delay: .05s; }
+#quota { display: grid; grid-template-columns: 1fr; gap: 10px; animation-delay: .05s; }
 #quota.solo { grid-template-columns: 1fr; }   /* 只显示一个 agent 时占满整行 */
 .qcard { padding: 13px 13px 11px; position: relative; overflow: hidden; }
 .qcard::before {
@@ -230,6 +232,7 @@ body.wgt #aurora { opacity: .14; }
 }
 .qcard.claude { --tint: rgba(232,116,79,.22); --ac: var(--claude); --ac-deep: var(--claude-deep); }
 .qcard.codex  { --tint: rgba(79,209,197,.18); --ac: var(--codex);  --ac-deep: var(--codex-deep); }
+.qcard.qoder  { --tint: rgba(124,58,237,.20); --ac: var(--qoder);  --ac-deep: var(--qoder-deep); }
 /* 多账号 carousel：卡片外壳不变，内容横向滑动切换（scroll-snap 原生触控/触摸板） */
 .qcard.is-carousel { padding-bottom: 8px; }
 .qtrack { display: flex; overflow-x: auto; scroll-snap-type: x mandatory;
@@ -242,6 +245,11 @@ body.wgt #aurora { opacity: .14; }
 .qdot { width: 6px; height: 6px; padding: 0; border: none; border-radius: 50%; cursor: pointer;
   background: rgba(255,255,255,.22); transition: width .25s, background .25s; }
 .qdot.on { width: 15px; border-radius: 3px; background: var(--ac); }
+.qflat-controls { display:flex; align-items:center; gap:8px; margin-top:8px; padding:0 4px; }
+.qflat-controls .qdots { flex:1; margin-top:0; }
+.qnav { width:22px; height:18px; border:0; border-radius:10px; cursor:pointer;
+  color:var(--ink-2); background:rgba(255,255,255,.07); font-size:11px; }
+.qcount { flex:1; text-align:center; color:var(--ink-2); font:600 10px "SF Pro Rounded",sans-serif; }
 .qhead { display: flex; align-items: center; gap: 6px; margin-bottom: 9px; }
 /* 品牌徽章基类：半透明品牌色底 + 单色字形 */
 .qbadge, .sbadge, .abadge {
@@ -256,11 +264,16 @@ body.wgt #aurora { opacity: .14; }
   color: var(--codex); background: rgba(79,209,197,.12);
   border-color: rgba(79,209,197,.26);
 }
+.qbadge.qoder, .sbadge.qoder, .abadge.qoder {
+  color: var(--qoder); background: rgba(124,58,237,.14);
+  border-color: rgba(167,139,250,.28);
+}
 /* 调色盘自定义主色时，徽章底色/描边、卡片辉光、品牌 chip 用 color-mix 跟随；
    旧 WebKit 无 color-mix 则保持上面的 rgba 定值，不破样式（@supports 门控对自定义属性也可靠） */
 @supports (color: color-mix(in srgb, red, blue)) {
   .qcard.claude { --tint: color-mix(in srgb, var(--claude) 22%, transparent); }
   .qcard.codex  { --tint: color-mix(in srgb, var(--codex) 18%, transparent); }
+  .qcard.qoder  { --tint: color-mix(in srgb, var(--qoder) 20%, transparent); }
   .qbadge.claude, .sbadge.claude, .abadge.claude {
     background: color-mix(in srgb, var(--claude) 16%, transparent);
     border-color: color-mix(in srgb, var(--claude) 30%, transparent);
@@ -268,6 +281,10 @@ body.wgt #aurora { opacity: .14; }
   .qbadge.codex, .sbadge.codex, .abadge.codex {
     background: color-mix(in srgb, var(--codex) 14%, transparent);
     border-color: color-mix(in srgb, var(--codex) 28%, transparent);
+  }
+  .qbadge.qoder, .sbadge.qoder, .abadge.qoder {
+    background: color-mix(in srgb, var(--qoder) 16%, transparent);
+    border-color: color-mix(in srgb, var(--qoder) 30%, transparent);
   }
   .chip[data-multi="menubar_claude"].on {
     background: color-mix(in srgb, var(--claude) 22%, transparent);
@@ -278,6 +295,11 @@ body.wgt #aurora { opacity: .14; }
     background: color-mix(in srgb, var(--codex) 18%, transparent);
     border-color: color-mix(in srgb, var(--codex) 50%, transparent);
     color: color-mix(in srgb, var(--codex) 60%, white);
+  }
+  .chip[data-multi="menubar_qoder"].on {
+    background: color-mix(in srgb, var(--qoder) 18%, transparent);
+    border-color: color-mix(in srgb, var(--qoder) 50%, transparent);
+    color: color-mix(in srgb, var(--qoder) 60%, white);
   }
 }
 .qbadge svg, .sbadge svg, .abadge svg { display: block; }
@@ -428,6 +450,7 @@ body.wgt #today, body.wgt #done { display: none !important; }
   background: linear-gradient(90deg, var(--claude), var(--claude-deep)); width: 0;
   transition: width .5s cubic-bezier(.2,.7,.2,1); }
 .prow.codex .pbar i { background: linear-gradient(90deg, var(--codex), var(--codex-deep)); }
+.prow.qoder .pbar i { background: linear-gradient(90deg, var(--qoder), var(--qoder-deep)); }
 #curvesvg { width: 100%; height: 144px; flex: 1; min-height: 44px; max-height: 300px; display: block; }
 .cv-line { fill: none; stroke-width: 1.8; stroke-linejoin: round; stroke-linecap: round; }
 .cv-grid { stroke: rgba(255,255,255,.12); stroke-width: 1; }
@@ -462,6 +485,7 @@ body.wgt #today, body.wgt #done { display: none !important; }
 .cseg.haiku  { background: linear-gradient(180deg, #aef0c8, #5fc78f); }
 .cseg.other  { background: rgba(255,255,255,.25); }
 .cseg.codex  { background: linear-gradient(180deg, var(--codex), var(--codex-deep)); }
+.cseg.qoder  { background: linear-gradient(180deg, var(--qoder), var(--qoder-deep)); }
 #tip {
   position: fixed; z-index: 50; pointer-events: none; opacity: 0; transition: opacity .15s;
   background: rgba(20,20,28,.92); border: 1px solid var(--edge-hi); border-radius: 10px;
@@ -629,6 +653,44 @@ body.wgt #today, body.wgt #done { display: none !important; }
 .tgl.on::after { transform: translateX(15px); }
 .setchips { display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; }
 .setcolors { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; justify-content: flex-end; }
+.agententry {
+  width: 100%; border: 0; background: transparent; color: inherit; font-family: inherit;
+  display: flex; align-items: center; gap: 10px; padding: 10px 0; cursor: pointer; text-align: left;
+}
+.agententry:hover .agentchev { color: var(--ink); transform: translateX(2px); }
+.agentsummary { display: flex; align-items: center; gap: 8px; color: var(--ink-2); font-size: 11.5px; font-weight: 600; }
+.agentdots { display: flex; align-items: center; }
+.agentdots i { width: 10px; height: 10px; border-radius: 50%; margin-left: -3px;
+  border: 1px solid rgba(0,0,0,.28); }
+.agentdots i:first-child { margin-left: 0; }
+.agentchev { color: var(--ink-3); font-size: 15px; transition: .18s; }
+.agentintro { color: var(--ink-3); font-size: 11px; margin: 4px 4px 10px; }
+.agentcard { padding: 2px 13px; }
+.agentrow {
+  display: grid; grid-template-columns: minmax(180px, 1fr) 68px 68px 70px;
+  align-items: center; gap: 10px; padding: 11px 0;
+  border-bottom: 1px solid rgba(255,255,255,.06);
+}
+.agentrow:last-child { border-bottom: 0; }
+.agentidentity { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.agentidentity .sbadge { flex: none; }
+.agentname { font-size: 13px; font-weight: 650; color: var(--ink); }
+.agentname small { display: block; margin-top: 3px; color: var(--ink-3); font-size: 10.5px; font-weight: 400; }
+.agentcontrol { display: flex; flex-direction: column; align-items: center; gap: 5px;
+  color: var(--ink-3); font-size: 9.5px; font-weight: 600; white-space: nowrap; }
+.agentcolor { display: flex; align-items: center; gap: 5px; min-height: 23px; }
+.agentcolor input[type="color"] {
+  width: 22px; height: 22px; padding: 0; border: 1px solid var(--edge-hi);
+  border-radius: 7px; background: none; cursor: pointer; -webkit-appearance: none; appearance: none;
+}
+.agentcolor input[type="color"]::-webkit-color-swatch-wrapper { padding: 2px; }
+.agentcolor input[type="color"]::-webkit-color-swatch { border: none; border-radius: 5px; }
+.agentreset { width: 20px; height: 20px; padding: 0; display: grid; place-items: center;
+  border-radius: 50%; border: 0; background: rgba(255,255,255,.06); color: var(--ink-3);
+  cursor: pointer; font: 600 12px/1 sans-serif; }
+.agentreset:hover { color: var(--ink); background: rgba(255,255,255,.12); }
+.agentreset.hidden { visibility: hidden; pointer-events: none; }
+.agentresetall { display: flex; justify-content: flex-end; margin-top: 10px; }
 .colordot { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--ink-2); cursor: pointer; }
 .colordot input[type="color"] {
   width: 22px; height: 22px; padding: 0; border: 1px solid var(--edge-hi);
@@ -685,6 +747,10 @@ body.wgt #today, body.wgt #done { display: none !important; }
     <linearGradient id="grad-codex" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0%" stop-color="var(--codex)"/><stop offset="100%" stop-color="var(--codex-deep)"/>
     </linearGradient>
+    <linearGradient id="grad-qoder" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="var(--qoder-deep)"/>
+      <stop offset="1" stop-color="var(--qoder)"/>
+    </linearGradient>
     <linearGradient id="grad-warn" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0%" stop-color="#ffd28a"/><stop offset="100%" stop-color="#e8a04f"/>
     </linearGradient>
@@ -739,8 +805,7 @@ body.wgt #today, body.wgt #done { display: none !important; }
 
   <div class="tabview on" id="view-overview">
   <section id="quota" class="reveal">
-    <div class="card qcard claude" id="qc-claude"><div class="qerr" data-i18n="common.loading">载入中…</div></div>
-    <div class="card qcard codex" id="qc-codex"><div class="qerr" data-i18n="common.loading">载入中…</div></div>
+    <div class="card qcard claude" id="qc-flat"><div class="qerr" data-i18n="common.loading">载入中…</div></div>
   </section>
 
   <section class="card reveal" id="today"></section>
@@ -767,12 +832,7 @@ body.wgt #today, body.wgt #done { display: none !important; }
     </div>
     <div id="usageview">
       <svg id="usagesvg" viewBox="0 0 364 144"></svg>
-      <div class="legend">
-        <span><i class="cseg opus" style="display:inline-block"></i>Opus</span>
-        <span><i class="cseg sonnet" style="display:inline-block"></i>Sonnet</span>
-        <span><i class="cseg haiku" style="display:inline-block"></i>Haiku</span>
-        <span><i class="cseg codex" style="display:inline-block"></i>Codex</span>
-      </div>
+      <div class="legend" id="usagelegend"></div>
     </div>
     <div id="curveview">
       <svg id="curvesvg" viewBox="0 0 364 144"></svg>
@@ -790,6 +850,7 @@ body.wgt #today, body.wgt #done { display: none !important; }
         <button type="button" class="chip on" data-f="all" data-i18n="session.all">全部</button>
         <button type="button" class="chip" data-f="claude">Claude</button>
         <button type="button" class="chip" data-f="codex">Codex</button>
+        <button type="button" class="chip" data-f="qoder">Qoder</button>
       </div>
       <input id="search" placeholder="搜索…" data-i18n-ph="session.search">
     </div>
@@ -805,7 +866,7 @@ body.wgt #today, body.wgt #done { display: none !important; }
         <path d="M15 18l-6-6 6-6"/>
       </svg>
     </button>
-    <span class="title" data-i18n="header.settings">设置</span>
+    <span class="title" id="settitle" data-i18n="header.settings">设置</span>
   </div>
   <div id="setbody"></div>
   <div id="setver">AgentDeck</div>
@@ -871,12 +932,12 @@ const I18N = {
     'today.summary': '今日 <b>{tok}</b> tokens', 'today.eq': '等值 <b>${cost}</b>',
     'today.deltaTitle': '近 24 小时较前一个 24 小时',
     'info.title': '统计口径', 'info.note': '订阅按窗口限额计费，等值金额仅供参考，不是实际账单。',
-    'info.priceTerm': '单价', 'info.priceText': 'Claude 按模型与缓存档位（Opus 4.5+ $5/$25，缓存读 $0.5/M，写入分 5m/1h 两档）；Codex 按 gpt-5.5（$5/$30，缓存读 -90%）',
-    'info.todayTerm': '今日', 'info.todayText': '本地自然日 0 点起的 token 总量（Claude + Codex）',
-    'info.eqTerm': '等值', 'info.eqText': '按官方 API 单价折算的金额',
+    'info.priceTerm': '单价', 'info.priceText': 'Claude 按模型与缓存档位（Opus 4.5+ $5/$25，缓存读 $0.5/M，写入分 5m/1h 两档）；Codex 按 gpt-5.5（$5/$30，缓存读 -90%）；Qoder 暂无稳定的公开模型计价接口，仅统计 token',
+    'info.todayTerm': '今日', 'info.todayText': '本地自然日 0 点起的 token 总量（Claude + Codex + Qoder）',
+    'info.eqTerm': '等值', 'info.eqText': '按 Claude/Codex 官方 API 单价折算；Qoder 不计入金额',
     'info.momTerm': '环比', 'info.momText': '近 24 小时 vs 再前 24 小时（滚动窗口，非自然日）',
-    'info.detailTerm': '明细', 'info.curveTerm': '曲线', 'info.curveText': '近 24 小时 token 用量，按整点聚合；Claude 已按消息去重，Codex 取会话累计值',
-    'info.projTerm': '项目', 'info.projText': '近 7 天按会话所在目录聚合的 token 与等值金额',
+    'info.detailTerm': '明细', 'info.curveTerm': '曲线', 'info.curveText': '近 24 小时 token 用量，按整点聚合；Claude/Qoder 按消息去重，Codex 取会话累计值',
+    'info.projTerm': '项目', 'info.projText': '近 7 天按会话所在目录聚合 token；等值金额仅含 Claude/Codex',
     'info.barTerm': '柱状', 'info.barText': '近 7 天 token 用量，本地自然日聚合，按模型分段着色', 'info.splitTerm': '分项',
     'proj.none7d': '近 7 天暂无项目用量',
     'set.secNotify': '通知', 'set.secMenubar': '菜单栏', 'set.secPanel': '面板', 'set.secResume': '会话恢复',
@@ -885,20 +946,25 @@ const I18N = {
     'set.notifyWarnHint': '用量达此发出提醒', 'set.notifyCritHint': '用量更高时发严重告警（带提示音）',
     'set.notifyReset': '重置回满提醒', 'set.sessionDone': '会话完成提醒', 'set.sessionDoneHint': '灵动岛弹出，点击跳会话',
     'set.shortFilter': '短任务过滤', 'set.shortFilterHint': '低于该时长不提醒', 'set.dwell': '提醒停留时长', 'set.sound': '提示音',
-    'set.menubarUsage': '常显用量', 'set.menubarUsageHint': '可多选，全不选只留图标',
+    'set.menubarUsage': '常显用量', 'set.menubarUsageHint': '可多选，逐项显示；全不选只留图标',
     'set.menubarAlert': '额度告警变色', 'set.menubarAlertHint': '对应段 ≥80% 变橙、≥95% 变红',
     'set.mbValueDim': '百分比窗口', 'set.mbValueDimHint': '菜单栏数字取自该额度窗口',
     'set.mbColorDim': '告警依据窗口', 'set.mbColorDimHint': '图标按该窗口用量变色',
     'set.dimShortest': '5 小时', 'set.dimWeekly': '周限额', 'set.dimMax': '用量最高',
-    'set.menubarRotate': '多账号轮转', 'set.menubarRotateHint': '多个账号时菜单栏按间隔轮流显示各账号额度', 'set.rotateOff': '关闭',
+    'set.menubarRotate': '状态栏额度滚动', 'set.menubarRotateHint': '图标与对应 Agent/账号额度作为整体逐项滚动', 'set.rotateOff': '关闭',
     'set.showActive': '活跃会话卡片', 'set.minimal': '精简模式', 'set.minimalHint': '降低视觉噪声，更耐看',
     'set.showAgents': '展示 Agent', 'set.showAgentsHint': '只用其中一个时，可隐藏不需要的板块与会话',
-    'set.colors': '主题配色', 'set.colorsHint': '自定义 Claude / Codex 主色（额度环、进度条、用量图同步）', 'set.resetColors': '恢复默认', 'set.colorsReset': '已恢复默认配色',
+    'set.colors': '主题配色', 'set.colorsHint': '自定义各 Agent 主色（额度环、进度条、用量图同步）', 'set.resetColors': '恢复默认', 'set.colorsReset': '已恢复默认配色',
+    'set.agentManager': 'Agent 管理', 'set.agentManagerHint': '控制各 Agent 的面板显示、状态栏与主题色',
+    'set.agentEnabledCount': '已启用 {enabled}/{total}', 'set.agentPanel': '面板', 'set.agentMenubar': '状态栏',
+    'set.agentColor': '主题色', 'set.agentPanelHint': '概览、会话与统计', 'set.resetAgentColor': '恢复 {agent} 默认色',
     'set.glassDim': '面板暗化强度', 'set.glassDimHint': '越低越透明',
     'set.fontScale': '字体大小', 'set.fontScaleHint': '面板与小组件整体缩放',
     'set.sessionsLimit': '会话列表数量', 'set.sessionsLimitHint': '会话页每页展示的条数',
     'set.refreshInterval': '自动刷新间隔', 'set.refreshIntervalHint': '面板自动刷新显示的间隔', 'set.sampleInterval': '曲线采样间隔', 'set.sampleIntervalHint': '额度历史曲线的记点间隔，与接口频率无关', 'set.minUnit': '{n} 分钟',
-    'set.quotaInterval': 'Claude 额度查询间隔', 'set.quotaIntervalHint': '仅控制 Claude 官方接口；Codex 自动实时同步',
+    'set.quotaInterval': '额度查询间隔', 'set.quotaIntervalHint': '控制 Claude 与 Qoder；Codex 自动实时同步',
+    'set.quotaAutoRotate': '额度自动轮播', 'set.quotaAutoRotateHint': '多个 Agent 或账号时自动切换同级额度卡',
+    'set.quotaRotateSecs': '额度轮播间隔', 'set.quotaRotateSecsHint': '悬停、拖动或手动暂停时停止轮播',
     'set.keepAwake': '保持唤醒', 'set.keepAwakeHint': '有活跃会话时阻止系统休眠，避免会话断网中断',
     'set.updateCheck': '自动检查更新', 'set.updateCheckHint': '仅向项目主页查询版本号，不发送任何数据',
     'set.checkNow': '手动检查', 'set.checkNowHint': '立即查询一次最新版本', 'set.checkNowBtn': '立即检查',
@@ -957,12 +1023,12 @@ const I18N = {
     'today.summary': 'Today <b>{tok}</b> tokens', 'today.eq': 'equiv. <b>${cost}</b>',
     'today.deltaTitle': 'Last 24h vs previous 24h',
     'info.title': 'Methodology', 'info.note': 'Subscriptions bill by window limits; equivalent amounts are indicative, not your actual bill.',
-    'info.priceTerm': 'Pricing', 'info.priceText': 'Claude by model & cache tier (Opus 4.5+ $5/$25, cache read $0.5/M, writes split 5m/1h); Codex by gpt-5.5 ($5/$30, cache read −90%)',
-    'info.todayTerm': 'Today', 'info.todayText': 'Total tokens since local midnight (Claude + Codex)',
-    'info.eqTerm': 'Equiv.', 'info.eqText': 'Amount converted at official API prices',
+    'info.priceTerm': 'Pricing', 'info.priceText': 'Claude by model and cache tier (Opus 4.5+ $5/$25, cache read $0.5/M, writes split 5m/1h); Codex by gpt-5.5 ($5/$30, cache read −90%); Qoder tokens only because no stable public model-pricing API is available',
+    'info.todayTerm': 'Today', 'info.todayText': 'Total tokens since local midnight (Claude + Codex + Qoder)',
+    'info.eqTerm': 'Equiv.', 'info.eqText': 'Converted at official Claude/Codex API prices; Qoder is excluded',
     'info.momTerm': 'Trend', 'info.momText': 'Last 24h vs the 24h before (rolling window, not calendar day)',
-    'info.detailTerm': 'Detail', 'info.curveTerm': 'Curve', 'info.curveText': 'Last 24h token usage, bucketed hourly; Claude deduped per message, Codex uses cumulative session value',
-    'info.projTerm': 'Projects', 'info.projText': 'Last 7 days, tokens & equivalent grouped by session directory',
+    'info.detailTerm': 'Detail', 'info.curveTerm': 'Curve', 'info.curveText': 'Last 24h token usage, bucketed hourly; Claude/Qoder are deduped per message, while Codex uses cumulative session values',
+    'info.projTerm': 'Projects', 'info.projText': 'Last 7 days, tokens grouped by session directory; equivalent cost includes Claude/Codex only',
     'info.barTerm': 'Bars', 'info.barText': 'Last 7 days token usage, grouped by local day, colored by model', 'info.splitTerm': 'Split',
     'proj.none7d': 'No project usage in the last 7 days',
     'set.secNotify': 'Notifications', 'set.secMenubar': 'Menu bar', 'set.secPanel': 'Panel', 'set.secResume': 'Session resume',
@@ -971,20 +1037,25 @@ const I18N = {
     'set.notifyWarnHint': 'Notify when usage reaches this', 'set.notifyCritHint': 'Stronger alert with sound at a higher level',
     'set.notifyReset': 'Reset-to-full alert', 'set.sessionDone': 'Session-done alert', 'set.sessionDoneHint': 'Island popup; click to jump',
     'set.shortFilter': 'Short-task filter', 'set.shortFilterHint': "Don't alert below this duration", 'set.dwell': 'Alert dwell time', 'set.sound': 'Sound',
-    'set.menubarUsage': 'Always-on usage', 'set.menubarUsageHint': 'Multi-select; none = icon only',
+    'set.menubarUsage': 'Always-on usage', 'set.menubarUsageHint': 'Multi-select; shown one at a time; none = icon only',
     'set.menubarAlert': 'Quota alert colors', 'set.menubarAlertHint': 'Segment turns orange at ≥80%, red at ≥95%',
     'set.mbValueDim': 'Percent window', 'set.mbValueDimHint': 'Menubar number is taken from this window',
     'set.mbColorDim': 'Alert window', 'set.mbColorDimHint': 'Icon color follows this window’s usage',
     'set.dimShortest': '5-hour', 'set.dimWeekly': 'Weekly', 'set.dimMax': 'Highest',
-    'set.menubarRotate': 'Rotate accounts', 'set.menubarRotateHint': 'With multiple accounts, cycle each account\'s quota in the menubar', 'set.rotateOff': 'Off',
+    'set.menubarRotate': 'Menubar quota rotation', 'set.menubarRotateHint': 'Roll each agent/account icon and its quota together', 'set.rotateOff': 'Off',
     'set.showActive': 'Active sessions card', 'set.minimal': 'Minimal mode', 'set.minimalHint': 'Less visual noise, easier on the eyes',
     'set.showAgents': 'Show agents', 'set.showAgentsHint': 'Using only one? Hide the panel and sessions you do not use',
-    'set.colors': 'Theme colors', 'set.colorsHint': 'Customize Claude / Codex accent (rings, bars, usage chart follow)', 'set.resetColors': 'Reset', 'set.colorsReset': 'Colors reset to default',
+    'set.colors': 'Theme colors', 'set.colorsHint': 'Customize each agent accent (rings, bars, usage chart follow)', 'set.resetColors': 'Reset', 'set.colorsReset': 'Colors reset to default',
+    'set.agentManager': 'Agent management', 'set.agentManagerHint': "Control each agent's panel, menu bar, and theme color",
+    'set.agentEnabledCount': 'Enabled {enabled}/{total}', 'set.agentPanel': 'Panel', 'set.agentMenubar': 'Menu bar',
+    'set.agentColor': 'Color', 'set.agentPanelHint': 'Overview, sessions, and usage', 'set.resetAgentColor': 'Reset {agent} color',
     'set.glassDim': 'Panel dimming', 'set.glassDimHint': 'Lower = more transparent',
     'set.fontScale': 'Font size', 'set.fontScaleHint': 'Scales the panel and widget as a whole',
     'set.sessionsLimit': 'Sessions list size', 'set.sessionsLimitHint': 'Rows shown on each sessions page',
     'set.refreshInterval': 'Auto-refresh interval', 'set.refreshIntervalHint': 'How often the panel refreshes its display', 'set.sampleInterval': 'Chart sampling interval', 'set.sampleIntervalHint': 'How often the history chart records a point; unrelated to API frequency', 'set.minUnit': '{n} min',
-    'set.quotaInterval': 'Claude quota interval', 'set.quotaIntervalHint': 'Claude API only; Codex syncs automatically in real time',
+    'set.quotaInterval': 'Quota query interval', 'set.quotaIntervalHint': 'Controls Claude and Qoder; Codex syncs automatically in real time',
+    'set.quotaAutoRotate': 'Auto-rotate quota cards', 'set.quotaAutoRotateHint': 'Cycle peer cards for multiple agents or accounts',
+    'set.quotaRotateSecs': 'Quota rotation interval', 'set.quotaRotateSecsHint': 'Pauses while hovering, dragging, or manually paused',
     'set.keepAwake': 'Keep awake', 'set.keepAwakeHint': 'Prevent system sleep while sessions are active, so they survive sleep/network drops',
     'set.updateCheck': 'Check for updates', 'set.updateCheckHint': 'Only asks the project site for a version number; sends nothing',
     'set.checkNow': 'Manual check', 'set.checkNowHint': 'Query the latest version right now', 'set.checkNowBtn': 'Check now',
@@ -1043,12 +1114,12 @@ const I18N = {
     'today.summary': '今日 <b>{tok}</b> tokens', 'today.eq': '換算 <b>${cost}</b>',
     'today.deltaTitle': '直近24時間 vs その前の24時間',
     'info.title': '集計基準', 'info.note': 'サブスクは枠の上限で課金されます。換算額は目安で実際の請求ではありません。',
-    'info.priceTerm': '単価', 'info.priceText': 'Claude はモデルとキャッシュ段階（Opus 4.5+ $5/$25、キャッシュ読み $0.5/M、書き込みは 5m/1h の2段）；Codex は gpt-5.5（$5/$30、キャッシュ読み −90%）',
-    'info.todayTerm': '今日', 'info.todayText': 'ローカル暦日0時からの token 合計（Claude + Codex）',
-    'info.eqTerm': '換算', 'info.eqText': '公式 API 単価で換算した金額',
+    'info.priceTerm': '単価', 'info.priceText': 'Claude はモデルとキャッシュ段階（Opus 4.5+ $5/$25、キャッシュ読み $0.5/M、書き込みは 5m/1h の2段）；Codex は gpt-5.5（$5/$30、キャッシュ読み −90%）；Qoder は安定した公開モデル料金 API がないため token のみ集計',
+    'info.todayTerm': '今日', 'info.todayText': 'ローカル暦日0時からの token 合計（Claude + Codex + Qoder）',
+    'info.eqTerm': '換算', 'info.eqText': 'Claude/Codex の公式 API 単価で換算し、Qoder は金額に含めない',
     'info.momTerm': '前比', 'info.momText': '直近24時間 vs その前の24時間（ローリング、暦日ではない）',
-    'info.detailTerm': '内訳', 'info.curveTerm': '曲線', 'info.curveText': '直近24時間の token 使用量、毎正時で集計；Claude はメッセージ単位で重複排除、Codex はセッション累計値',
-    'info.projTerm': 'プロジェクト', 'info.projText': '直近7日間、セッションのディレクトリ別に token と換算額を集計',
+    'info.detailTerm': '内訳', 'info.curveTerm': '曲線', 'info.curveText': '直近24時間の token 使用量、毎正時で集計；Claude/Qoder はメッセージ単位で重複排除、Codex はセッション累計値',
+    'info.projTerm': 'プロジェクト', 'info.projText': '直近7日間、セッションのディレクトリ別に token を集計；換算額は Claude/Codex のみ',
     'info.barTerm': '棒', 'info.barText': '直近7日間の token 使用量、ローカル暦日で集計、モデル別に色分け', 'info.splitTerm': '内訳',
     'proj.none7d': '直近7日間のプロジェクト使用なし',
     'set.secNotify': '通知', 'set.secMenubar': 'メニューバー', 'set.secPanel': 'パネル', 'set.secResume': 'セッション再開',
@@ -1057,20 +1128,25 @@ const I18N = {
     'set.notifyWarnHint': '使用量がこの値で通知', 'set.notifyCritHint': 'さらに高い値で重大警告（通知音あり）',
     'set.notifyReset': '回復時に通知', 'set.sessionDone': 'セッション完了通知', 'set.sessionDoneHint': 'アイランド表示、クリックで移動',
     'set.shortFilter': '短時間タスク除外', 'set.shortFilterHint': 'この時間未満は通知しない', 'set.dwell': '通知の表示時間', 'set.sound': '通知音',
-    'set.menubarUsage': '使用率を常時表示', 'set.menubarUsageHint': '複数選択可、未選択ならアイコンのみ',
+    'set.menubarUsage': '使用率を常時表示', 'set.menubarUsageHint': '複数選択可、1件ずつ表示。未選択ならアイコンのみ',
     'set.menubarAlert': 'クォータ警告色', 'set.menubarAlertHint': '該当セグメントが ≥80% で橙、≥95% で赤に',
     'set.mbValueDim': '％の参照枠', 'set.mbValueDimHint': 'メニューバーの数値をこの枠から取得',
     'set.mbColorDim': '警告の参照枠', 'set.mbColorDimHint': 'アイコン色はこの枠の使用量に従う',
     'set.dimShortest': '5時間', 'set.dimWeekly': '週間', 'set.dimMax': '最大',
-    'set.menubarRotate': 'アカウント切替表示', 'set.menubarRotateHint': '複数アカウント時、メニューバーで各残量を順番に表示', 'set.rotateOff': 'オフ',
+    'set.menubarRotate': 'メニューバー残量スクロール', 'set.menubarRotateHint': 'Agent/アカウントのアイコンと残量を一組で順番に表示', 'set.rotateOff': 'オフ',
     'set.showActive': 'アクティブセッション', 'set.minimal': 'ミニマルモード', 'set.minimalHint': '視覚ノイズを抑えて見やすく',
-    'set.showAgents': 'Agent を表示', 'set.showAgentsHint': '片方だけ使う場合、不要なパネルとセッションを隠せます',
-    'set.colors': 'テーマカラー', 'set.colorsHint': 'Claude / Codex のアクセント色をカスタム（リング・バー・使用量グラフに反映）', 'set.resetColors': 'リセット', 'set.colorsReset': '既定の配色に戻しました',
+    'set.showAgents': 'Agent を表示', 'set.showAgentsHint': '使わない Agent のパネルとセッションを個別に隠せます',
+    'set.colors': 'テーマカラー', 'set.colorsHint': '各 Agent のアクセント色をカスタム（リング・バー・使用量グラフに反映）', 'set.resetColors': 'リセット', 'set.colorsReset': '既定の配色に戻しました',
+    'set.agentManager': 'Agent 管理', 'set.agentManagerHint': '各 Agent のパネル表示、メニューバー、テーマカラーを管理',
+    'set.agentEnabledCount': '有効 {enabled}/{total}', 'set.agentPanel': 'パネル', 'set.agentMenubar': 'メニューバー',
+    'set.agentColor': 'テーマ色', 'set.agentPanelHint': '概要、セッション、使用量', 'set.resetAgentColor': '{agent} の色をリセット',
     'set.glassDim': 'パネルの暗さ', 'set.glassDimHint': '低いほど透明',
     'set.fontScale': '文字サイズ', 'set.fontScaleHint': 'パネルとウィジェット全体を拡大縮小',
     'set.sessionsLimit': 'セッション一覧の件数', 'set.sessionsLimitHint': 'セッションページごとの表示件数',
     'set.refreshInterval': '自動更新の間隔', 'set.refreshIntervalHint': 'パネルの表示を更新する間隔', 'set.sampleInterval': 'グラフ採取間隔', 'set.sampleIntervalHint': '履歴グラフの記録間隔。API頻度とは無関係', 'set.minUnit': '{n} 分',
-    'set.quotaInterval': 'Claude 残量の取得間隔', 'set.quotaIntervalHint': 'Claude API のみ。Codex は自動でリアルタイム同期',
+    'set.quotaInterval': '残量の取得間隔', 'set.quotaIntervalHint': 'Claude と Qoder を制御。Codex は自動でリアルタイム同期',
+    'set.quotaAutoRotate': '残量カードを自動切替', 'set.quotaAutoRotateHint': '複数の Agent またはアカウントを同階層で順番に表示',
+    'set.quotaRotateSecs': '残量カードの切替間隔', 'set.quotaRotateSecsHint': 'ホバー、ドラッグ、手動一時停止中は切り替えません',
     'set.keepAwake': 'スリープ防止', 'set.keepAwakeHint': 'アクティブなセッション中はスリープを防ぎ、切断による中断を回避',
     'set.updateCheck': '更新を自動確認', 'set.updateCheckHint': 'プロジェクトサイトにバージョン番号のみ照会、データ送信なし',
     'set.checkNow': '手動チェック', 'set.checkNowHint': '今すぐ最新バージョンを照会', 'set.checkNowBtn': '今すぐ確認',
@@ -1130,10 +1206,11 @@ function applyStaticI18n(root = document) {
 }
 /* 品牌字形徽章：官方菜单栏模板图（Claude TrayIconTemplate / Codex codexTemplate）
    以 CSS mask 取形、currentColor 上色 —— 形状严格官方，配色跟随玻璃语言 */
-const badge = (tool, sz = 13) =>
-  `<span class="bglyph" style="width:${sz}px;height:${sz}px;
+const badge = (tool, sz = 13) => tool === 'qoder'
+  ? `<span style="font:700 ${Math.max(9, sz - 1)}px 'SF Pro Rounded',sans-serif">Q</span>`
+  : `<span class="bglyph" style="width:${sz}px;height:${sz}px;
      -webkit-mask-size:${tool === 'claude' ? '141%' : 'contain'};
-     -webkit-mask-image:url('/brand/${tool === 'claude' ? 'claude' : 'codex'}-tray@2x.png')"></span>`;
+     -webkit-mask-image:url('/brand/${tool}-tray@2x.png')"></span>`;
 
 /* ---------- 工具 ---------- */
 const fmtTokens = n => n >= 1e9 ? (n/1e9).toFixed(1)+'B' : n >= 1e6 ? (n/1e6).toFixed(1)+'M'
@@ -1305,11 +1382,85 @@ function renderQuotaTool(el, name, accounts, gradId) {
 async function loadQuota(force) {
   try {
     const d = await (await fetch('/api/quota' + (force ? '?force=1' : ''))).json();
-    const acc = d.accounts || {};
-    renderQuotaTool($('#qc-claude'), 'Claude', acc.claude || (d.claude ? [d.claude] : []), 'grad-claude');
-    renderQuotaTool($('#qc-codex'), 'Codex', acc.codex || (d.codex ? [d.codex] : []), 'grad-codex');
+    renderQuotaFlat($('#qc-flat'), d);
     $('#live').classList.remove('err');
   } catch (e) { $('#live').classList.add('err'); }
+}
+
+let _quotaFlatID = '', _quotaFlatTimer = null, _quotaFlatPaused = false;
+function renderQuotaFlat(el, data) {
+  const legacy = ['claude', 'codex', 'qoder'].map(id => ({
+    id, name: id[0].toUpperCase() + id.slice(1), hidden: data[id] && data[id].hidden,
+    accounts: ((data.accounts || {})[id]) || (data[id] ? [data[id]] : []),
+  }));
+  const groups = Array.isArray(data.agents) && data.agents.length ? data.agents : legacy;
+  const pages = groups.filter(g => agentOn(g.id) && !g.hidden).flatMap(g => {
+    const ordered = (g.accounts || []).map((a, i) => ({a, i})).sort((x, y) =>
+      (y.a.is_default === true) - (x.a.is_default === true) || x.i - y.i).map(x => x.a);
+    return ordered.map((a, i) => ({
+      id: `${g.id}::${a.account_id || (a.is_default ? 'default' : 'account-' + i)}`,
+      tool: g.id, name: g.name || (g.id[0].toUpperCase() + g.id.slice(1)), account: a,
+    }));
+  });
+  clearTimeout(_quotaFlatTimer);
+  if (!pages.length) {
+    el.className = 'card qcard';
+    el.innerHTML = `<div class="qerr">${t('usage.noVisibleAgents')}</div>`;
+    return;
+  }
+  let index = Math.max(0, pages.findIndex(p => p.id === _quotaFlatID));
+  if (index < 0) index = 0;
+  const pageHTML = pages.map(p =>
+    `<div class="qpage ${p.tool}" style="--ac:var(--${p.tool});--ac-deep:var(--${p.tool}-deep)">
+       ${quotaCardInner(p.name, p.account, 'grad-' + p.tool, p.account.account || '')}</div>`).join('');
+  const indicator = pages.length <= 6
+    ? `<div class="qdots">${pages.map((p, i) => `<button type="button" class="qdot${i === index ? ' on' : ''}" data-i="${i}" title="${esc(p.name + ' ' + (p.account.account || ''))}"></button>`).join('')}</div>`
+    : `<div class="qcount"><span>${index + 1}</span> / ${pages.length}</div>`;
+  const controls = pages.length > 1 ? `<div class="qflat-controls">
+    <button type="button" class="qnav" data-act="prev" aria-label="Previous">‹</button>${indicator}
+    <button type="button" class="qnav" data-act="pause" aria-label="Pause">${_quotaFlatPaused ? '▶' : 'Ⅱ'}</button>
+    <button type="button" class="qnav" data-act="next" aria-label="Next">›</button></div>` : '';
+  el.className = `card qcard ${pages[index].tool}${pages.length > 1 ? ' is-carousel' : ''}`;
+  el.innerHTML = pages.length > 1 ? `<div class="qtrack">${pageHTML}</div>${controls}` : pageHTML;
+  const track = el.querySelector('.qtrack');
+  let restoring = !!track;
+  const schedule = () => {
+    clearTimeout(_quotaFlatTimer);
+    const secs = [4, 6, 8, 10].includes(settings && settings.quota_rotate_secs)
+      ? settings.quota_rotate_secs : 6;
+    if (pages.length > 1 && settings && settings.quota_auto_rotate !== false && !_quotaFlatPaused)
+      _quotaFlatTimer = setTimeout(() => setPage(index + 1, true), secs * 1000);
+  };
+  const paint = () => {
+    _quotaFlatID = pages[index].id;
+    el.classList.remove('claude', 'codex', 'qoder'); el.classList.add(pages[index].tool);
+    el.querySelectorAll('.qdot').forEach((dot, i) => dot.classList.toggle('on', i === index));
+    const count = el.querySelector('.qcount span'); if (count) count.textContent = index + 1;
+  };
+  const setPage = (requested, smooth) => {
+    index = (requested % pages.length + pages.length) % pages.length;
+    paint();
+    if (track) track.scrollTo({left: track.clientWidth * index, behavior: smooth ? 'smooth' : 'auto'});
+    schedule();
+  };
+  if (track) {
+    const restore = () => { track.scrollLeft = track.clientWidth * index; };
+    restore(); requestAnimationFrame(() => { restore(); requestAnimationFrame(() => { restore(); restoring = false; }); });
+    let raf;
+    track.onscroll = () => { if (restoring) return; cancelAnimationFrame(raf); raf = requestAnimationFrame(() => {
+      index = Math.max(0, Math.min(pages.length - 1, Math.round(track.scrollLeft / track.clientWidth)));
+      paint(); schedule();
+    }); };
+  }
+  el.querySelectorAll('.qdot').forEach(dot => dot.onclick = () => setPage(+dot.dataset.i, true));
+  el.querySelector('[data-act="prev"]')?.addEventListener('click', () => setPage(index - 1, true));
+  el.querySelector('[data-act="next"]')?.addEventListener('click', () => setPage(index + 1, true));
+  el.querySelector('[data-act="pause"]')?.addEventListener('click', e => {
+    _quotaFlatPaused = !_quotaFlatPaused; e.currentTarget.textContent = _quotaFlatPaused ? '▶' : 'Ⅱ'; schedule();
+  });
+  el.onmouseenter = () => clearTimeout(_quotaFlatTimer);
+  el.onmouseleave = schedule;
+  paint(); animateQuota(el); schedule();
 }
 
 /* ---------- 用量图 ---------- */
@@ -1324,6 +1475,7 @@ function showTip(e, html) {
 async function loadUsage() {
   try {
     const d = await (await fetch('/api/usage')).json();
+    const showClaude = agentOn('claude'), showCodex = agentOn('codex'), showQoder = agentOn('qoder');
     $('#cost').innerHTML = t('usage.costEq', {c7: Math.round(d.cost_7d), c30: Math.round(d.cost_30d)});
     _costSplit = t('usage.costSplit', {
       c7: Math.round(d.claude_cost_7d||0), c30: Math.round(d.claude_cost_30d||0),
@@ -1333,14 +1485,17 @@ async function loadUsage() {
       const models = d.claude_daily[day] || {};
       const per = {};
       let sum = 0;
-      for (const [m, v] of Object.entries(models)) {
-        const t = v.reduce((a,b) => a+b, 0);
-        // 后端键带版本号（如 opus-4-8），归并到家族名供堆叠段取色
-        const fam = ['opus', 'sonnet', 'haiku'].find(f => m.startsWith(f)) || 'other';
-        if (t > 0) { per[fam] = (per[fam] || 0) + t; sum += t; }
+      if (showClaude) {
+        for (const [m, v] of Object.entries(models)) {
+          const tokens = v.reduce((a,b) => a+b, 0);
+          // 后端键带版本号（如 opus-4-8），归并到家族名供堆叠段取色
+          const fam = ['opus', 'sonnet', 'haiku'].find(f => m.startsWith(f)) || 'other';
+          if (tokens > 0) { per[fam] = (per[fam] || 0) + tokens; sum += tokens; }
+        }
       }
-      const cx = d.codex_daily[day] || 0;
-      return { day, per, claude: sum, codex: cx, all: sum + cx };
+      const cx = showCodex ? d.codex_daily[day] || 0 : 0;
+      const qo = showQoder ? (d.qoder_daily || {})[day] || 0 : 0;
+      return { day, per, claude: sum, codex: cx, qoder: qo, all: sum + cx + qo };
     });
     // 纵轴取整到 1/2/2.5/5×10^n 的"漂亮值"
     const maxRaw = Math.max(...totals.map(t => t.all), 1);
@@ -1360,6 +1515,7 @@ async function loadUsage() {
       opus:   ['#ffb38a', '#e8744f'], sonnet: ['#9db8ff', '#5f7de8'],
       haiku:  ['#aef0c8', '#5fc78f'], other:  ['#9a9aa5', '#6a6a75'],
       codex:  ['var(--codex)', 'var(--codex-deep)'],   // Codex agent 段跟随主题色
+      qoder:  ['var(--qoder)', 'var(--qoder-deep)'],
     };
     let body = '<defs>' + Object.entries(GRAD).map(([k, [a, b]]) => `
       <linearGradient id="ug-${k}" x1="0" y1="0" x2="0" y2="1">
@@ -1381,8 +1537,8 @@ async function loadUsage() {
       if (td.all > 0) {
         segs += `<clipPath id="ub${i}"><rect x="${x}" y="${(Y0 - Math.max(totalH, 4)).toFixed(1)}"
           width="${BW}" height="${Math.max(totalH, 4).toFixed(1)}" rx="4.5"/></clipPath>`;
-        for (const m of ['opus', 'sonnet', 'haiku', 'other', 'codex']) {
-          const v = m === 'codex' ? td.codex : (td.per[m] || 0);
+        for (const m of ['opus', 'sonnet', 'haiku', 'other', 'codex', 'qoder']) {
+          const v = m === 'codex' ? td.codex : m === 'qoder' ? td.qoder : (td.per[m] || 0);
           if (!v) continue;
           const h = v / niceMax * (Y0 - Y1);
           segs += `<rect x="${x}" y="${(cur - h).toFixed(1)}" width="${BW}" height="${(h + .5).toFixed(1)}"
@@ -1400,7 +1556,9 @@ async function loadUsage() {
         <text class="cv-label" x="${cx}" y="${Y0 + 22}" text-anchor="middle">${td.day.slice(5).replace('-', '/')}</text>`;
       const tipHtml = `<b>${td.day.slice(5)}</b><br>` +
         Object.entries(td.per).map(([m, v]) => `${m}: <b>${fmtTokens(v)}</b>`).join('<br>') +
-        (td.codex ? `<br>codex: <b>${fmtTokens(td.codex)}</b>` : '') + (td.all === 0 ? t('usage.noUsage') : '');
+        (td.codex ? `<br>codex: <b>${fmtTokens(td.codex)}</b>` : '') +
+        (td.qoder ? `<br>qoder: <b>${fmtTokens(td.qoder)}</b>` : '') +
+        (td.all === 0 ? t('usage.noUsage') : '');
       return `<g class="uday" data-tip="${esc(tipHtml)}">
         <rect x="${X0 + slot * i}" y="${Y1}" width="${slot}" height="${Y0 - Y1 + 22}" fill="transparent"/>
         ${segs}</g>`;
@@ -1412,6 +1570,11 @@ async function loadUsage() {
       el.onmousemove = e => showTip(e, el.dataset.tip);
       el.onmouseleave = () => tip.style.opacity = 0;
     });
+    $('#usagelegend').innerHTML = [
+      showClaude ? '<span><i class="cseg opus"></i>Opus</span><span><i class="cseg sonnet"></i>Sonnet</span><span><i class="cseg haiku"></i>Haiku</span>' : '',
+      showCodex ? '<span><i class="cseg codex"></i>Codex</span>' : '',
+      showQoder ? '<span><i class="cseg qoder"></i>Qoder</span>' : '',
+    ].join('');
   } catch (e) {}
 }
 
@@ -1638,7 +1801,7 @@ async function loadCurve() {
     for (let i = 23; i >= 0; i--) {
       const ts = nowH - i * hourMs;
       const h = byTs[ts] || {};
-      buckets.push({ ts: ts + hourMs / 2, c: h.c || 0, x: h.x || 0 });
+      buckets.push({ ts: ts + hourMs / 2, c: h.c || 0, x: h.x || 0, q: h.q || 0 });
     }
     // 按容器实际宽高铺满（面板可伸缩，图表弹性生长）；viewBox 跟随实际高度，避免缩放变形
     const VBW = Math.max(280, Math.round(svg.clientWidth) || 364);
@@ -1647,7 +1810,8 @@ async function loadCurve() {
     const X0 = 32, X1 = VBW - 6, Y0 = VBH - 24, Y1 = 8, BASE = Y0;
     const t0 = nowH - 23 * hourMs, t1 = nowH + hourMs;
     const px = ts => X0 + (ts - t0) / (t1 - t0) * (X1 - X0);
-    const peak = Math.max(1, ...buckets.map(b => Math.max(b.c, b.x)));
+    const peak = Math.max(1, ...buckets.map(b => Math.max(
+      agentOn('claude') ? b.c : 0, agentOn('codex') ? b.x : 0, agentOn('qoder') ? b.q : 0)));
     const pow = 10 ** Math.floor(Math.log10(peak));
     const yMax = [1, 2, 2.5, 5, 10].map(m => m * pow).find(v => v >= peak);
     const py = v => Y0 - v / yMax * (Y0 - Y1);
@@ -1661,6 +1825,10 @@ async function loadCurve() {
       <linearGradient id="cvf-x" x1="0" y1="0" x2="0" y2="1">
         <stop offset="0%" stop-color="var(--codex)" stop-opacity=".25"/>
         <stop offset="100%" stop-color="var(--codex)" stop-opacity="0"/>
+      </linearGradient>
+      <linearGradient id="cvf-q" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="var(--qoder)" stop-opacity=".25"/>
+        <stop offset="100%" stop-color="var(--qoder)" stop-opacity="0"/>
       </linearGradient>
     </defs>`;
 
@@ -1681,7 +1849,8 @@ async function loadCurve() {
     const series = [
       {key: 'c', color: 'var(--claude)', name: 'Claude', fill: 'url(#cvf-c)'},
       {key: 'x', color: 'var(--codex)', name: 'Codex', fill: 'url(#cvf-x)'},
-    ];
+      {key: 'q', color: 'var(--qoder)', name: 'Qoder', fill: 'url(#cvf-q)'},
+    ].filter(s => agentOn({c: 'claude', x: 'codex', q: 'qoder'}[s.key]));
     const legend = [];
     for (const s of series) {
       const pts = buckets.map(b => [px(b.ts), py(b[s.key])]);
@@ -1734,7 +1903,7 @@ $('#usageinfo').onclick = () => showInfoPop('usage');
 
 /* ---------- 今日摘要条（token / 等值$ / 24h 环比 + 模型分布环） ---------- */
 const FAM_COLORS = {opus: '#e8744f', sonnet: '#5f7de8', haiku: '#5fc78f',
-                    other: '#9a9aa5', codex: 'var(--codex-deep)'};
+                    other: '#9a9aa5', codex: 'var(--codex-deep)', qoder: 'var(--qoder-deep)'};
 function miniDonut(parts, sz = 22) {   // parts: [{v, color}]
   const total = parts.reduce((a, p) => a + p.v, 0);
   if (!total) return '';
@@ -1757,18 +1926,25 @@ async function loadToday() {
     const el = $('#today');
     const today = d.days[d.days.length - 1];
     const fams = {};
-    for (const [m, v] of Object.entries(d.claude_daily[today] || {})) {
-      const fam = ['opus', 'sonnet', 'haiku'].find(f => m.startsWith(f)) || 'other';
-      fams[fam] = (fams[fam] || 0) + v.reduce((a, b) => a + b, 0);
+    if (agentOn('claude')) {
+      for (const [m, v] of Object.entries(d.claude_daily[today] || {})) {
+        const fam = ['opus', 'sonnet', 'haiku'].find(f => m.startsWith(f)) || 'other';
+        fams[fam] = (fams[fam] || 0) + v.reduce((a, b) => a + b, 0);
+      }
     }
-    fams.codex = d.codex_daily[today] || 0;
+    if (agentOn('codex')) fams.codex = d.codex_daily[today] || 0;
+    if (agentOn('qoder')) fams.qoder = (d.qoder_daily || {})[today] || 0;
     const tok = Object.values(fams).reduce((a, b) => a + b, 0);
     el.classList.toggle('has', tok > 0);
     if (!tok) { el.innerHTML = ''; return; }
     // 环比：近 24h vs 前 24h（hourly 覆盖 48h）
     const nowSec = Date.now() / 1000;
     let cur = 0, prev = 0;
-    for (const h of d.hourly) (h.ts >= nowSec - 86400 ? cur += h.c + h.x : prev += h.c + h.x);
+    for (const h of d.hourly) {
+      const tokens = (agentOn('claude') ? h.c || 0 : 0) + (agentOn('codex') ? h.x || 0 : 0)
+        + (agentOn('qoder') ? h.q || 0 : 0);
+      h.ts >= nowSec - 86400 ? cur += tokens : prev += tokens;
+    }
     const delta = prev > 0 ? Math.round((cur - prev) / prev * 100) : null;
     const donut = miniDonut(Object.entries(fams).map(([f, v]) => ({v, color: FAM_COLORS[f]})));
     const deltaHtml = delta === null ? ''
@@ -1821,13 +1997,17 @@ async function loadProjects() {
     const el = $('#projview');
     if (!list.length) { el.innerHTML = `<div class="qerr">${t('proj.none7d')}</div>`; return; }
     const max = Math.max(...list.map(p => p.tokens), 1);
-    el.innerHTML = list.map(p => `
-      <div class="prow ${p.cwd.includes('/Codex') ? 'codex' : ''}" title="${esc(p.cwd)}">
+    el.innerHTML = list.map(p => {
+      const dominant = Object.entries(p.agents || {}).sort((a, b) => b[1] - a[1])[0]?.[0]
+        || (p.cwd.includes('/Codex') ? 'codex' : 'claude');
+      return `
+      <div class="prow ${dominant}" title="${esc(p.cwd)}">
         <div class="ptop"><span class="pname">${esc(p.name)}</span>
           <span class="pcost">$${Math.round(p.cost)}</span>
           <span class="ptok">${fmtTokens(p.tokens)}</span></div>
         <div class="pbar"><i data-w="${(p.tokens / max * 100).toFixed(1)}"></i></div>
-      </div>`).join('');
+      </div>`;
+    }).join('');
     requestAnimationFrame(() => requestAnimationFrame(() =>
       el.querySelectorAll('.pbar i').forEach(b => b.style.width = b.dataset.w + '%')));
   } catch {}
@@ -1850,6 +2030,13 @@ $('#search').oninput = e => {
 
 /* ---------- 设置 ---------- */
 let settings = null;
+let settingsPage = 'main';
+// Agent 级设置注册表：入口摘要与管理页共用，避免按配置项重复维护横向列表。
+const AGENT_SETTINGS = [
+  {id: 'claude', name: 'Claude', show: 'show_claude', menubar: 'menubar_claude', color: 'color_claude', def: '#ff9d7a'},
+  {id: 'codex', name: 'Codex', show: 'show_codex', menubar: 'menubar_codex', color: 'color_codex', def: '#8be9e2'},
+  {id: 'qoder', name: 'Qoder', show: 'show_qoder', menubar: 'menubar_qoder', color: 'color_qoder', def: '#a78bfa'},
+];
 // label/hint/sec/btns.name 存 i18n key，渲染时经 t() 解析（语言切换即时生效）
 const SET_SCHEMA = [
   // 常用優先：外观/语言在前，告警阈值类「设一次就不动」的往后
@@ -1861,22 +2048,19 @@ const SET_SCHEMA = [
    opts: [100, 110, 120, 135], fmt: v => v + '%', custom: [80, 160]},
   {key: 'glass_dim', label: 'set.glassDim', hint: 'set.glassDimHint', type: 'chips',
    opts: [40, 55, 68, 80], fmt: v => v + '%', custom: [20, 90]},
-  {type: 'colors', label: 'set.colors', hint: 'set.colorsHint',
-   opts: [{k: 'color_claude', name: 'Claude', def: '#ff9d7a'},
-          {k: 'color_codex', name: 'Codex', def: '#4fd1c5'}]},
   {key: 'minimal_mode', label: 'set.minimal', hint: 'set.minimalHint', type: 'toggle'},
   {key: 'show_active', label: 'set.showActive', type: 'toggle'},
-  {label: 'set.showAgents', hint: 'set.showAgentsHint', type: 'multi',
-   opts: [{k: 'show_claude', name: 'Claude'}, {k: 'show_codex', name: 'Codex'}]},
+  {label: 'set.agentManager', hint: 'set.agentManagerHint', type: 'agentmanager'},
   {key: 'sessions_limit', label: 'set.sessionsLimit', hint: 'set.sessionsLimitHint', type: 'chips', opts: [10, 20, 30, 50], custom: [5, 100]},
   {key: 'refresh_interval', label: 'set.refreshInterval', hint: 'set.refreshIntervalHint', type: 'chips', opts: [15, 30, 60], fmt: v => v + 's', custom: [5, 600]},
   {key: 'sample_interval', label: 'set.sampleInterval', hint: 'set.sampleIntervalHint', type: 'chips',
    opts: [60, 180, 300, 600], fmt: v => t('set.minUnit', {n: v / 60}), custom: [60, 3600]},
   {key: 'quota_interval', label: 'set.quotaInterval', hint: 'set.quotaIntervalHint', type: 'chips',
    opts: [300, 600, 1800, 3600], fmt: v => t('set.minUnit', {n: v / 60}), custom: [300, 21600]},
+  {key: 'quota_auto_rotate', label: 'set.quotaAutoRotate', hint: 'set.quotaAutoRotateHint', type: 'toggle'},
+  {key: 'quota_rotate_secs', label: 'set.quotaRotateSecs', hint: 'set.quotaRotateSecsHint', type: 'chips',
+   opts: [4, 6, 8, 10], fmt: v => v + 's', custom: [4, 10]},
   {sec: 'set.secMenubar'},
-  {label: 'set.menubarUsage', hint: 'set.menubarUsageHint', type: 'multi',
-   opts: [{k: 'menubar_claude', name: 'Claude'}, {k: 'menubar_codex', name: 'Codex'}]},
   {key: 'menubar_value_dim', label: 'set.mbValueDim', hint: 'set.mbValueDimHint', type: 'select',
    opts: ['shortest', 'weekly', 'max'],
    optKeys: {shortest: 'set.dimShortest', weekly: 'set.dimWeekly', max: 'set.dimMax'}},
@@ -1919,13 +2103,70 @@ const SET_SCHEMA = [
 // 选项显示名：优先 i18n key（auto/copy 等），其次 API 设备名，最后原值
 const optName = (it, o) => (it.optKeys && it.optKeys[o]) ? t(it.optKeys[o]) : (it.names && it.names[o]) || o;
 
+function agentSummaryHTML() {
+  const enabled = AGENT_SETTINGS.filter(a => settings[a.show]).length;
+  const dots = AGENT_SETTINGS.slice(0, 3).map(a =>
+    `<i style="background:${esc(settings[a.color] || a.def)}"></i>`).join('');
+  const more = AGENT_SETTINGS.length > 3 ? `<small>+${AGENT_SETTINGS.length - 3}</small>` : '';
+  return `<span class="agentsummary">${t('set.agentEnabledCount', {enabled, total: AGENT_SETTINGS.length})}
+    <span class="agentdots" aria-hidden="true">${dots}</span>${more}<span class="agentchev">›</span></span>`;
+}
+
+function updateSettingsHeader() {
+  const title = $('#settitle');
+  if (title) title.textContent = t(settingsPage === 'agents' ? 'set.agentManager' : 'header.settings');
+}
+
+function setSettingsPage(page) {
+  settingsPage = page === 'agents' ? 'agents' : 'main';
+  updateSettingsHeader();
+  renderSettings();
+}
+
+function renderAgentSettings() {
+  const rows = AGENT_SETTINGS.map(a => {
+    const custom = !!settings[a.color];
+    return `<div class="agentrow">
+      <div class="agentidentity"><span class="sbadge ${a.id}">${badge(a.id, 15)}</span>
+        <span class="agentname">${a.name}<small>${t('set.agentPanelHint')}</small></span></div>
+      <div class="agentcontrol"><span>${t('set.agentPanel')}</span>
+        <button type="button" class="tgl ${settings[a.show] ? 'on' : ''}" data-k="${a.show}"
+          aria-label="${a.name} ${t('set.agentPanel')}" aria-pressed="${!!settings[a.show]}"></button></div>
+      <div class="agentcontrol"><span>${t('set.agentMenubar')}</span>
+        <button type="button" class="tgl ${settings[a.menubar] ? 'on' : ''}" data-k="${a.menubar}"
+          aria-label="${a.name} ${t('set.agentMenubar')}" aria-pressed="${!!settings[a.menubar]}"></button></div>
+      <div class="agentcontrol"><span>${t('set.agentColor')}</span>
+        <span class="agentcolor"><input type="color" data-color="${a.color}" value="${esc(settings[a.color] || a.def)}"
+          aria-label="${a.name} ${t('set.agentColor')}">
+          <button type="button" class="agentreset ${custom ? '' : 'hidden'}" data-reset-agent-color="${a.color}"
+            title="${t('set.resetAgentColor', {agent: a.name})}" aria-label="${t('set.resetAgentColor', {agent: a.name})}">↺</button></span></div>
+    </div>`;
+  }).join('');
+  $('#setbody').innerHTML = `<div class="agentintro">${t('set.agentManagerHint')}</div>
+    <div class="card agentcard">${rows}</div>
+    <div class="agentresetall"><button type="button" class="chip" data-act="reset_colors">↺ ${t('set.resetColors')}</button></div>`;
+  updateFade($('#setbody'));
+}
+
 function renderSettings() {
+  updateSettingsHeader();
+  if (!settings) {
+    $('#setbody').innerHTML = `<div class="empty">${t('common.loading')}</div>`;
+    return;
+  }
+  if (settingsPage === 'agents') { renderAgentSettings(); return; }
   let html = '', cardOpen = false;
   for (const it of SET_SCHEMA) {
     if (it.sec) {
       if (cardOpen) html += '</div>';
       html += `<div class="setsec">${t(it.sec)}</div><div class="card setcard">`;
       cardOpen = true;
+      continue;
+    }
+    if (it.type === 'agentmanager') {
+      html += `<button type="button" class="setrow agententry" data-open-agent-manager>
+        <span class="setlabel">${t(it.label)}${it.hint ? `<small>${t(it.hint)}</small>` : ''}</span>
+        ${agentSummaryHTML()}</button>`;
       continue;
     }
     const v = settings[it.key];
@@ -2010,7 +2251,8 @@ function darkenHex(hex, f = 0.82) {
 }
 function applyColors(rerender) {
   const root = document.documentElement.style;
-  for (const [name, val] of [['claude', settings.color_claude], ['codex', settings.color_codex]]) {
+  for (const agent of AGENT_SETTINGS) {
+    const name = agent.id, val = settings[agent.color];
     if (val) {
       root.setProperty('--' + name, val);
       root.setProperty('--' + name + '-deep', darkenHex(val));
@@ -2036,16 +2278,12 @@ function applySettings(key) {
   const all = !key;
   if (all || key === 'show_active')
     $('#active').style.display = settings.show_active ? '' : 'none';
-  if (all || key === 'show_claude' || key === 'show_codex') {
-    const sc = agentOn('claude'), sx = agentOn('codex');
-    $('#qc-claude').style.display = sc ? '' : 'none';
-    $('#qc-codex').style.display = sx ? '' : 'none';
-    $('#quota').classList.toggle('solo', sc !== sx);   // 只剩一个 → 单列占满
-    if (!all) { renderSessions(); loadActive(); loadDone(); }   // 立即反映到列表
+  if (all || AGENT_SETTINGS.some(a => key === a.show)) {
+    if (!all) { loadQuota(); renderSessions(); loadActive(); loadDone(); }
   }
   if (all || key === 'glass_dim')
     document.documentElement.style.setProperty('--dim', (settings.glass_dim || 68) / 100);
-  if (all || key === 'color_claude' || key === 'color_codex') applyColors(!all);
+  if (all || AGENT_SETTINGS.some(a => key === a.color)) applyColors(!all);
   if (all || key === 'font_scale') {
     const z = (settings.font_scale || 100) / 100;
     document.body.style.zoom = z;   // 字体大小（整体缩放）
@@ -2054,8 +2292,9 @@ function applySettings(key) {
   }
   if (all || key === 'minimal_mode')
     document.body.classList.toggle('minimal', !!settings.minimal_mode);
+  if (!all && (key === 'quota_auto_rotate' || key === 'quota_rotate_secs')) loadQuota();
   // 仅壳层关心的设置才喊 Swift（菜单栏 / 小组件外观 / 语言 / 灵动岛）
-  if (bridge && (all || ['menubar_claude', 'menubar_codex', 'menubar_alert_color', 'menubar_rotate_secs',
+  if (bridge && (all || ['menubar_claude', 'menubar_codex', 'menubar_qoder', 'menubar_alert_color', 'menubar_rotate_secs',
                          'menubar_value_dim', 'menubar_color_dim', 'language',
                          'font_scale', 'glass_dim', 'minimal_mode', 'island_dwell_secs'].includes(key)))
     bridge.postMessage('sync');
@@ -2088,11 +2327,39 @@ $('#setbody').addEventListener('pointerdown', e => {
   if (!tgl || e.button > 0) return;
   const on = !tgl.classList.contains('on');
   tgl.classList.toggle('on', on);
+  tgl.setAttribute('aria-pressed', String(on));
   saveSetting(tgl.dataset.k, on,
-    {rerender: false, revert: () => tgl.classList.toggle('on', !on)});
+    {rerender: false, revert: () => {
+      tgl.classList.toggle('on', !on);
+      tgl.setAttribute('aria-pressed', String(!on));
+    }});
 });
 $('#setbody').addEventListener('click', e => {
-  if (e.target.closest('.tgl')) return;   // 开关走 pointerdown（按下即响应），click 不重复处理
+  const keyboardToggle = e.target.closest('.tgl');
+  if (keyboardToggle) {
+    // 键盘激活 button 时没有 pointerdown；鼠标路径已在 pointerdown 处理。
+    if (e.detail === 0) {
+      const on = !keyboardToggle.classList.contains('on');
+      keyboardToggle.classList.toggle('on', on);
+      keyboardToggle.setAttribute('aria-pressed', String(on));
+      saveSetting(keyboardToggle.dataset.k, on,
+        {rerender: false, revert: () => {
+          keyboardToggle.classList.toggle('on', !on);
+          keyboardToggle.setAttribute('aria-pressed', String(!on));
+        }});
+    }
+    return;
+  }
+  const openAgents = e.target.closest('[data-open-agent-manager]');
+  if (openAgents) { setSettingsPage('agents'); return; }
+  const resetAgentColor = e.target.closest('[data-reset-agent-color]');
+  if (resetAgentColor) {
+    const key = resetAgentColor.dataset.resetAgentColor;
+    settings[key] = '';
+    applyColors(true);
+    saveSetting(key, '');
+    return;
+  }
   const edit = e.target.closest('.chip.edit');
   if (edit) {   // 切换为内联数字输入
     const key = edit.dataset.edit;
@@ -2117,11 +2384,12 @@ $('#setbody').addEventListener('click', e => {
   const multi = e.target.closest('.chip[data-multi]');
   if (multi) return saveSetting(multi.dataset.multi, !multi.classList.contains('on'));
   const act = e.target.closest('.chip[data-act]');
-  if (act && act.dataset.act === 'reset_colors') {   // 恢复默认配色（单请求清两色，避免竞态）
-    settings.color_claude = ''; settings.color_codex = '';   // 乐观即时恢复
+  if (act && act.dataset.act === 'reset_colors') {   // 单请求恢复所有已注册 Agent 的默认配色
+    const reset = Object.fromEntries(AGENT_SETTINGS.map(a => [a.color, '']));
+    Object.assign(settings, reset);   // 乐观即时恢复
     applyColors(true);
     fetch('/api/settings', {method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({color_claude: '', color_codex: ''})})
+      body: JSON.stringify(reset)})
       .then(r => r.json()).then(r => { settings = r.settings; renderSettings(); applyColors(); toast(t('set.colorsReset')); })
       .catch(() => toast(t('common.opFailed')));
     return;
@@ -2177,7 +2445,12 @@ $('#setbody').addEventListener('change', e => {
       body: JSON.stringify({[col.dataset.color]: col.value})}).catch(() => {});
   }
 });
-$('#opensettings').onclick = () => $('#settings').classList.add('show');
+$('#opensettings').onclick = () => {
+  settingsPage = 'main';
+  updateSettingsHeader();
+  renderSettings();
+  $('#settings').classList.add('show');
+};
 document.querySelectorAll('#tabbar .tab').forEach(t => t.onclick = () => {
   document.querySelectorAll('#tabbar .tab').forEach(x => x.classList.toggle('on', x === t));
   document.querySelectorAll('.tabview').forEach(v =>
@@ -2188,9 +2461,15 @@ document.querySelectorAll('#tabbar .tab').forEach(t => t.onclick = () => {
   const t0 = q0.get('tab');
   const btn = t0 && document.querySelector(`#tabbar .tab[data-t="${CSS.escape(t0)}"]`);
   if (btn) btn.onclick();
-  if (q0.get('settings')) $('#settings').classList.add('show');
+  if (q0.get('settings')) {
+    settingsPage = q0.get('settings') === 'agents' ? 'agents' : 'main';
+    $('#settings').classList.add('show');
+  }
 }
-$('#closesettings').onclick = () => $('#settings').classList.remove('show');
+$('#closesettings').onclick = () => {
+  if (settingsPage === 'agents') setSettingsPage('main');
+  else $('#settings').classList.remove('show');
+};
 
 /* ---------- 更新检测（清单 6h 缓存在 daemon 侧；横幅随语言切换重渲染） ---------- */
 let _update = null;

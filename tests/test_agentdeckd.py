@@ -557,6 +557,7 @@ model = "gpt-5"
                     _CODEX_CONFIG=default_home / "config.toml",
                     _CODEX_WRAPPER=default_wrapper), \
                     mock.patch.object(daemon, "codex_sources", return_value=sources), \
+                    mock.patch.object(daemon, "qoder_sources", return_value=[]), \
                     mock.patch.object(daemon, "_install_claude_hook", return_value=False), \
                     mock.patch.object(daemon, "_remove_claude_hook"), \
                     mock.patch.object(daemon, "_remove_legacy_codex_stop_hook"):
@@ -590,6 +591,33 @@ class ClaudeHookTests(unittest.TestCase):
                 self.assertFalse(daemon._hook_wrapper_is_current())
                 self.assertTrue(daemon._write_hook_wrapper())
                 self.assertTrue(daemon._hook_wrapper_is_current())
+
+
+class QoderHookTests(unittest.TestCase):
+    def test_hook_merge_is_idempotent_and_preserves_user_stop_hooks(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            settings = root / "settings.json"
+            wrapper = root / "qoder-stop-hook.sh"
+            external = {"matcher": "", "hooks": [
+                {"type": "command", "command": "/usr/bin/true", "timeout": 2}]}
+            settings.write_text(json.dumps({"hooks": {"Stop": [external]}}))
+            command = f"sh {json.dumps(str(wrapper))}"
+            with mock.patch.multiple(
+                    daemon, _QODER_HOOK_WRAPPER=wrapper, _QODER_HOOK_CMD=command):
+                self.assertTrue(daemon._install_qoder_hook(settings))
+                self.assertFalse(daemon._install_qoder_hook(settings))
+                installed = json.loads(settings.read_text())["hooks"]["Stop"]
+                self.assertEqual(installed[0], external)
+                self.assertEqual(len(installed), 2)
+                self.assertEqual(installed[1]["hooks"][0]["command"], command)
+                syntax = daemon.subprocess.run(
+                    ["sh", "-n", str(wrapper)], capture_output=True, text=True)
+                self.assertEqual(syntax.returncode, 0, syntax.stderr)
+
+                daemon._remove_qoder_hook(settings)
+                self.assertEqual(json.loads(settings.read_text())["hooks"]["Stop"],
+                                 [external])
 
 
 class CodexUsageTests(unittest.TestCase):
@@ -816,6 +844,7 @@ class UsageProjectTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             codex = root / "codex"
+            qoder = root / "qoder"
             session_dir = codex / "sessions" / "2026" / "07" / "15"
             session_dir.mkdir(parents=True)
             rollout = session_dir / "rollout-2026-07-15T01-00-00-test.jsonl"
@@ -824,6 +853,9 @@ class UsageProjectTests(unittest.TestCase):
             old = "/missing/old/project"
             replacement = root / "moved-project"
             replacement.mkdir()
+            qoder_project = qoder / "projects" / "sample"
+            qoder_project.mkdir(parents=True)
+            qoder_transcript = qoder_project / "session.jsonl"
             _jsonl(rollout, [
                 {"timestamp": stamp, "type": "session_meta", "payload": {
                     "id": "session", "cwd": old, "originator": "codex-tui",
@@ -835,6 +867,13 @@ class UsageProjectTests(unittest.TestCase):
                         "input_tokens": 100, "cached_input_tokens": 20,
                         "output_tokens": 10, "total_tokens": 110}}}},
             ])
+            _jsonl(qoder_transcript, [
+                {"timestamp": stamp, "type": "system", "cwd": str(replacement)},
+                {"timestamp": stamp, "type": "assistant", "requestId": "q1",
+                 "message": {"id": "q1", "model": "qoder-model", "usage": {
+                     "input_tokens": 50, "output_tokens": 10,
+                     "cache_read_input_tokens": 0}}},
+            ])
             mappings = root / "path_mappings.json"
             mappings.write_text(json.dumps({
                 "version": 1, "mappings": {old: str(replacement)}}))
@@ -842,10 +881,13 @@ class UsageProjectTests(unittest.TestCase):
                     daemon,
                     CODEX_USAGE_CACHE_FILE=root / "codex-cache.json",
                     CLAUDE_USAGE_CACHE_FILE=root / "claude-cache.json",
+                    QODER_USAGE_CACHE_FILE=root / "qoder-cache.json",
                     PATH_MAPPINGS_FILE=mappings), \
                     mock.patch.object(daemon, "codex_sources", return_value=[{
                         "path": codex}]), \
-                    mock.patch.object(daemon, "claude_sources", return_value=[]):
+                    mock.patch.object(daemon, "claude_sources", return_value=[]), \
+                    mock.patch.object(daemon, "qoder_sources", return_value=[{
+                        "path": qoder}]):
                 daemon._rollout_meta_cache.clear()
                 with daemon._cache_lock:
                     daemon._ttl_cache.pop("usage", None)
@@ -858,6 +900,10 @@ class UsageProjectTests(unittest.TestCase):
             self.assertEqual(usage["projects_7d"][0]["cwd"],
                              os.path.realpath(replacement))
             self.assertEqual(sum(usage["codex_daily"].values()), 110)
+            self.assertEqual(sum(usage["qoder_daily"].values()), 60)
+            self.assertEqual(usage["projects_7d"][0]["tokens"], 170)
+            self.assertEqual(usage["projects_7d"][0]["agents"], {
+                "codex": 110, "qoder": 60})
 
 
 class SessionIndexTests(unittest.TestCase):
@@ -869,6 +915,7 @@ class SessionIndexTests(unittest.TestCase):
         self.pins = self.root / "pins.json"
         self.claude_sources = []
         self.codex_sources = []
+        self.qoder_sources = []
         self.patches = [
             mock.patch.object(daemon, "SESSION_INDEX_FILE", self.db),
             mock.patch.object(daemon, "PINS_FILE", self.pins),
@@ -876,6 +923,8 @@ class SessionIndexTests(unittest.TestCase):
                               side_effect=lambda: self.claude_sources),
             mock.patch.object(daemon, "codex_sources",
                               side_effect=lambda: self.codex_sources),
+            mock.patch.object(daemon, "qoder_sources",
+                              side_effect=lambda: self.qoder_sources),
         ]
         for patcher in self.patches:
             patcher.start()
@@ -1082,6 +1131,19 @@ class SessionIndexTests(unittest.TestCase):
 
 
 class ActiveSessionTests(unittest.TestCase):
+    def test_active_sessions_sort_by_latest_activity_then_stable_tie_breakers(self):
+        active = [
+            {"tool": "qoder", "pid": 30, "last_active_at": 100},
+            {"tool": "codex", "pid": 20, "last_active_at": 300},
+            {"tool": "claude", "pid": 10, "last_active_at": 200},
+            {"tool": "claude", "pid": 8, "last_active_at": 200},
+        ]
+
+        active.sort(key=daemon._active_sort_key)
+
+        self.assertEqual([(item["tool"], item["pid"]) for item in active], [
+            ("codex", 20), ("claude", 8), ("claude", 10), ("qoder", 30)])
+
     def test_open_subagent_rollout_cannot_replace_parent_identity(self):
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
@@ -1106,6 +1168,34 @@ class ActiveSessionTests(unittest.TestCase):
                 info = daemon._pid_codex_rollout_info(123)
             self.assertEqual(info["id"], parent_id)
             self.assertEqual(info["cwd"], "/parent")
+
+    def test_qoder_activity_uses_newest_open_main_transcript(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            project = base / "projects" / "sample"
+            child_dir = project / "subagents"
+            child_dir.mkdir(parents=True)
+            older_id = "11111111-1111-1111-1111-111111111111"
+            newer_id = "22222222-2222-2222-2222-222222222222"
+            older = project / f"{older_id}.jsonl"
+            newer = project / f"{newer_id}.jsonl"
+            child = child_dir / "33333333-3333-3333-3333-333333333333.jsonl"
+            _jsonl(older, [{"type": "system", "sessionId": older_id,
+                            "cwd": "/work/older"}])
+            _jsonl(newer, [{"type": "system", "sessionId": newer_id,
+                            "cwd": "/work/newer"}])
+            _jsonl(child, [{"type": "system", "cwd": "/work/child"}])
+            os.utime(older, (100, 100))
+            os.utime(newer, (200, 200))
+            os.utime(child, (300, 300))
+            lsof = SimpleNamespace(stdout=f"n{older}\nn{child}\nn{newer}\n")
+            with mock.patch.object(daemon.subprocess, "run", return_value=lsof), \
+                    mock.patch.object(daemon, "qoder_sources", return_value=[{
+                        "path": base}]):
+                info = daemon._pid_qoder_transcript_info(123)
+
+            self.assertEqual(info, {
+                "id": newer_id, "cwd": "/work/newer", "mtime": 200})
 
 
 class ResumeCommandTests(unittest.TestCase):
@@ -2165,6 +2255,96 @@ class PersistenceAndUpdateTests(unittest.TestCase):
                 self.assertEqual(saved["notify_crit"], 60)
             finally:
                 daemon._settings_cache = previous_cache
+
+
+class QoderSupportTests(unittest.TestCase):
+    def test_enabled_agent_without_account_has_explicit_flat_status_page(self):
+        settings = {**daemon.DEFAULT_SETTINGS,
+                    "show_claude": False, "show_codex": False, "show_qoder": True}
+        with mock.patch.object(daemon, "get_settings", return_value=settings), \
+                mock.patch.object(daemon, "_qoder_quota_accounts", return_value=[]), \
+                mock.patch.object(daemon._codex_quota_manager, "ensure_fresh"):
+            quota = daemon.api_quota(cache_only=True)
+
+        qoder = next(agent for agent in quota["agents"] if agent["id"] == "qoder")
+        self.assertEqual(len(qoder["accounts"]), 1)
+        self.assertTrue(qoder["accounts"][0]["no_quota"])
+        self.assertIn("not found", qoder["accounts"][0]["error"])
+
+    def test_usage_info_maps_supported_buckets_without_identity_fields(self):
+        quota = daemon._qoder_quota_from_usage({
+            "userId": "must-not-leak",
+            "userType": "pro",
+            "totalUsagePercentage": 42.5,
+            "expiresAt": 1_800_000_000_000,
+            "userQuota": {"total": 1000, "used": 400, "remaining": 600,
+                          "percentage": 40, "unit": "credits"},
+            "orgResourcePackage": {"cap": 500, "used": 100, "remaining": 400,
+                                   "percentage": 20, "available": True,
+                                   "unit": "credits"},
+        }, sampled_at="2026-08-12T00:00:00Z")
+
+        self.assertTrue(quota["ok"])
+        self.assertEqual([w["id"] for w in quota["windows"]],
+                         ["total", "plan", "organization"])
+        self.assertEqual(quota["windows"][0]["resets_at"], 1_800_000_000)
+        self.assertEqual(quota["windows"][1]["total"], 1000)
+        self.assertNotIn("userId", json.dumps(quota))
+
+    def test_qoder_cli_parses_only_named_usage_control_response(self):
+        stream = "\n".join([
+            json.dumps({"type": "control_response", "response": {
+                "request_id": "init", "response": {"email": "discarded@example.invalid"}}}),
+            json.dumps({"type": "control_response", "response": {
+                "request_id": "usage", "response": {"usage": {
+                    "userId": "private", "userType": "free",
+                    "totalUsagePercentage": 12,
+                    "userQuota": {"total": 10, "used": 1.2, "remaining": 8.8,
+                                  "percentage": 12, "unit": "credits"}}}}}),
+        ])
+        source = {"path": Path("/tmp/qoder-test")}
+        completed = daemon.subprocess.CompletedProcess([], 0, stdout=stream, stderr="")
+        with mock.patch.object(daemon, "_qoder_cli_path", return_value="qodercli"), \
+                mock.patch.object(daemon.subprocess, "run", return_value=completed) as run:
+            quota = daemon._qoder_quota_for(source)
+
+        self.assertTrue(quota["ok"])
+        self.assertNotIn("private", json.dumps(quota))
+        self.assertIn("--no-session-persistence", run.call_args.args[0])
+
+    def test_qoder_usage_cache_deduplicates_repeated_assistant_messages(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "qoder.jsonl"
+            event = {
+                "timestamp": "2026-08-12T10:00:00Z", "type": "assistant",
+                "requestId": "request-1", "message": {
+                    "id": "message-1", "model": "qoder-model", "usage": {
+                        "input_tokens": 10, "output_tokens": 2,
+                        "cache_read_input_tokens": 3}}}
+            _jsonl(path, [event, event])
+
+            usage, changed = daemon._cached_qoder_file_usage(path, {})
+
+            self.assertTrue(changed)
+            self.assertEqual(usage["2026-08-12T10"]["qoder-model"],
+                             [10, 2, 3, 0, 0])
+
+    def test_qoder_session_parser_accepts_claude_compatible_jsonl(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "00000000-0000-0000-0000-000000000123.jsonl"
+            _jsonl(path, [
+                {"type": "system", "cwd": "/work/qoder", "gitBranch": "main"},
+                {"type": "user", "sessionId": path.stem,
+                 "message": {"content": "Implement the carousel"}},
+            ])
+            self.assertEqual(daemon._qoder_session_info(path), (
+                path.stem, "/work/qoder", "Implement the carousel", "main"))
+
+    def test_qoder_resume_command_uses_qodercli(self):
+        command = daemon._resume_command(
+            "qoder", "00000000-0000-0000-0000-000000000123", "", "/work/qoder")
+        self.assertIn("qodercli --resume", command)
+        self.assertTrue(command.startswith("cd "))
 
 
 if __name__ == "__main__":

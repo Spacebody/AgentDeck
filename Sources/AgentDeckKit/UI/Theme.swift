@@ -57,20 +57,35 @@ enum Theme {
 // MARK: - 品牌（Claude / Codex）配色。accent 为用户可在设置中自定义的主色（--claude/--codex），
 // 此处给默认值；接入 store 后由设置覆盖。deep 为渐变深端，tint 为卡片辉光底色。
 enum Brand: String, CaseIterable {
-    case claude, codex
+    case claude, codex, qoder
 
     // 默认主色（--claude #ff9d7a / --codex #8be9e2）
     /// 用户自定义主色覆盖（设置 color_claude/color_codex；AppStore.applyCustomColors 写入）。
     static var customAccents: [Brand: Color?] = [:]
     var accent: Color {
         if let c = Brand.customAccents[self] ?? nil { return c }
-        return self == .claude ? Color(hex: 0xff9d7a) : Color(hex: 0x8be9e2)
+        switch self {
+        case .claude: return Color(hex: 0xff9d7a)
+        case .codex: return Color(hex: 0x8be9e2)
+        case .qoder: return Color(hex: 0xa78bfa)
+        }
     }
     // 渐变深端（--claude-deep #e8744f / --codex-deep #4fd1c5）
-    var deep: Color   { self == .claude ? Color(hex: 0xe8744f) : Color(hex: 0x4fd1c5) }
+    var deep: Color {
+        switch self {
+        case .claude: return Color(hex: 0xe8744f)
+        case .codex: return Color(hex: 0x4fd1c5)
+        case .qoder: return Color(hex: 0x7c3aed)
+        }
+    }
     // 卡片右上角辉光（qcard::before：claude .22 / codex .18 透明度）
-    var tint: Color   { self == .claude ? Color(hex: 0xe8744f).opacity(0.22)
-                                        : Color(hex: 0x4fd1c5).opacity(0.18) }
+    var tint: Color {
+        switch self {
+        case .claude: return Color(hex: 0xe8744f).opacity(0.22)
+        case .codex: return Color(hex: 0x4fd1c5).opacity(0.18)
+        case .qoder: return Color(hex: 0x7c3aed).opacity(0.20)
+        }
+    }
     // 进度环/进度条渐变（90deg/对角：deep → accent）
     var gradient: LinearGradient {
         LinearGradient(colors: [deep, accent], startPoint: .leading, endPoint: .trailing)

@@ -5,10 +5,12 @@ import SwiftUI
 struct SettingsView: View {
     var values: [String: SettingValue] = [:]
     var scrollable: Bool = true
+    var page: SettingsPage = .main
     /// 已安装终端（mode, name）；用于「恢复方式」动态选项（对应 v1 /api/terminals）。
     var terminals: [(String, String)] = []
     var onSet: (String, SettingValue) -> Void = { _, _ in }
     var onAction: (String) -> Void = { _ in }
+    var onOpenAgentManager: () -> Void = {}
     var onResetColors: () -> Void = {}
     var version: String = "dev"
 
@@ -27,7 +29,22 @@ struct SettingsView: View {
     }
 
     var body: some View {
-        let content = VStack(alignment: .leading, spacing: 0) {
+        SwiftUI.Group {
+            if scrollable { ScrollView { pageContent }.scrollIndicators(.hidden) }
+            else { pageContent }
+        }
+    }
+
+    @ViewBuilder private var pageContent: some View {
+        if page == .agents {
+            AgentManagerView(values: values, onSet: onSet, onResetColors: onResetColors)
+        } else {
+            mainContent
+        }
+    }
+
+    private var mainContent: some View {
+        VStack(alignment: .leading, spacing: 0) {
             // 标题由外壳 .sethead 提供（设置浮层顶部），此处直接从首个分区开始。
             ForEach(Array(groups.enumerated()), id: \.offset) { _, g in
                 Text(L(g.title).uppercased())
@@ -46,7 +63,6 @@ struct SettingsView: View {
                 .font(.rounded(9)).foregroundStyle(Theme.ink3)
                 .frame(maxWidth: .infinity).padding(.top, 10)
         }
-        if scrollable { ScrollView { content }.scrollIndicators(.hidden) } else { content }
     }
 
     // MARK: 单行
@@ -83,6 +99,23 @@ struct SettingsView: View {
                         .fixedSize()
                 }
             }
+        case let .agentManager(label, hint):
+            Button(action: onOpenAgentManager) {
+                HStack(spacing: 10) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(L(label)).font(.system(size: 13)).foregroundStyle(Theme.ink)
+                        if let hint {
+                            Text(L(hint)).font(.system(size: 10.5)).foregroundStyle(Theme.ink3)
+                        }
+                    }
+                    Spacer(minLength: 8)
+                    AgentManagerSummary(values: values)
+                }
+                .contentShape(Rectangle())
+                .padding(.vertical, 10)
+            }
+            .buttonStyle(.plain)
+            .accessibilityHint(Text(L("set.agentManagerOpenHint")))
         case let .btns(label, hint, btns):
             setrow(label, hint) {
                 HStack(spacing: 6) {

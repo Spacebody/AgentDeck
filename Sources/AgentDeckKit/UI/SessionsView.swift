@@ -312,8 +312,9 @@ struct SessionsView: View {
 
     private var filterChips: some View {
         HStack(spacing: 7) {
-            ForEach(["all", "claude", "codex"], id: \.self) { f in
-                Chip(text: f == "all" ? L("session.all") : (f == "claude" ? "Claude" : "Codex"),
+            ForEach(["all", "claude", "codex", "qoder"], id: \.self) { f in
+                Chip(text: f == "all" ? L("session.all") :
+                     (f == "claude" ? "Claude" : f == "codex" ? "Codex" : "Qoder"),
                      on: filter == f) { onFilter(f) }
             }
         }
@@ -363,7 +364,7 @@ private struct SessionRow: View {
     var onForgetPath: () -> Void = {}
 
     @State private var hovering = false
-    private var brand: Brand { session.tool == "codex" ? .codex : .claude }
+    private var brand: Brand { Brand(rawValue: session.tool) ?? .claude }
     private var live: Bool { Date().timeIntervalSince1970 - session.mtime < 120 }
 
     var body: some View {

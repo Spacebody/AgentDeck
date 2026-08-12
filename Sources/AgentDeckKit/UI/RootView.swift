@@ -154,6 +154,7 @@ public struct AgentDeckRootView: View {
 
     @State private var tab = "overview"
     @State private var showSettings = false
+    @State private var settingsPage: SettingsPage = .main
     @State private var info: InfoKind?
     @State private var updateDismissed = false
     @State private var spinning = false
@@ -217,7 +218,10 @@ public struct AgentDeckRootView: View {
                 .shadow(color: store.online ? Theme.ok : Theme.danger, radius: 4)
                 .pulse(store.online ? 2.4 : .infinity)   // .live 呼吸 2.4s；离线(err) 不闪
             Spacer()
-            IconButton(system: "gearshape", fontSize: 16) { showSettings = true }
+            IconButton(system: "gearshape", fontSize: 16) {
+                settingsPage = .main
+                showSettings = true
+            }
             IconButton(system: "arrow.clockwise", weight: .semibold, fontSize: 15, spinning: spinning, customRefresh: true) { manualRefresh() }
             // 原生壳里显示退出按钮（对应 v1：bridge 存在时 #quit 显示）。
             IconButton(system: "power", weight: .semibold, fontSize: 15, danger: true) { onQuit() }
@@ -354,10 +358,15 @@ public struct AgentDeckRootView: View {
         if tab == "overview" {
             let showClaude = store.agentOn("claude", fallbackHidden: store.quota?.claude?.hidden)
             let showCodex = store.agentOn("codex", fallbackHidden: store.quota?.codex?.hidden)
+            let showQoder = store.agentOn("qoder", fallbackHidden: store.quota?.qoder?.hidden)
             OverviewView(
                 quota: store.quota, usage: store.usage, today: store.today,
                 active: store.activeShown, done: store.doneShown, showActive: store.showActive,
                 showClaudeAgent: showClaude, showCodexAgent: showCodex,
+                showQoderAgent: showQoder,
+                quotaAutoRotate: store.settings["quota_auto_rotate"]?.boolVal ?? true,
+                quotaRotateSecs: store.settings["quota_rotate_secs"]?.intVal ?? 6,
+                carouselActive: tab == "overview" && !showSettings,
                 onFocusActive: focusActive, onFocusDone: focusDone)
         } else {
             sessionsCard
@@ -397,15 +406,20 @@ public struct AgentDeckRootView: View {
                 .background(.ultraThinMaterial)
             VStack(spacing: 10) {
                 HStack(spacing: 8) {
-                    IconButton(system: "chevron.left", weight: .semibold, fontSize: 15) { showSettings = false }
-                    Text(L("header.settings")).font(.rounded(17, weight: .bold)).foregroundStyle(Theme.ink)
+                    IconButton(system: "chevron.left", weight: .semibold, fontSize: 15) {
+                        if settingsPage == .agents { settingsPage = .main }
+                        else { showSettings = false }
+                    }
+                    Text(L(settingsPage.titleKey)).font(.rounded(17, weight: .bold)).foregroundStyle(Theme.ink)
                     Spacer()
                 }
                 SettingsView(
                     values: store.settings, scrollable: !previewMode,
+                    page: settingsPage,
                     terminals: store.terminals.map { ($0.mode, $0.name) },
                     onSet: { store.setSetting($0, $1) },
                     onAction: settingsAction,
+                    onOpenAgentManager: { settingsPage = .agents },
                     onResetColors: { store.resetColors(); showToast(L("set.colorsReset")) },
                     version: version)
             }
@@ -706,6 +720,7 @@ public struct AgentDeckWidgetRootView: View {
                     showActive: store.showActive,
                     showClaudeAgent: store.agentOn("claude", fallbackHidden: store.quota?.claude?.hidden),
                     showCodexAgent: store.agentOn("codex", fallbackHidden: store.quota?.codex?.hidden),
+                    showQoderAgent: store.agentOn("qoder", fallbackHidden: store.quota?.qoder?.hidden),
                     onTapPanel: onTapPanel,
                     onFocusActive: { a in
                         // 小组件常驻桌面：跳转成功不收起自身

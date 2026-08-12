@@ -49,6 +49,10 @@ struct OverviewView: View {
     /// nil 时回退 quota.hidden（仅预览/设置尚未加载）；真实根视图传入本地设置值。
     var showClaudeAgent: Bool? = nil
     var showCodexAgent: Bool? = nil
+    var showQoderAgent: Bool? = nil
+    var quotaAutoRotate: Bool = true
+    var quotaRotateSecs: Int = 6
+    var carouselActive: Bool = true
     var onFocusActive: (ActiveSession) -> Void = { _ in }
     var onFocusDone: (DoneEvent) -> Void = { _ in }
 
@@ -60,10 +64,11 @@ struct OverviewView: View {
             if showActive { ActiveCard(sessions: active, onTap: onFocusActive).reveal(delay: 0.09) }
             DoneCard(events: done, onTap: onFocusDone).reveal(delay: 0.10)
             UsageView(usage: usage, showClaude: showClaude,
-                      showCodex: showCodex).reveal(delay: 0.12)
+                      showCodex: showCodex, showQoder: showQoder).reveal(delay: 0.12)
         }
         .animation(.easeInOut(duration: 0.18), value: showClaude)
         .animation(.easeInOut(duration: 0.18), value: showCodex)
+        .animation(.easeInOut(duration: 0.18), value: showQoder)
     }
 
     private var showClaude: Bool {
@@ -74,31 +79,22 @@ struct OverviewView: View {
         showCodexAgent ?? !(quota?.codex?.hidden ?? false)
     }
 
+    private var showQoder: Bool {
+        showQoderAgent ?? !(quota?.qoder?.hidden ?? false)
+    }
+
     @ViewBuilder private var quotaSection: some View {
-        let claude = quota?.claude
-        let codex = quota?.codex
-        // accounts 列表（多账号）→ carousel；缺失则回退顶层单账号节点。
-        let listedClaude = quota?.accounts?.claude ?? []
-        let listedCodex = quota?.accounts?.codex ?? []
-        let claudeAccts = listedClaude.isEmpty ? (claude.map { [$0] } ?? []) : listedClaude
-        let codexAccts = listedCodex.isEmpty ? (codex.map { [$0] } ?? []) : listedCodex
-        if showClaude && showCodex {
-            let reservePageIndicator = claudeAccts.count > 1 || codexAccts.count > 1
-            EqualHeightQuotaRow(spacing: 10) {
-                QuotaCarousel(brand: .claude, accounts: claudeAccts,
-                              presentation: .panelDual,
-                              reservePageIndicator: reservePageIndicator)
-                QuotaCarousel(brand: .codex, accounts: codexAccts,
-                              presentation: .panelDual,
-                              reservePageIndicator: reservePageIndicator)
-            }
-        } else if showClaude {
-            QuotaCarousel(brand: .claude, accounts: claudeAccts,
-                          presentation: .panelWide)
-                .frame(maxWidth: .infinity, alignment: .top)
-        } else if showCodex {
-            QuotaCarousel(brand: .codex, accounts: codexAccts,
-                          presentation: .panelWide)
+        if let quota {
+            let visible = Set([
+                showClaude ? "claude" : nil,
+                showCodex ? "codex" : nil,
+                showQoder ? "qoder" : nil,
+            ].compactMap { $0 })
+            FlatQuotaCarousel(
+                pages: quota.flatPages(visibleAgents: visible),
+                autoRotate: quotaAutoRotate,
+                interval: quotaRotateSecs,
+                isActive: carouselActive)
                 .frame(maxWidth: .infinity, alignment: .top)
         }
     }
@@ -166,22 +162,29 @@ enum PreviewSamples {
         DateFormatter.localDay.string(from: Date().addingTimeInterval(-Double($0) * 86400))
     }
     static var usage: UsageResponse {
-        var cd: [String: [String: [Double]]] = [:], xd: [String: Double] = [:], costd: [String: Double] = [:]
+        var cd: [String: [String: [Double]]] = [:]
+        var xd: [String: Double] = [:], qd: [String: Double] = [:], costd: [String: Double] = [:]
         for (i, day) in usageDays.enumerated() {
             let s = Double(i + 1) / 7   // 由少到多，今日最高
             cd[day] = ["claude-opus-4-8": [1_200_000 * s, 300_000 * s], "claude-sonnet-4-6": [820_000 * s]]
             xd[day] = 460_000 * s
+            qd[day] = 220_000 * s
             costd[day] = 37 * s
         }
         let nowH = floor(Date().timeIntervalSince1970 / 3600) * 3600   // 整点对齐（同 daemon）
         let hourly = (0..<48).map { HourBucket(ts: nowH - Double($0) * 3600,
-                                               c: Double(max(0, 40000 - $0 * 300)), x: 8000) }
+                                               c: Double(max(0, 40000 - $0 * 300)),
+                                               x: 8000, q: 4500) }
         return UsageResponse(
-            days: usageDays, claudeDaily: cd, codexDaily: xd, costDaily: costd, hourly: hourly,
+            days: usageDays, claudeDaily: cd, codexDaily: xd, qoderDaily: qd,
+            costDaily: costd, hourly: hourly,
             projects7d: [
-                ProjectUsage(name: "agentdeck", cwd: "/Users/jerry/Downloads/agentdeck", tokens: 5_200_000, cost: 42),
-                ProjectUsage(name: "api-service", cwd: "/Users/jerry/work/api-service", tokens: 2_100_000, cost: 18),
-                ProjectUsage(name: "Codex/cli", cwd: "/Users/jerry/Codex/cli", tokens: 900_000, cost: 6),
+                ProjectUsage(name: "agentdeck", cwd: "/Users/demo/Projects/agentdeck",
+                             tokens: 5_200_000, cost: 42, agents: ["claude": 5_200_000]),
+                ProjectUsage(name: "api-service", cwd: "/Users/demo/Projects/api-service",
+                             tokens: 2_100_000, cost: 18, agents: ["qoder": 2_100_000]),
+                ProjectUsage(name: "cli", cwd: "/Users/demo/Projects/cli",
+                             tokens: 900_000, cost: 6, agents: ["codex": 900_000]),
             ],
             cost7d: 66, cost30d: 210,
             claudeCost7d: 54, claudeCost30d: 170, codexCost7d: 12, codexCost30d: 40,
@@ -190,26 +193,26 @@ enum PreviewSamples {
     static var today: TodaySummary? { TodaySummary(from: usage) }
 
     static let active: [ActiveSession] = [
-        ActiveSession(tool: "claude", cwd: "/Users/jerry/Downloads/agentdeck", project: "agentdeck",
+        ActiveSession(tool: "claude", cwd: "/Users/demo/Projects/agentdeck", project: "agentdeck",
                       host: "app", runtimeSecs: 4520, runtime: nil, status: "busy", id: "s1", pid: 123),
-        ActiveSession(tool: "codex", cwd: "/Users/jerry/work/api-service/backend", project: "api-service",
+        ActiveSession(tool: "codex", cwd: "/Users/demo/Projects/api-service/backend", project: "api-service",
                       host: nil, runtimeSecs: 1200, runtime: nil, status: "idle", id: "s2", pid: 124),
     ]
     static let done: [DoneEvent] = [
         DoneEvent(tool: "claude", title: "重构额度卡为 SwiftUI", project: "agentdeck",
-                  ts: Date().timeIntervalSince1970 - 600, session: "x", cwd: "/Users/jerry/Downloads/agentdeck"),
+                  ts: Date().timeIntervalSince1970 - 600, session: "x", cwd: "/Users/demo/Projects/agentdeck"),
         DoneEvent(tool: "codex", title: "修复登录回调超时", project: "api-service",
-                  ts: Date().timeIntervalSince1970 - 5400, session: "y", cwd: "/Users/jerry/work/api-service"),
+                  ts: Date().timeIntervalSince1970 - 5400, session: "y", cwd: "/Users/demo/Projects/api-service"),
     ]
 
     static let sessions: [SessionItem] = [
-        SessionItem(tool: "claude", id: "a1", title: "重构额度卡为原生 SwiftUI", cwd: "/Users/jerry/Downloads/agentdeck",
+        SessionItem(tool: "claude", id: "a1", title: "重构额度卡为原生 SwiftUI", cwd: "/Users/demo/Projects/agentdeck",
                     project: "agentdeck", branch: "v2-native", mtime: Date().timeIntervalSince1970 - 30,
                     account: nil, accountId: nil, pinned: true),
-        SessionItem(tool: "codex", id: "b2", title: "修复登录回调超时", cwd: "/Users/jerry/work/api-service",
+        SessionItem(tool: "codex", id: "b2", title: "修复登录回调超时", cwd: "/Users/demo/Projects/api-service",
                     project: "api-service", branch: "main", mtime: Date().timeIntervalSince1970 - 3600,
                     account: nil, accountId: nil, pinned: false),
-        SessionItem(tool: "claude", id: "c3", title: "撰写 v1.26 发布说明", cwd: "/Users/jerry/Downloads/agentdeck",
+        SessionItem(tool: "claude", id: "c3", title: "撰写 v1.26 发布说明", cwd: "/Users/demo/Projects/agentdeck",
                     project: "agentdeck", branch: "HEAD", mtime: Date().timeIntervalSince1970 - 86400,
                     account: nil, accountId: nil, pinned: false),
     ]
@@ -221,13 +224,15 @@ enum PreviewSamples {
     static let settingsValues: [String: SettingValue] = [
         "language": .string("auto"), "font_scale": .int(120), "glass_dim": .int(68),
         "color_claude": .string("#ff9d7a"), "color_codex": .string("#4fd1c5"),
+        "color_qoder": .string("#a78bfa"),
         "minimal_mode": .bool(false), "show_active": .bool(true),
-        "show_claude": .bool(true), "show_codex": .bool(true),
+        "show_claude": .bool(true), "show_codex": .bool(true), "show_qoder": .bool(true),
+        "quota_auto_rotate": .bool(true), "quota_rotate_secs": .int(6),
         "sessions_limit": .int(20), "refresh_interval": .int(30),
         "sample_interval": .int(180), "quota_interval": .int(600),
-        "menubar_claude": .bool(true), "menubar_codex": .bool(false),
+        "menubar_claude": .bool(true), "menubar_codex": .bool(false), "menubar_qoder": .bool(true),
         "menubar_value_dim": .string("shortest"), "menubar_alert_color": .bool(true),
-        "menubar_color_dim": .string("shortest"), "menubar_rotate_secs": .int(0),
+        "menubar_color_dim": .string("shortest"), "menubar_rotate_secs": .int(6),
         "notify_enabled": .bool(true), "notify_warn": .int(80), "notify_crit": .int(95),
         "notify_reset": .bool(true), "notify_session_done": .bool(true), "notify_done_min_secs": .int(30),
         "island_dwell_secs": .int(5), "notify_sound": .bool(false),

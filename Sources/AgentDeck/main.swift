@@ -344,7 +344,8 @@ final class IslandController {
     }
 
     private func brandIcon(for tool: String) -> NSImage {
-        let key = tool.lowercased() == "claude" ? "claude" : "codex"
+        let key = ["claude", "codex", "qoder"].contains(tool.lowercased())
+            ? tool.lowercased() : "claude"
         let bundleName = "AgentDeck_AgentDeckKit.bundle"
         let bases = [Bundle.main.resourceURL,
                      Bundle.main.bundleURL,
@@ -359,7 +360,8 @@ final class IslandController {
             }
         }
         let conf = NSImage.SymbolConfiguration(pointSize: 20, weight: .semibold)
-        let img = NSImage(systemSymbolName: key == "claude" ? "sparkle" : "apple.terminal",
+        let symbol = key == "claude" ? "sparkle" : key == "codex" ? "apple.terminal" : "q.square"
+        let img = NSImage(systemSymbolName: symbol,
                           accessibilityDescription: key)?
             .withSymbolConfiguration(conf) ?? NSImage(size: NSSize(width: 26, height: 26))
         img.isTemplate = true
@@ -368,9 +370,11 @@ final class IslandController {
     }
 
     private func brandColor(for tool: String) -> NSColor {
-        tool.lowercased() == "claude"
-            ? NSColor(calibratedRed: 1.00, green: 0.62, blue: 0.48, alpha: 1)
-            : NSColor(calibratedRed: 0.55, green: 0.91, blue: 0.89, alpha: 1)
+        switch tool.lowercased() {
+        case "codex": return NSColor(calibratedRed: 0.55, green: 0.91, blue: 0.89, alpha: 1)
+        case "qoder": return NSColor(calibratedRed: 0.65, green: 0.55, blue: 0.98, alpha: 1)
+        default: return NSColor(calibratedRed: 1.00, green: 0.62, blue: 0.48, alpha: 1)
+        }
     }
 
     private func display(_ e: Event) {
@@ -382,7 +386,7 @@ final class IslandController {
         let isAlert = e.kind == "alert"
         let headText = isAlert
             ? L("alert.\(["warn", "crit", "reset"].contains(e.level) ? e.level : "warn")")
-            : "\(e.project.isEmpty ? (e.tool.lowercased() == "claude" ? "Claude" : "Codex") : e.project) · \(L("island.done"))"
+            : "\(e.project.isEmpty ? e.tool.capitalized : e.project) · \(L("island.done"))"
         let head = NSTextField(labelWithString: headText)
         head.font = .systemFont(ofSize: 12.5, weight: .semibold)
         let accent = quotaAlertColor(e.level)
@@ -647,11 +651,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
               ["http", "https", "mailto"].contains(scheme) else { return }
         if scheme == "mailto" { openMailto(url) } else { NSWorkspace.shared.open(url) }
     }
-    // 多账号菜单栏轮转
-    typealias MBItem = (tool: String, text: String, alert: NSColor?)
+    // 状态栏单槽位轮播：Agent 图标、账号标识与额度作为一个不可拆分的页面。
+    struct MBItem {
+        let id: String
+        let tool: String
+        let text: String
+        let alert: NSColor?
+    }
     var rotateTimer: Timer?
-    var mbFull: [MBItem] = []      // 全部 (tool×账号) 项，轮转用
-    var mbPrimary: [MBItem] = []   // 每 tool 仅主账号一段，不轮转时显示（=今天行为）
+    var menubarAnimationTimer: Timer?
+    var currentMenubarImage: NSImage?
+    var menubarSlotWidth: CGFloat = 17
+    var mbFull: [MBItem] = []      // 全部 (tool×账号) 同级页面
     var rotateSecs = 0
     var rotateIdx = 0
 
@@ -881,8 +892,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// agent 单色模板字形：直接用官方 App 自带的菜单栏模板图（assets/brand 随包分发）
     /// Claude.app TrayIconTemplate / Codex.app codexTemplate，形状与官方完全一致
     func agentGlyph(_ tool: String) -> NSImage? {
-        let file = tool == "codex" ? "codex-tray@2x" : "claude-tray@2x"
-        if let path = Bundle.main.path(forResource: file, ofType: "png", inDirectory: "static/brand"),
+        let file = tool == "codex" ? "codex-tray@2x" : tool == "claude" ? "claude-tray@2x" : nil
+        if let file,
+           let path = Bundle.main.path(forResource: file, ofType: "png", inDirectory: "static/brand"),
            let img = NSImage(contentsOfFile: path) {
             // 按字形实际占比对齐视觉大小：两家字形均 34px，但 Claude 画布 48(留白 29%)、
             // Codex 画布 36 —— 等字形高 ~14.2pt 反推画布高
@@ -893,16 +905,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         // 兜底：品牌资源缺失时退回 SF Symbol
         let conf = NSImage.SymbolConfiguration(pointSize: 14.5, weight: .medium)
-        let img = NSImage(systemSymbolName: tool == "codex" ? "apple.terminal" : "sparkle",
+        let symbol = tool == "codex" ? "apple.terminal" : tool == "qoder" ? "q.square" : "sparkle"
+        let img = NSImage(systemSymbolName: symbol,
                           accessibilityDescription: tool)?
             .withSymbolConfiguration(conf)
         img?.isTemplate = true
         return img
     }
 
-    /// 多段「图标+百分比」合成单张状态栏图：垂直居中自己掌控；各段按自身额度独立着色。
-    /// 全段常规 → 模板图（随菜单栏自适应黑白）；任一段告警 → 混色非模板图，
-    /// 常规段按菜单栏明暗自行取黑/白，告警段烘入告警色
+    /// 把「Agent 图标+账号标识+百分比」合成单张状态栏图；常规态使用模板图，
+    /// 告警态把颜色直接烘入图像，规避 macOS 26 对模板图 tint 的兼容问题。
     /// （macOS 26 起对模板图设 contentTintColor 会整体渲染成黑色，故颜色一律画进图里）。
     /// items 为空 → 仅显示 AgentDeck 仪表图标
     func composedIcon(items: [MBItem]) -> NSImage? {
@@ -963,6 +975,104 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return true
         }
         return out
+    }
+
+    /// 所有页面使用最宽单项作为固定视口，切换时不会推动旁边的状态栏图标。
+    func updateMenubarSlotWidth() {
+        let images = mbFull.isEmpty
+            ? [composedIcon(items: [])].compactMap { $0 }
+            : mbFull.compactMap { composedIcon(items: [$0]) }
+        menubarSlotWidth = max(17, ceil(images.map(\.size.width).max() ?? 17))
+    }
+
+    func paddedMenubarImage(_ image: NSImage) -> NSImage {
+        let width = max(menubarSlotWidth, image.size.width)
+        guard abs(width - image.size.width) > 0.25 else { return image }
+        let out = NSImage(size: NSSize(width: width, height: image.size.height), flipped: false) { rect in
+            image.draw(in: NSRect(x: (rect.width - image.size.width) / 2, y: 0,
+                                  width: image.size.width, height: image.size.height))
+            return true
+        }
+        out.isTemplate = image.isTemplate
+        return out
+    }
+
+    /// 模板图与彩色告警图交叉时先按当前菜单栏明暗展开模板色，避免过渡帧出现黑块。
+    func resolvedAnimationImage(_ image: NSImage) -> NSImage {
+        guard image.isTemplate else { return image }
+        let isDark = statusItem.button?.effectiveAppearance
+            .bestMatch(from: [.darkAqua, .vibrantDark, .aqua, .vibrantLight])
+            .map { $0 == .darkAqua || $0 == .vibrantDark } ?? true
+        let ink: NSColor = isDark ? .white : .black
+        let out = NSImage(size: image.size, flipped: false) { rect in
+            image.draw(in: rect)
+            ink.set()
+            rect.fill(using: .sourceAtop)
+            return true
+        }
+        out.isTemplate = false
+        return out
+    }
+
+    func rollingMenubarImage(from previous: NSImage, to next: NSImage,
+                             progress: CGFloat) -> NSImage {
+        let templatePair = previous.isTemplate && next.isTemplate
+        let outgoing = templatePair ? previous : resolvedAnimationImage(previous)
+        let incoming = templatePair ? next : resolvedAnimationImage(next)
+        let size = NSSize(width: max(outgoing.size.width, incoming.size.width),
+                          height: max(outgoing.size.height, incoming.size.height))
+        let out = NSImage(size: size, flipped: false) { rect in
+            NSGraphicsContext.current?.cgContext.clip(to: rect)
+            outgoing.draw(in: NSRect(x: (rect.width - outgoing.size.width) / 2,
+                                      y: rect.height * progress,
+                                      width: outgoing.size.width, height: outgoing.size.height))
+            incoming.draw(in: NSRect(x: (rect.width - incoming.size.width) / 2,
+                                      y: -rect.height * (1 - progress),
+                                      width: incoming.size.width, height: incoming.size.height))
+            return true
+        }
+        out.isTemplate = templatePair
+        return out
+    }
+
+    func setMenubarImage(_ image: NSImage) {
+        menubarAnimationTimer?.invalidate()
+        menubarAnimationTimer = nil
+        statusItem.button?.image = image
+        currentMenubarImage = image
+    }
+
+    func animateMenubar(to next: NSImage) {
+        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
+              let previous = currentMenubarImage,
+              previous.size == next.size else {
+            setMenubarImage(next)
+            return
+        }
+        menubarAnimationTimer?.invalidate()
+        let started = ProcessInfo.processInfo.systemUptime
+        let duration: TimeInterval = 0.24
+        let timer = Timer(timeInterval: 1 / 60, repeats: true) { [weak self] timer in
+            Task { @MainActor in
+                guard let self, self.menubarAnimationTimer === timer else {
+                    timer.invalidate()
+                    return
+                }
+                let elapsed = ProcessInfo.processInfo.systemUptime - started
+                let progress = MenubarRotationPolicy.easedProgress(
+                    elapsed: elapsed, duration: duration)
+                self.statusItem.button?.image = self.rollingMenubarImage(
+                    from: previous, to: next, progress: CGFloat(progress))
+                if progress >= 1 {
+                    timer.invalidate()
+                    self.menubarAnimationTimer = nil
+                    self.statusItem.button?.image = next
+                    self.currentMenubarImage = next
+                }
+            }
+        }
+        menubarAnimationTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
     }
 
     // MARK: - 点击处理
@@ -1480,9 +1590,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     return windows.first?["used_percent"] as? Double
                 }
             }
-            var full: [MBItem] = []      // 全部 tool×账号，轮转用
-            var primaryList: [MBItem] = []   // 每 tool 主账号一段
-            for tool in ["claude", "codex"] {
+            var full: [MBItem] = []      // 全部 tool×账号，统一进入单槽位
+            for tool in ["claude", "codex", "qoder"] {
                 guard mb?[tool] as? Bool ?? false else { continue }
                 // accounts 列表（新后端）；缺失则回退到顶层单账号对象
                 let list = (accounts?[tool] as? [[String: Any]])
@@ -1497,53 +1606,60 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     let label = raw.count > 10 ? String(raw.prefix(10)) + "…" : raw  // 防长名撑宽菜单栏
                     // 轮转项：同 tool 多账号时带账号名区分；否则仅百分比
                     let text = (multi && !label.isEmpty) ? "\(label) \(pctStr)" : pctStr
-                    full.append((tool, text, alert))
-                    if i == 0 { primaryList.append((tool, pctStr, alert)) }  // 主账号
+                    let accountID = node["account_id"] as? String
+                        ?? node["account"] as? String ?? "account-\(i)"
+                    full.append(MBItem(id: "\(tool)::\(accountID)", tool: tool,
+                                       text: text, alert: alert))
                 }
             }
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.statusItem.isVisible = true   // 兜底：被系统/误操作隐藏后自动恢复
                 self.statusItem.button?.contentTintColor = nil
+                let currentID = self.mbFull.indices.contains(self.rotateIdx)
+                    ? self.mbFull[self.rotateIdx].id : nil
                 self.mbFull = full
-                self.mbPrimary = primaryList
+                self.rotateIdx = MenubarRotationPolicy.reconciledIndex(
+                    currentID: currentID, itemIDs: full.map(\.id))
                 self.rotateSecs = rotateSecs
                 self.configureMenubar()
             }
         }.resume()
     }
 
-    /// 决定菜单栏是「轮转」还是「主账号常显」，并立即重绘。
-    /// rotate_secs>0 且有多于一项（tool×账号）→ 起轮转定时器逐项显示；否则停轮转、显示主账号段。
+    /// 状态栏始终只显示一个同级页面；rotate_secs=0 时固定当前页，大于 0 时自动滚动。
     func configureMenubar() {
-        let shouldRotate = rotateSecs > 0 && mbFull.count > 1
-        if shouldRotate {
-            if rotateTimer == nil || rotateTimer?.timeInterval != Double(rotateSecs) {
+        updateMenubarSlotWidth()
+        if let interval = MenubarRotationPolicy.interval(
+                configuredSeconds: rotateSecs, itemCount: mbFull.count) {
+            if rotateTimer == nil || rotateTimer?.timeInterval != interval {
                 rotateTimer?.invalidate()
-                rotateTimer = Timer.scheduledTimer(withTimeInterval: Double(rotateSecs),
+                rotateTimer = Timer.scheduledTimer(withTimeInterval: interval,
                                                    repeats: true) { [weak self] _ in
                     Task { @MainActor in self?.advanceRotation() }
                 }
             }
-            if rotateIdx >= mbFull.count { rotateIdx = 0 }
-            drawMenubar([mbFull[rotateIdx]])   // 立即显示当前项，不等首次 tick
         } else {
             rotateTimer?.invalidate()
             rotateTimer = nil
-            drawMenubar(mbPrimary)
         }
+        if rotateIdx >= mbFull.count { rotateIdx = 0 }
+        drawMenubar(mbFull.isEmpty ? [] : [mbFull[rotateIdx]], animated: false)
     }
 
     func advanceRotation() {
-        guard !mbFull.isEmpty else { return }
-        rotateIdx = (rotateIdx + 1) % mbFull.count
-        drawMenubar([mbFull[rotateIdx]])
+        guard mbFull.count > 1 else { return }
+        rotateIdx = MenubarRotationPolicy.nextIndex(current: rotateIdx, itemCount: mbFull.count)
+        drawMenubar([mbFull[rotateIdx]], animated: true)
     }
 
-    func drawMenubar(_ items: [MBItem]) {
+    func drawMenubar(_ items: [MBItem], animated: Bool) {
         guard let button = statusItem.button else { return }
         button.contentTintColor = nil
-        if let img = composedIcon(items: items) { button.image = img }
+        guard let raw = composedIcon(items: items) else { return }
+        let image = paddedMenubarImage(raw)
+        if animated { animateMenubar(to: image) }
+        else { setMenubarImage(image) }
     }
 }
 

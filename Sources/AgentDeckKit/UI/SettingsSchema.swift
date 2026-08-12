@@ -33,6 +33,7 @@ enum SetRow {
     case select(key: String, label: String, hint: String?, opts: [(String, String)])   // (值, 显示名/键)
     case multi(label: String, hint: String?, opts: [(String, String)])                  // (key, 名/键)
     case colors(label: String, hint: String?, opts: [(String, String, String)])         // (key, 名, 默认hex)
+    case agentManager(label: String, hint: String?)
     case btns(label: String, hint: String?, btns: [(String, String)])                   // (act, 名/键)
 }
 
@@ -42,6 +43,11 @@ enum SettingsSchema {
     /// 键 → 值类型（解析 /api/settings 时按此映射，避开 JSON Bool/Int 歧义）。
     static var valueKinds: [String: SettingValueKind] {
         var m: [String: SettingValueKind] = [:]
+        for agent in AgentSettingsCatalog.all {
+            m[agent.showKey] = .bool
+            m[agent.menubarKey] = .bool
+            m[agent.colorKey] = .string
+        }
         for r in rows {
             switch r {
             case let .toggle(key, _, _): m[key] = .bool
@@ -63,12 +69,9 @@ enum SettingsSchema {
                opts: [100, 110, 120, 135], fmt: .percent, custom: 80...160),
         .chips(key: "glass_dim", label: "set.glassDim", hint: "set.glassDimHint",
                opts: [40, 55, 68, 80], fmt: .percent, custom: 20...90),
-        .colors(label: "set.colors", hint: "set.colorsHint",
-                opts: [("color_claude", "Claude", "#ff9d7a"), ("color_codex", "Codex", "#4fd1c5")]),
         .toggle(key: "minimal_mode", label: "set.minimal", hint: "set.minimalHint"),
         .toggle(key: "show_active", label: "set.showActive", hint: nil),
-        .multi(label: "set.showAgents", hint: "set.showAgentsHint",
-               opts: [("show_claude", "Claude"), ("show_codex", "Codex")]),
+        .agentManager(label: "set.agentManager", hint: "set.agentManagerHint"),
         .chips(key: "sessions_limit", label: "set.sessionsLimit", hint: "set.sessionsLimitHint",
                opts: [10, 15, 20, 30], fmt: .plain, custom: 5...100),
         .chips(key: "refresh_interval", label: "set.refreshInterval", hint: "set.refreshIntervalHint",
@@ -77,9 +80,10 @@ enum SettingsSchema {
                opts: [60, 180, 300, 600], fmt: .minutesFromSecs, custom: 60...3600),
         .chips(key: "quota_interval", label: "set.quotaInterval", hint: "set.quotaIntervalHint",
                opts: [300, 600, 1800, 3600], fmt: .minutesFromSecs, custom: 300...21600),
+        .toggle(key: "quota_auto_rotate", label: "set.quotaAutoRotate", hint: "set.quotaAutoRotateHint"),
+        .chips(key: "quota_rotate_secs", label: "set.quotaRotateSecs", hint: "set.quotaRotateSecsHint",
+               opts: [4, 6, 8, 10], fmt: .seconds, custom: 4...10),
         .section("set.secMenubar"),
-        .multi(label: "set.menubarUsage", hint: "set.menubarUsageHint",
-               opts: [("menubar_claude", "Claude"), ("menubar_codex", "Codex")]),
         .select(key: "menubar_value_dim", label: "set.mbValueDim", hint: "set.mbValueDimHint",
                 opts: [("shortest", "set.dimShortest"), ("weekly", "set.dimWeekly"), ("max", "set.dimMax")]),
         .toggle(key: "menubar_alert_color", label: "set.menubarAlert", hint: "set.menubarAlertHint"),

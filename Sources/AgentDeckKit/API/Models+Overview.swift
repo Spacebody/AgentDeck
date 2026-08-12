@@ -7,8 +7,9 @@ struct UsageResponse: Decodable {
     let days: [String]                            // 日期键，末位=今天
     let claudeDaily: [String: [String: [Double]]] // claude_daily: 日 → 模型 → [token 分量]
     let codexDaily: [String: Double]              // codex_daily: 日 → token
+    let qoderDaily: [String: Double]?              // qoder_daily: 日 → token（旧 daemon 可缺失）
     let costDaily: [String: Double]               // cost_daily: 日 → 等值美元
-    let hourly: [HourBucket]                       // 覆盖 48h，每小时 c=claude x=codex
+    let hourly: [HourBucket]                       // 覆盖 48h，每小时 c=claude x=codex q=qoder
     let projects7d: [ProjectUsage]?               // projects_7d
     // 成本汇总（用量卡头部 + 口径弹层拆分）
     let cost7d: Double?
@@ -20,8 +21,19 @@ struct UsageResponse: Decodable {
     let coverage: UsageCoverage?
 }
 
-struct HourBucket: Decodable { let ts: Double; let c: Double; let x: Double }
-struct ProjectUsage: Decodable { let name: String; let cwd: String; let tokens: Double; let cost: Double }
+struct HourBucket: Decodable {
+    let ts: Double
+    let c: Double
+    let x: Double
+    let q: Double?
+}
+struct ProjectUsage: Decodable {
+    let name: String
+    let cwd: String
+    let tokens: Double
+    let cost: Double
+    let agents: [String: Double]?
+}
 struct UsageCoverage: Decodable {
     let codexFiles: Int
     let codexMissingUsageFiles: Int
@@ -54,13 +66,13 @@ struct DoneEvent: Decodable {
 
 // MARK: - 今日摘要派生（复刻 loadToday：按模型族聚合 + 24h 环比）
 struct TodaySummary {
-    enum Family: String, CaseIterable { case opus, sonnet, haiku, other, codex }
+    enum Family: String, CaseIterable { case opus, sonnet, haiku, other, codex, qoder }
     var byFamily: [Family: Double] = [:]
     var totalTokens: Double = 0
     var costUSD: Double = 0
     var deltaPercent: Int?     // 近24h vs 前24h；nil=无对比基准
 
-    /// 家族配色（FAM_COLORS）：opus/sonnet/haiku/other/codex。
+    /// 家族配色（FAM_COLORS）：opus/sonnet/haiku/other/codex/qoder。
     static func color(_ f: Family) -> UInt32 {
         switch f {
         case .opus:   return 0xe8744f
@@ -68,24 +80,38 @@ struct TodaySummary {
         case .haiku:  return 0x5fc78f
         case .other:  return 0x9a9aa5
         case .codex:  return 0x4fd1c5   // var(--codex-deep)
+        case .qoder:  return 0x7c3aed
         }
     }
 
-    init?(from u: UsageResponse, now: Date = Date()) {
+    init?(from u: UsageResponse, now: Date = Date(),
+          visibleAgents: Set<String> = ["claude", "codex", "qoder"]) {
         guard let today = u.days.last else { return nil }
         var fams: [Family: Double] = [:]
-        for (model, parts) in (u.claudeDaily[today] ?? [:]) {
-            let fam: Family = ["opus", "sonnet", "haiku"].first { model.hasPrefix($0) }
-                .flatMap { Family(rawValue: $0) } ?? .other
-            fams[fam, default: 0] += parts.reduce(0, +)
+        if visibleAgents.contains("claude") {
+            for (model, parts) in (u.claudeDaily[today] ?? [:]) {
+                let fam: Family = ["opus", "sonnet", "haiku"].first { model.hasPrefix($0) }
+                    .flatMap { Family(rawValue: $0) } ?? .other
+                fams[fam, default: 0] += parts.reduce(0, +)
+            }
         }
-        fams[.codex, default: 0] += u.codexDaily[today] ?? 0
+        if visibleAgents.contains("codex") {
+            fams[.codex, default: 0] += u.codexDaily[today] ?? 0
+        }
+        if visibleAgents.contains("qoder") {
+            fams[.qoder, default: 0] += u.qoderDaily?[today] ?? 0
+        }
         let tok = fams.values.reduce(0, +)
         guard tok > 0 else { return nil }
         // 环比：hourly 覆盖 48h，近 24h vs 前 24h
         let nowSec = now.timeIntervalSince1970
         var cur = 0.0, prev = 0.0
-        for h in u.hourly { if h.ts >= nowSec - 86400 { cur += h.c + h.x } else { prev += h.c + h.x } }
+        for h in u.hourly {
+            let total = (visibleAgents.contains("claude") ? h.c : 0)
+                + (visibleAgents.contains("codex") ? h.x : 0)
+                + (visibleAgents.contains("qoder") ? h.q ?? 0 : 0)
+            if h.ts >= nowSec - 86400 { cur += total } else { prev += total }
+        }
         byFamily = fams
         totalTokens = tok
         costUSD = u.costDaily[today] ?? 0

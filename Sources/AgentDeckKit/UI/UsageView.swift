@@ -16,6 +16,7 @@ struct UsageView: View {
     let usage: UsageResponse?
     var showClaude: Bool = true
     var showCodex: Bool = true
+    var showQoder: Bool = true
     @State private var mode: UsageMode = .curve
     @Environment(\.adShowInfo) private var showInfo
 
@@ -23,16 +24,18 @@ struct UsageView: View {
         VStack(alignment: .leading, spacing: 10) {
             header
             Group {
-                if !showClaude && !showCodex {
+                if !showClaude && !showCodex && !showQoder {
                     Text(L("usage.noVisibleAgents"))
                         .font(.system(size: 10.5)).foregroundStyle(Theme.ink3)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     switch mode {
                     case .curve:
-                        Curve24h(usage: usage, showClaude: showClaude, showCodex: showCodex)
+                        Curve24h(usage: usage, showClaude: showClaude,
+                                 showCodex: showCodex, showQoder: showQoder)
                     case .usage:
-                        Week7Bars(usage: usage, showClaude: showClaude, showCodex: showCodex)
+                        Week7Bars(usage: usage, showClaude: showClaude,
+                                  showCodex: showCodex, showQoder: showQoder)
                     case .proj:
                         ProjectTop(usage: usage)
                     }
@@ -126,6 +129,7 @@ struct Curve24h: View {
     let usage: UsageResponse?
     var showClaude: Bool = true
     var showCodex: Bool = true
+    var showQoder: Bool = true
 
     var body: some View {
         let buckets = makeBuckets()
@@ -136,19 +140,20 @@ struct Curve24h: View {
     }
 
     /// 24 个整点桶（缺失记 0），中心点 ts+0.5h。
-    private func makeBuckets() -> [(ts: Double, c: Double, x: Double)] {
+    private func makeBuckets() -> [(ts: Double, c: Double, x: Double, q: Double)] {
         let now = Date().timeIntervalSince1970
         let hourMs = 3600.0
         let nowH = floor(now / hourMs) * hourMs
         let byTs = Dictionary(grouping: usage?.hourly ?? [], by: { $0.ts }).mapValues { $0[0] }
-        return (0...23).reversed().map { i -> (Double, Double, Double) in
+        return (0...23).reversed().map { i -> (Double, Double, Double, Double) in
             let ts = nowH - Double(i) * hourMs
             let h = byTs[ts]
-            return (ts + hourMs / 2, h?.c ?? 0, h?.x ?? 0)
+            return (ts + hourMs / 2, h?.c ?? 0, h?.x ?? 0, h?.q ?? 0)
         }
     }
 
-    private func draw(_ ctx: GraphicsContext, _ size: CGSize, _ buckets: [(ts: Double, c: Double, x: Double)]) {
+    private func draw(_ ctx: GraphicsContext, _ size: CGSize,
+                      _ buckets: [(ts: Double, c: Double, x: Double, q: Double)]) {
         let W = size.width, H = size.height
         let X0 = 32.0, X1 = W - 6, Y0 = H - 24, Y1 = 8.0
         let now = Date().timeIntervalSince1970
@@ -156,7 +161,7 @@ struct Curve24h: View {
         let t0 = nowH - 23 * 3600, t1 = nowH + 3600
         func px(_ ts: Double) -> Double { X0 + (ts - t0) / (t1 - t0) * (X1 - X0) }
         let peak = max(1, buckets.map {
-            max(showClaude ? $0.c : 0, showCodex ? $0.x : 0)
+            max(showClaude ? $0.c : 0, showCodex ? $0.x : 0, showQoder ? $0.q : 0)
         }.max() ?? 1)
         let yMax = usageNiceMax(peak)
         func py(_ v: Double) -> Double { Y0 - v / yMax * (Y0 - Y1) }
@@ -180,11 +185,17 @@ struct Curve24h: View {
                      at: CGPoint(x: x, y: Y0 + 10), anchor: .center)
             tk += 21600
         }
-        // 双序列：面积 + 线 + 端点
-        for (key, color) in [("c", Brand.claude.accent), ("x", Brand.codex.accent)] {
-            if key == "c" && !showClaude { continue }
-            if key == "x" && !showCodex { continue }
-            let pts = buckets.map { CGPoint(x: px($0.ts), y: py(key == "c" ? $0.c : $0.x)) }
+        // 三个 Agent 序列：面积 + 线 + 端点
+        for (key, color, visible) in [
+            ("c", Brand.claude.accent, showClaude),
+            ("x", Brand.codex.accent, showCodex),
+            ("q", Brand.qoder.accent, showQoder),
+        ] {
+            guard visible else { continue }
+            let pts = buckets.map { bucket in
+                let value = key == "c" ? bucket.c : key == "x" ? bucket.x : bucket.q
+                return CGPoint(x: px(bucket.ts), y: py(value))
+            }
             let line = smoothPath(pts)
             var area = line
             area.addLine(to: CGPoint(x: pts.last!.x, y: Y0))
@@ -201,14 +212,19 @@ struct Curve24h: View {
         }
     }
 
-    private func legend(_ buckets: [(ts: Double, c: Double, x: Double)]) -> some View {
-        let cTot = buckets.reduce(0) { $0 + $1.c }, xTot = buckets.reduce(0) { $0 + $1.x }
+    private func legend(_ buckets: [(ts: Double, c: Double, x: Double, q: Double)]) -> some View {
+        let cTot = buckets.reduce(0) { $0 + $1.c }
+        let xTot = buckets.reduce(0) { $0 + $1.x }
+        let qTot = buckets.reduce(0) { $0 + $1.q }
         return HStack(spacing: 12) {
             if showClaude {
                 legendItem(Brand.claude.accent, L("usage.legend24h", ["name": "Claude"]), cTot)
             }
             if showCodex {
                 legendItem(Brand.codex.accent, L("usage.legend24h", ["name": "Codex"]), xTot)
+            }
+            if showQoder {
+                legendItem(Brand.qoder.accent, L("usage.legend24h", ["name": "Qoder"]), qTot)
             }
             Spacer()
         }
@@ -227,6 +243,7 @@ struct Week7Bars: View {
     let usage: UsageResponse?
     var showClaude: Bool = true
     var showCodex: Bool = true
+    var showQoder: Bool = true
 
     private struct DayBar { let day: String; var per: [TodaySummary.Family: Double]; let all: Double }
 
@@ -248,6 +265,7 @@ struct Week7Bars: View {
                 }
             }
             if showCodex { legendItem(.codex, "Codex") }
+            if showQoder { legendItem(.qoder, "Qoder") }
             Spacer()
         }
         .font(.system(size: 9.5)).foregroundStyle(Theme.ink3)
@@ -280,6 +298,10 @@ struct Week7Bars: View {
                 let cx = u.codexDaily[day] ?? 0
                 if cx > 0 { per[.codex, default: 0] += cx }
             }
+            if showQoder {
+                let qd = u.qoderDaily?[day] ?? 0
+                if qd > 0 { per[.qoder, default: 0] += qd }
+            }
             return DayBar(day: day, per: per, all: per.values.reduce(0, +))
         }
     }
@@ -292,6 +314,7 @@ struct Week7Bars: View {
         case .haiku:  return [Color(hex: 0xaef0c8), Color(hex: 0x5fc78f)]
         case .other:  return [Color(hex: 0x9a9aa5), Color(hex: 0x6a6a75)]
         case .codex:  return [Brand.codex.accent, Brand.codex.deep]
+        case .qoder:  return [Brand.qoder.accent, Brand.qoder.deep]
         }
     }
 
@@ -322,7 +345,7 @@ struct Week7Bars: View {
                 var cur = Y0
                 let families: [TodaySummary.Family] =
                     (showClaude ? [.opus, .sonnet, .haiku, .other] : [])
-                    + (showCodex ? [.codex] : [])
+                    + (showCodex ? [.codex] : []) + (showQoder ? [.qoder] : [])
                 for f in families {
                     let v = b.per[f] ?? 0
                     guard v > 0 else { continue }
@@ -374,7 +397,7 @@ struct ProjectTop: View {
             // 纯 VStack（由主面板统一滚动，避免嵌套 ScrollView）
             VStack(spacing: 8) {
                 ForEach(Array(list.enumerated()), id: \.offset) { _, p in
-                    let isCodex = p.cwd.contains("/Codex")
+                    let brand = dominantBrand(for: p)
                     VStack(alignment: .leading, spacing: 3) {
                         HStack(alignment: .firstTextBaseline, spacing: 8) {
                             Text(p.name).font(.system(size: 11.5, weight: .medium))
@@ -386,7 +409,7 @@ struct ProjectTop: View {
                         GeometryReader { geo in
                             ZStack(alignment: .leading) {
                                 Capsule().fill(Color.white.opacity(0.08))
-                                Capsule().fill((isCodex ? Brand.codex : Brand.claude).gradient)
+                                Capsule().fill(brand.gradient)
                                     .frame(width: geo.size.width * p.tokens / maxTok)
                             }
                         }.frame(height: 4)
@@ -395,6 +418,14 @@ struct ProjectTop: View {
                 Spacer(minLength: 0)
             }
         }
+    }
+
+    private func dominantBrand(for project: ProjectUsage) -> Brand {
+        if let agent = project.agents?.max(by: { $0.value < $1.value })?.key,
+           let brand = Brand(rawValue: agent) {
+            return brand
+        }
+        return project.cwd.contains("/Codex") ? .codex : .claude
     }
 }
 

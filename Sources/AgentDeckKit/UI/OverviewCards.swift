@@ -88,7 +88,7 @@ private struct SessionRow: View {
     var body: some View {
         Button(action: onTap) {
             HStack(spacing: 8) {
-                BrandBadge(brand: tool == "codex" ? .codex : .claude, size: 20)
+                BrandBadge(brand: Brand(rawValue: tool) ?? .claude, size: 20)
                 Text(title)
                     .font(.system(size: monospaced ? 10.5 : 11,
                                   weight: monospaced ? .semibold : .regular,

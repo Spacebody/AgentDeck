@@ -1,6 +1,24 @@
 // AgentDeck v2 — 额度卡。忠实复刻 index.html quotaCardInner()（行 1189）：
 // 头部(徽章+名+账号+副信息) · 主体(进度环 + 窗口条) · 脚注 · 品牌辉光 · 玻璃卡。
 import SwiftUI
+import Combine
+import AppKit
+
+private extension View {
+    /// The carousel needs focus for arrow-key paging, but the default macOS focus
+    /// effect draws a persistent blue frame around the whole quota card.
+    @ViewBuilder
+    func quotaCarouselKeyboardFocus() -> some View {
+        if #available(macOS 14.0, *) {
+            focusable()
+                .focusEffectDisabled()
+        } else {
+            // macOS 13 has no public API for suppressing a custom view's focus
+            // effect. Keep the card unfocused instead of showing a stuck ring.
+            self
+        }
+    }
+}
 
 /// 百分比文字：整数不带小数，否则保留 1 位（对应窗口条 ${used_percent}% 的原值，已 round 1）。
 private func pctText(_ v: Double) -> String {
@@ -109,7 +127,8 @@ struct BrandGlyph: View {
                     .scaleEffect(brand == .claude ? 1.41 : 1)   // claude 放大填充留白
                     .foregroundStyle(brand.accent)
             } else {   // 资源缺失兜底
-                Image(systemName: brand == .claude ? "sparkle" : "apple.terminal")
+                Image(systemName: brand == .claude ? "sparkle"
+                      : brand == .codex ? "apple.terminal" : "q.square")
                     .font(.system(size: glyph, weight: .regular))
                     .foregroundStyle(brand.accent)
             }
@@ -352,6 +371,162 @@ struct QuotaCarousel: View {
     }
 }
 
+// MARK: - 多 Agent × 多账号拍平轮播
+struct FlatQuotaCarousel: View {
+    let pages: [QuotaPage]
+    var autoRotate = true
+    var interval = 6
+    var isActive = true
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var selectedID: String?
+    @State private var width: CGFloat = 0
+    @State private var hovering = false
+    @State private var paused = false
+    @State private var movingForward = true
+    @State private var lastAdvance = Date()
+    @GestureState private var dragX: CGFloat = 0
+    private let ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+
+    private var page: Int {
+        guard !pages.isEmpty else { return 0 }
+        return pages.firstIndex(where: { $0.id == selectedID }) ?? 0
+    }
+    private var canAutoRotate: Bool {
+        pages.count > 1 && autoRotate && isActive && !hovering && !paused && dragX == 0
+            && NSApplication.shared.keyWindow?.isVisible == true
+    }
+    private var normalizedInterval: TimeInterval {
+        TimeInterval(normalizedQuotaRotationInterval(interval))
+    }
+
+    var body: some View {
+        if pages.isEmpty {
+            EmptyView()
+        } else if pages.count == 1, let only = pages.first {
+            QuotaCardView(brand: only.brand, node: only.account,
+                          accountLabel: only.account.account)
+        } else {
+            VStack(spacing: 8) {
+                ZStack(alignment: .topLeading) {
+                    // Invisible copies participate in layout so the carousel height is the
+                    // maximum page height and content below never jumps during rotation.
+                    ForEach(pages) { item in
+                        QuotaCardView(brand: item.brand, node: item.account,
+                                      accountLabel: item.account.account)
+                            .opacity(0).allowsHitTesting(false).accessibilityHidden(true)
+                    }
+                    let current = pages[page]
+                    QuotaCardView(brand: current.brand, node: current.account,
+                                  accountLabel: current.account.account)
+                        .id(current.id)
+                        .offset(x: dragX)
+                        .transition(cardTransition)
+                }
+                .animation(reduceMotion ? .easeInOut(duration: 0.18)
+                           : .spring(response: 0.34, dampingFraction: 0.86), value: page)
+                .clipped()
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 12)
+                        .updating($dragX) { value, state, _ in state = value.translation.width }
+                        .onEnded { value in
+                            let threshold = max(40, width * 0.18)
+                            if value.translation.width <= -threshold { select(page + 1) }
+                            else if value.translation.width >= threshold { select(page - 1) }
+                            else { lastAdvance = Date() }
+                        })
+                controls
+            }
+            .background(GeometryReader { proxy in
+                Color.clear.preference(key: CarouselWidthKey.self, value: proxy.size.width)
+            })
+            .onPreferenceChange(CarouselWidthKey.self) { width = $0 }
+            .onHover { hovering = $0; if !$0 { lastAdvance = Date() } }
+            .onAppear { reconcileSelection(); lastAdvance = Date() }
+            .onChange(of: pages.map(\.id)) { _ in reconcileSelection() }
+            .onChange(of: isActive) { _ in lastAdvance = Date() }
+            .onReceive(ticker) { now in
+                guard canAutoRotate, now.timeIntervalSince(lastAdvance) >= normalizedInterval else { return }
+                select(page + 1)
+            }
+            .quotaCarouselKeyboardFocus()
+            .onMoveCommand { direction in
+                if direction == .left { select(page - 1) }
+                if direction == .right { select(page + 1) }
+            }
+        }
+    }
+
+    private var controls: some View {
+        HStack(spacing: 8) {
+            carouselButton("chevron.left", label: L("quota.previous")) { select(page - 1) }
+            Spacer(minLength: 0)
+            if pages.count <= 6 {
+                HStack(spacing: 5) {
+                    ForEach(pages.indices, id: \.self) { index in
+                        Button { select(index) } label: {
+                            Capsule()
+                                .fill(index == page ? pages[page].brand.accent : Color.white.opacity(0.22))
+                                .frame(width: index == page ? 15 : 6, height: 6)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("\(index + 1) / \(pages.count)")
+                    }
+                }
+            } else {
+                Text("\(page + 1) / \(pages.count)")
+                    .font(.rounded(10, weight: .semibold)).foregroundStyle(Theme.ink2)
+            }
+            Spacer(minLength: 0)
+            carouselButton(paused ? "play.fill" : "pause.fill",
+                           label: paused ? L("quota.play") : L("quota.pause")) {
+                paused.toggle(); lastAdvance = Date()
+            }
+            carouselButton("chevron.right", label: L("quota.next")) { select(page + 1) }
+        }
+        .padding(.horizontal, 4)
+    }
+
+    private var cardTransition: AnyTransition {
+        guard !reduceMotion else { return .opacity }
+        return .asymmetric(
+            insertion: .move(edge: movingForward ? .trailing : .leading).combined(with: .opacity),
+            removal: .move(edge: movingForward ? .leading : .trailing).combined(with: .opacity))
+    }
+
+    private func carouselButton(_ system: String, label: String,
+                                action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: system)
+                .font(.system(size: 9, weight: .bold)).foregroundStyle(Theme.ink2)
+                .frame(width: 22, height: 18)
+                .background(Capsule().fill(Color.white.opacity(0.07)))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(label)
+    }
+
+    private func reconcileSelection() {
+        selectedID = reconciledQuotaSelection(currentID: selectedID, pages: pages)
+        lastAdvance = Date()
+    }
+
+    private func select(_ requested: Int) {
+        guard !pages.isEmpty else { return }
+        let target = (requested % pages.count + pages.count) % pages.count
+        movingForward = requested > page || (page == pages.count - 1 && target == 0)
+        if reduceMotion {
+            withAnimation(.easeInOut(duration: 0.18)) { selectedID = pages[target].id }
+        } else {
+            withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) {
+                selectedID = pages[target].id
+            }
+        }
+        lastAdvance = Date()
+    }
+}
+
 // MARK: - 额度卡
 struct QuotaCardView: View {
     let brand: Brand
@@ -360,7 +535,13 @@ struct QuotaCardView: View {
     var accountLabel: String? = nil
     var presentation: QuotaCardPresentation = .panelWide
 
-    private var name: String { brand == .claude ? "Claude" : "Codex" }
+    private var name: String {
+        switch brand {
+        case .claude: return "Claude"
+        case .codex: return "Codex"
+        case .qoder: return "Qoder"
+        }
+    }
     private var compact: Bool { presentation.isWidget }
     private var narrow: Bool { presentation.isDualPanel }
     private var radius: CGFloat { compact ? 16 : Theme.rLg }
@@ -404,10 +585,16 @@ struct QuotaCardView: View {
         } else {
             // 错误/无额度态
             head
-            Text(node?.hidden == true ? L("quota.loading")
-                 : (node?.noQuota == true ? L("quota.noQuota") : L("quota.fetchFailed")))
-                .font(.system(size: 10.5)).foregroundStyle(Theme.ink3)
-                .padding(.vertical, 6)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(node?.hidden == true ? L("quota.loading")
+                     : (node?.noQuota == true ? L("quota.noQuota") : L("quota.fetchFailed")))
+                if node?.hidden != true, let detail = node?.error, !detail.isEmpty {
+                    Text(detail).font(.system(size: 9.5)).foregroundStyle(Theme.ink3.opacity(0.8))
+                        .lineLimit(2)
+                }
+            }
+            .font(.system(size: 10.5)).foregroundStyle(Theme.ink3)
+            .padding(.vertical, 6)
         }
     }
 

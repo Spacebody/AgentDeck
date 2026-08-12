@@ -140,7 +140,11 @@ public final class AppStore: ObservableObject {
 
     @Published var terminals: [TerminalOption] = []   // /api/terminals 已安装终端（恢复方式选项）
 
-    var today: TodaySummary? { usage.flatMap { TodaySummary(from: $0) } }
+    var today: TodaySummary? {
+        guard let usage else { return nil }
+        let visible = Set(["claude", "codex", "qoder"].filter(agentOnWithQuotaFallback))
+        return TodaySummary(from: usage, visibleAgents: visible)
+    }
     var updateAvailable: Bool { update?.available == true }
 
     /// 该 agent 是否展示。设置一旦到达客户端便是前端唯一真值；设置尚未加载时才回退
@@ -151,7 +155,7 @@ public final class AppStore: ObservableObject {
     }
     var showActive: Bool { settings["show_active"]?.boolVal ?? true }
 
-    // 列表按 show_claude/show_codex 过滤（daemon 不过滤这几个，对齐 v1 客户端 agentOn）。
+    // 列表按各 Agent 的 show_* 设置过滤（daemon 保留完整索引）。
     var sessionsShown: [SessionItem] { sessions.filter { agentOnWithQuotaFallback($0.tool) } }
     var activeShown: [ActiveSession] { active.filter { agentOnWithQuotaFallback($0.tool) } }
     var doneShown: [DoneEvent] { done.filter { agentOnWithQuotaFallback($0.tool) } }
@@ -356,7 +360,7 @@ public final class AppStore: ObservableObject {
         if key == "language" { I18N.locale = I18N.resolve(value.stringVal) }
         onSettingsChanged?()   // 即时刷新菜单栏（语言/常显用量/告警阈值等）
         scheduleSettingsSave()
-        if key == "show_claude" || key == "show_codex" || key == "sessions_limit" {
+        if AgentSettingsCatalog.visibilityKeys.contains(key) || key == "sessions_limit" {
             sessionRequestGeneration += 1
             let generation = sessionRequestGeneration
             searchTask?.cancel()
@@ -368,10 +372,11 @@ public final class AppStore: ObservableObject {
         }
     }
 
-    /// 恢复默认配色：单请求清两色（避免两次 setSetting 竞态），后端回填空串=用默认。
+    /// 恢复默认配色：同一批次清空所有 Agent 颜色，后端回填空串=用默认。
     func resetColors() {
-        stageSetting("color_claude", .string(""))
-        stageSetting("color_codex", .string(""))
+        for agent in AgentSettingsCatalog.all {
+            stageSetting(agent.colorKey, .string(""))
+        }
         applyCustomColors()
         onSettingsChanged?()
         scheduleSettingsSave()
@@ -461,10 +466,12 @@ public final class AppStore: ObservableObject {
     /// Agent 可见性已被 daemon 接收后重读一次额度缓存。后到的切换覆盖前一次刷新，
     /// 但刷新始终覆盖当前所有可见 Agent，不会因另一个 Agent 的开关而漏掉刚启用的数据。
     private func refreshQuotaAfterAgentVisibilityChange(in saved: [String: SettingValue]) {
-        guard saved.keys.contains(where: { $0 == "show_claude" || $0 == "show_codex" }) else { return }
+        guard saved.keys.contains(where: {
+            AgentSettingsCatalog.visibilityKeys.contains($0)
+        }) else { return }
         agentVisibilityRefreshTask?.cancel()
         agentVisibilityRefreshTask = nil
-        guard agentOn("claude") || agentOn("codex") else { return }
+        guard AgentSettingsCatalog.all.contains(where: { agentOn($0.id) }) else { return }
         agentVisibilityRefreshTask = Task { [weak self] in
             guard let self else { return }
             let quotaRequest = self.quotaGate.beginRequest()
@@ -482,6 +489,7 @@ public final class AppStore: ObservableObject {
         switch tool.lowercased() {
         case "claude": hidden = quota?.claude?.hidden
         case "codex": hidden = quota?.codex?.hidden
+        case "qoder": hidden = quota?.qoder?.hidden
         default: hidden = nil
         }
         return agentOn(tool, fallbackHidden: hidden)
@@ -496,8 +504,9 @@ public final class AppStore: ObservableObject {
 
     /// 自定义主色 → Brand 全局覆盖（额度环/进度条/用量图同步）。
     private func applyCustomColors() {
-        Brand.customAccents[.claude] = Color(hexString: settings["color_claude"]?.stringVal ?? "")
-        Brand.customAccents[.codex] = Color(hexString: settings["color_codex"]?.stringVal ?? "")
+        for agent in AgentSettingsCatalog.all {
+            Brand.customAccents[agent.brand] = Color(hexString: settings[agent.colorKey]?.stringVal ?? "")
+        }
     }
 
     // MARK: 动作
@@ -577,7 +586,7 @@ public final class AppStore: ObservableObject {
     }
 
     func setSessionFilter(_ filter: String) {
-        let normalized = ["all", "claude", "codex"].contains(filter) ? filter : "all"
+        let normalized = ["all", "claude", "codex", "qoder"].contains(filter) ? filter : "all"
         guard normalized != sessionFilter else { return }
         sessionFilter = normalized
         sessionRequestGeneration += 1
@@ -642,8 +651,8 @@ public final class AppStore: ObservableObject {
         if sessionFilter != "all" {
             effectiveTool = sessionFilter
         } else {
-            let claude = agentOn("claude"), codex = agentOn("codex")
-            if claude != codex { effectiveTool = claude ? "claude" : "codex" }
+            let enabled = ["claude", "codex", "qoder"].filter { agentOn($0) }
+            if !enabled.isEmpty && enabled.count < 3 { effectiveTool = enabled.joined(separator: ",") }
         }
         if effectiveTool != "all" { params["tool"] = effectiveTool }
         params["limit"] = String(sessionPageSize)
@@ -662,7 +671,7 @@ public final class AppStore: ObservableObject {
         resetHistory: Bool, generation: Int
     ) async {
         guard generation == sessionRequestGeneration else { return }
-        if sessionFilter == "all" && !agentOn("claude") && !agentOn("codex") {
+        if sessionFilter == "all" && !agentOn("claude") && !agentOn("codex") && !agentOn("qoder") {
             sessions = []; sessionsTotal = 0; sessionsHasMore = false
             sessionsLoading = false; sessionsIndexing = false; sessionsLoadFailed = false
             sessionNextCursor = nil; sessionPageCursors = [nil]; sessionPage = 1

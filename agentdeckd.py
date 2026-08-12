@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""AgentDeck daemon — Claude Code / Codex 额度与会话监控后端（纯标准库，零依赖）。
+"""AgentDeck daemon — Claude Code / Codex / Qoder 额度与会话监控后端（纯标准库，零依赖）。
 
 API:
   GET  /api/health    存活探测
@@ -39,6 +39,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 HOME = Path.home()
+AGENT_IDS = ("claude", "codex", "qoder")
 CLAUDE_PROJECTS = HOME / ".claude" / "projects"
 CODEX_SESSIONS = HOME / ".codex" / "sessions"
 CLAUDE_PIDFILES = HOME / ".claude" / "sessions"
@@ -56,6 +57,7 @@ PATH_MAPPINGS_FILE = DATA_DIR / "path_mappings.json"
 SESSION_INDEX_FILE = DATA_DIR / "session_index.sqlite3"
 CODEX_USAGE_CACHE_FILE = DATA_DIR / "codex_usage_cache.json"
 CLAUDE_USAGE_CACHE_FILE = DATA_DIR / "claude_usage_cache.json"
+QODER_USAGE_CACHE_FILE = DATA_DIR / "qoder_usage_cache.json"
 PORT = 7777
 try:
     VERSION = (Path(__file__).resolve().parent / "VERSION").read_text().strip()
@@ -72,6 +74,7 @@ CODEX_QUOTA_TTL = 5            # 仅供 app-server 不可用时的本地 rollout
 CODEX_RECONCILE_SECS = 90      # Codex 官方快照后台自愈周期
 CODEX_OPEN_STALE_SECS = 30     # 开面板时超过该时长便异步校准
 CODEX_STALE_SECS = 180         # 所有实时来源都失联后才标记陈旧
+QODER_QUOTA_TTL = 600          # Qoder CLI 初始化相对较重，默认 10 分钟短缓存
 QUOTA_FORCE_BUDGET_SECS = 110  # 留 10s 给原生客户端解码/调度（客户端总超时 120s）
 CODEX_ROLLOUT_FAST_TAIL_BYTES = 512 * 1024
 CODEX_ROLLOUT_TAIL_BYTES = 4 * 1024 * 1024
@@ -150,24 +153,30 @@ DEFAULT_SETTINGS = {
     "notify_sound": True,      # 提示音
     "menubar_claude": True,    # 菜单栏常显 Claude 图标+百分比
     "menubar_codex": True,     # 菜单栏常显 Codex 图标+百分比（可多选/全不选）
+    "menubar_qoder": True,     # 菜单栏常显 Qoder 图标+百分比
     "menubar_alert_color": True,   # 菜单栏图标按额度变色（≥80% 橙 / ≥95% 红，分段独立）
     "menubar_value_dim": "shortest",  # 菜单栏显示哪个窗口的百分比：shortest/weekly/max
     "menubar_color_dim": "shortest",  # 菜单栏颜色由哪个窗口驱动：shortest/weekly/max
-    "menubar_rotate_secs": 0,  # 多账号菜单栏轮转间隔（秒）；0=不轮转，只显主账号
+    "menubar_rotate_secs": 6,  # 状态栏单槽轮播间隔（秒）；0=固定当前 Agent/账号
     "claude_dirs": [],         # 手动添加的额外 Claude 配置目录（多账号并行）
     "codex_dirs": [],          # 手动添加的额外 Codex 配置目录
+    "qoder_dirs": [],          # 手动添加的额外 Qoder 配置目录
     "show_active": True,       # 活跃会话卡片
     "show_claude": True,       # 面板展示 Claude 板块（只用 Codex 的用户可关）
     "show_codex": True,        # 面板展示 Codex 板块（只用 Claude 的用户可关）
+    "show_qoder": True,        # 面板展示 Qoder 板块
+    "quota_auto_rotate": True, # 多 Agent/账号额度卡自动轮播
+    "quota_rotate_secs": 6,    # 概览额度轮播间隔
     "sessions_limit": 20,      # 会话列表每页数量
     "refresh_interval": 30,    # 前端自动刷新（秒）
     "sample_interval": 180,    # 历史曲线采样间隔（秒）——只影响记录密度，不决定查询频率
-    "quota_interval": 600,     # Claude 额度查询间隔（秒）；Codex 使用事件驱动 + 独立校准
+    "quota_interval": 600,     # Claude/Qoder 额度查询间隔（秒）；Codex 使用事件驱动 + 独立校准
     "terminal": "auto",        # auto | iterm | terminal | copy
     "auto_paste_resume": False,    # 唤起 Warp/VS Code 等无 CLI 注入终端后，自动模拟 ⌘V + 回车（需辅助功能授权）
     "font_scale": 100,         # 面板/小组件字体缩放 %（整体 zoom）
     "color_claude": "",        # 自定义 Claude 主色（#rrggbb）；空=内置橙
     "color_codex": "",         # 自定义 Codex 主色（#rrggbb）；空=内置青
+    "color_qoder": "",         # 自定义 Qoder 主色（#rrggbb）；空=内置紫
     "language": "auto",        # 界面语言：auto（跟随系统）| zh-CN | en | ja
     "keep_awake": True,        # 有活跃会话时阻止系统休眠（避免会话因休眠/断网中断）
     "update_check": True,      # 检查新版本（向自托管 Pages 清单查版本号，不带凭据）
@@ -183,8 +192,9 @@ SETTING_RANGES = {
     "sessions_limit": (5, 100),
     "refresh_interval": (5, 600),
     "sample_interval": (60, 3600),
-    "quota_interval": (300, 21600),   # Claude：5 分钟 ~ 6 小时
+    "quota_interval": (300, 21600),   # Claude/Qoder：5 分钟 ~ 6 小时
     "menubar_rotate_secs": (0, 60),
+    "quota_rotate_secs": (4, 10),
 }
 _settings_lock = threading.Lock()
 _settings_cache = None   # (mtime, 解析后的 saved dict)——按 mtime 命中，免每次读盘+解析
@@ -235,6 +245,7 @@ def api_settings_save(body):
             with _cache_lock:        # 目录变更立即重扫数据源
                 _ttl_cache.pop("sources_claude", None)
                 _ttl_cache.pop("sources_codex", None)
+                _ttl_cache.pop("sources_qoder", None)
             continue
         elif isinstance(default, int):
             if isinstance(v, bool) or not isinstance(v, (int, float)):
@@ -243,11 +254,13 @@ def api_settings_save(body):
             if k in SETTING_RANGES:
                 lo, hi = SETTING_RANGES[k]
                 v = max(lo, min(hi, v))
+            if k == "quota_rotate_secs" and v not in (4, 6, 8, 10):
+                v = 6
         elif not isinstance(v, type(default)):
             continue
         elif k == "language" and v != "auto" and v not in LOCALES:
             continue
-        elif k in ("color_claude", "color_codex"):
+        elif k in ("color_claude", "color_codex", "color_qoder"):
             # 仅接受 #rrggbb 或空串（清除）——防 CSS 注入
             if v != "" and not re.fullmatch(r"#[0-9a-fA-F]{6}", v):
                 continue
@@ -290,20 +303,21 @@ def api_settings_save(body):
             # 否则缩短到期会在限流中提前重试又被打。
             now = time.time()
             for key, (_exp, val) in list(_ttl_cache.items()):
-                if (key.startswith("claude_quota")
+                if ((key.startswith("claude_quota") or key.startswith("qoder_quota"))
                         and isinstance(val, dict) and val.get("ok") and not val.get("stale")):
                     _ttl_cache[key] = (now + clean["quota_interval"], val)
     if "keep_awake" in clean:   # 立即生效，不阻塞响应
         threading.Thread(target=_update_keepawake, daemon=True).start()
-    if "claude_dirs" in clean or "codex_dirs" in clean:
+    if "claude_dirs" in clean or "codex_dirs" in clean or "qoder_dirs" in clean:
         _request_session_index_scan()
-    if "codex_dirs" in clean:
-        # 新增/移除 CODEX_HOME 后立即同步各自 notify；文件 I/O 放后台，不拖慢设置响应。
+    if "codex_dirs" in clean or "qoder_dirs" in clean:
+        # 新增/移除配置目录后立即同步各自完成事件 hook；文件 I/O 放后台，不拖慢响应。
         threading.Thread(target=install_integration, daemon=True,
                          name="agentdeck-integration-sync").start()
     quota_keys = {
-        "show_claude", "show_codex", "claude_dirs", "codex_dirs",
-        "quota_interval", "menubar_claude", "menubar_codex",
+        "show_claude", "show_codex", "show_qoder",
+        "claude_dirs", "codex_dirs", "qoder_dirs",
+        "quota_interval", "menubar_claude", "menubar_codex", "menubar_qoder",
         "menubar_alert_color", "menubar_value_dim", "menubar_color_dim",
         "menubar_rotate_secs",
     }
@@ -386,6 +400,15 @@ def _is_codex_dir(p):
         return False
 
 
+def _is_qoder_dir(p):
+    try:
+        return p.is_dir() and (
+            (p / "projects").is_dir() or (p / "settings.json").exists()
+            or (p / ".auth.json").exists() or (p / "auth.json").exists())
+    except OSError:
+        return False
+
+
 def _expand(raw):
     s = str(raw).strip().strip('"').strip("'")
     s = s.replace("${HOME}", str(HOME)).replace("$HOME", str(HOME))
@@ -443,9 +466,9 @@ def _proc_env_dirs(var, tools):
 
 def _label_for_dir(p, default_label):
     name = p.name
-    if name in (".claude", ".codex"):
+    if name in (".claude", ".codex", ".qoder"):
         return default_label
-    for pre in (".claude-", ".codex-"):
+    for pre in (".claude-", ".codex-", ".qoder-"):
         if name.startswith(pre):
             return name[len(pre):] or default_label
     return name.lstrip(".") or default_label
@@ -515,6 +538,12 @@ def codex_sources():
     return cached("sources_codex", 30, lambda: _discover(
         "CODEX_HOME", HOME / ".codex", ".codex-*",
         "codex_dirs", _is_codex_dir, "默认", proc_tools=("codex",)))
+
+
+def qoder_sources():
+    return cached("sources_qoder", 30, lambda: _discover(
+        "QODER_CONFIG_DIR", HOME / ".qoder", ".qoder-*",
+        "qoder_dirs", _is_qoder_dir, "默认", proc_tools=("qodercli", "qoder")))
 
 
 # ----------------------------------------------------------------- 多语言 i18n
@@ -1864,7 +1893,7 @@ _last_force_claude_quota = 0.0
 def _force_quota_refreshes(settings, ttl, budget=QUOTA_FORCE_BUDGET_SECS):
     """Refresh visible providers concurrently within one end-to-end deadline."""
     pool = concurrent.futures.ThreadPoolExecutor(
-        max_workers=2, thread_name_prefix="agentdeck-quota-force")
+        max_workers=3, thread_name_prefix="agentdeck-quota-force")
     futures = {}
     try:
         if settings.get("show_claude", True):
@@ -1872,6 +1901,8 @@ def _force_quota_refreshes(settings, ttl, budget=QUOTA_FORCE_BUDGET_SECS):
         if settings.get("show_codex", True):
             futures["codex"] = pool.submit(
                 _codex_quota_manager.force_refresh, max(0.0, budget - 1))
+        if settings.get("show_qoder", False):
+            futures["qoder"] = pool.submit(_qoder_quota_accounts, ttl)
         done, pending = concurrent.futures.wait(
             futures.values(), timeout=max(0.0, budget))
         if pending:
@@ -1888,6 +1919,13 @@ def _force_quota_refreshes(settings, ttl, budget=QUOTA_FORCE_BUDGET_SECS):
             for account in claude_accounts)
         if claude_failed:
             raise RuntimeError("Claude quota refresh failed")
+        qoder_accounts = futures["qoder"].result() if "qoder" in futures else []
+        qoder_failed = any(
+            account.get("stale")
+            or (not account.get("ok") and not account.get("no_quota"))
+            for account in qoder_accounts)
+        if qoder_failed:
+            raise RuntimeError("Qoder quota refresh failed")
         return claude_accounts
     finally:
         # Running provider calls own bounded I/O timeouts. Do not make an already
@@ -1909,6 +1947,160 @@ def _claude_quota_accounts_cached():
     return out
 
 
+# ----------------------------------------------------------------- Qoder 额度
+
+def _qoder_cli_path():
+    """Resolve qodercli without assuming a login shell PATH in the app daemon."""
+    found = shutil.which("qodercli")
+    if found:
+        return found
+    fallback = HOME / ".local" / "bin" / "qodercli"
+    return str(fallback) if fallback.is_file() else None
+
+
+def _qoder_expiry(value):
+    try:
+        timestamp = float(value)
+    except (TypeError, ValueError):
+        return None
+    # UsageInfo expiresAt is currently milliseconds; accept seconds for forwards
+    # compatibility and for unit tests using compact fixtures.
+    return timestamp / 1000 if timestamp > 10_000_000_000 else timestamp
+
+
+def _qoder_usage_window(window_id, label, node, expires_at=None):
+    if not isinstance(node, dict):
+        return None
+    total = node.get("total", node.get("cap"))
+    used = node.get("used")
+    remaining = node.get("remaining")
+    percentage = node.get("percentage")
+    try:
+        if percentage is None and used is not None and total not in (None, 0):
+            percentage = float(used) / float(total) * 100
+        percentage = max(0.0, min(100.0, float(percentage)))
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+    out = {
+        "id": window_id,
+        "label": label,
+        "used_percent": round(percentage, 1),
+        "resets_at": expires_at,
+        "bucket_kind": window_id,
+    }
+    for key, value in (("used", used), ("total", total), ("remaining", remaining)):
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            out[key] = value
+    if isinstance(node.get("unit"), str):
+        out["unit"] = node["unit"][:40]
+    return out
+
+
+def _qoder_quota_from_usage(usage, sampled_at=None):
+    """Map Qoder SDK UsageInfo into AgentDeck's stable quota-window model."""
+    if not isinstance(usage, dict):
+        raise ValueError("invalid Qoder usage response")
+    expires_at = _qoder_expiry(usage.get("expiresAt"))
+    windows = []
+    try:
+        overall = float(usage.get("totalUsagePercentage"))
+    except (TypeError, ValueError):
+        overall = None
+    if overall is not None:
+        windows.append({
+            "id": "total", "label": "综合额度",
+            "used_percent": round(max(0.0, min(100.0, overall)), 1),
+            "resets_at": expires_at, "bucket_kind": "total",
+        })
+    for key, label, window_id in (
+        ("userQuota", "套餐额度", "plan"),
+        ("addOnQuota", "加油包", "add_on"),
+        ("orgResourcePackage", "组织资源包", "organization"),
+    ):
+        window = _qoder_usage_window(
+            window_id, label, usage.get(key),
+            expires_at if key == "userQuota" else None)
+        if window:
+            windows.append(window)
+    if not windows:
+        return {"ok": False, "no_quota": True,
+                "error": "Qoder account has no usage snapshot"}
+    return {
+        "ok": True,
+        "kind": str(usage.get("userType") or "qoder")[:80],
+        "windows": windows,
+        "sampled_at": sampled_at or _iso_at(),
+    }
+
+
+def _qoder_quota_for(src):
+    binary = _qoder_cli_path()
+    if not binary:
+        return {"ok": False, "no_quota": True,
+                "error": "qodercli is not installed"}
+    requests = (
+        {"type": "control_request", "request_id": "init",
+         "request": {"subtype": "initialize"}},
+        {"type": "control_request", "request_id": "usage",
+         "request": {"subtype": "get_usage_info"}},
+        {"type": "control_request", "request_id": "end",
+         "request": {"subtype": "end_session"}},
+    )
+    payload = "".join(json.dumps(item, separators=(",", ":")) + "\n"
+                      for item in requests)
+    command = [
+        binary, "--config-dir", str(src["path"]), "-p",
+        "--input-format", "stream-json", "--output-format", "stream-json",
+        "--no-session-persistence", "--tools", "",
+    ]
+    try:
+        proc = subprocess.run(
+            command, input=payload, capture_output=True, text=True,
+            timeout=30, cwd=str(HOME))
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("Qoder usage request timed out") from exc
+    usage = None
+    # Initialization can contain account and model metadata. Inspect only the
+    # named usage response and never persist/log the remaining stream.
+    for line in proc.stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except (TypeError, ValueError):
+            continue
+        response = event.get("response") if isinstance(event, dict) else None
+        if not isinstance(response, dict) or response.get("request_id") != "usage":
+            continue
+        result = response.get("response")
+        if isinstance(result, dict) and isinstance(result.get("usage"), dict):
+            usage = result["usage"]
+            break
+    if usage is None:
+        if proc.returncode != 0:
+            raise RuntimeError("Qoder usage request failed")
+        return {"ok": False, "no_quota": True,
+                "error": "Qoder usage is unavailable or the account is not logged in"}
+    return _qoder_quota_from_usage(usage)
+
+
+def _qoder_quota_accounts(ttl=QODER_QUOTA_TTL, cache_only=False):
+    out = []
+    for src in qoder_sources():
+        if src.get("session_only"):
+            continue
+        key = "qoder_quota" if src["is_default"] else f"qoder_quota_{src['id']}"
+        if cache_only:
+            quota = _cached_or_last_good(key) or {
+                "ok": False, "error": "Qoder quota cache is warming",
+            }
+        else:
+            quota = _resilient(
+                key, max(QODER_QUOTA_TTL, int(ttl)),
+                lambda source=src: _qoder_quota_for(source))
+        out.append({"account_id": src["id"], "account": src["label"],
+                    "is_default": src["is_default"], **quota})
+    return out
+
+
 def api_quota(force=False, cache_only=False, fresh_codex=False):
     s = get_settings()
     # 面板隐藏的 agent 不再拉额度（省钥匙串读取 / Anthropic usage 调用 / 限流消耗）
@@ -1923,7 +2115,8 @@ def api_quota(force=False, cache_only=False, fresh_codex=False):
             if now - _last_force_claude_quota >= 10:
                 _last_force_claude_quota = now
                 for k in [k for k in _ttl_cache
-                          if k.startswith("claude_quota")]:
+                          if k.startswith("claude_quota")
+                          or k.startswith("qoder_quota")]:
                     _ttl_cache.pop(k, None)
         forced_claude_accts = _force_quota_refreshes(s, ttl)
     elif fresh_codex and s.get("show_codex", True):
@@ -1940,7 +2133,10 @@ def api_quota(force=False, cache_only=False, fresh_codex=False):
     else:
         claude_accts = []
     codex_accts = _codex_quota_accounts() if s.get("show_codex", True) else []
-    # 向后兼容：claude/codex 仍为「主账号」单对象；新增 accounts 列表供 carousel/轮转
+    qoder_accts = (_qoder_quota_accounts(ttl, cache_only=cache_only)
+                   if s.get("show_qoder", True) else [])
+    # 向后兼容：各顶层字段仍为「主账号」单对象；agents 是拍平 UI 的自包含契约。
+    # 未发现账号时也把明确状态作为合成默认页放进 agents，避免启用的 Agent 静默消失。
     if claude_accts:
         primary_claude = claude_accts[0]
     elif not s.get("show_claude", True):
@@ -1956,13 +2152,37 @@ def api_quota(force=False, cache_only=False, fresh_codex=False):
     else:
         primary_codex = {"ok": False, "no_quota": True,
                          "error": "Codex account not found"}
+    if qoder_accts:
+        primary_qoder = qoder_accts[0]
+    elif not s.get("show_qoder", True):
+        primary_qoder = {"ok": False, "hidden": True}
+    else:
+        primary_qoder = {"ok": False, "no_quota": True,
+                         "error": "Qoder account not found"}
+    def status_account(primary):
+        return {"account_id": "default", "account": "默认", "is_default": True,
+                **primary}
     with _quota_change:
         revision = _quota_revision
     return {"claude": primary_claude,
             "codex": primary_codex,
-            "accounts": {"claude": claude_accts, "codex": codex_accts},
+            "qoder": primary_qoder,
+            "agents": [
+                {"id": "claude", "name": "Claude",
+                 "hidden": not s.get("show_claude", True),
+                 "accounts": claude_accts or [status_account(primary_claude)]},
+                {"id": "codex", "name": "Codex",
+                 "hidden": not s.get("show_codex", True),
+                 "accounts": codex_accts or [status_account(primary_codex)]},
+                {"id": "qoder", "name": "Qoder",
+                 "hidden": not s.get("show_qoder", True),
+                 "accounts": qoder_accts or [status_account(primary_qoder)]},
+            ],
+            "accounts": {"claude": claude_accts, "codex": codex_accts,
+                         "qoder": qoder_accts},
             "menubar": {"claude": s["menubar_claude"],
                         "codex": s["menubar_codex"],
+                        "qoder": s["menubar_qoder"],
                         "alert_color": s.get("menubar_alert_color", True),
                         "value_dim": s.get("menubar_value_dim", "shortest"),
                         "color_dim": s.get("menubar_color_dim", "shortest"),
@@ -2277,6 +2497,47 @@ def _codex_session_info(path):
     return sid, cwd, title
 
 
+def _qoder_session_info(path):
+    """Parse Qoder's JSONL defensively across its Claude-compatible variants."""
+    sid, cwd, title, branch = path.stem, "", "", ""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for _ in range(120):
+                line = f.readline()
+                if not line:
+                    break
+                try:
+                    evt = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(evt, dict):
+                    continue
+                if evt.get("isSidechain"):
+                    return _SESSION_IGNORED
+                sid = str(evt.get("sessionId") or evt.get("session_id") or sid)
+                cwd = evt.get("cwd") or cwd
+                branch = evt.get("gitBranch") or evt.get("git_branch") or branch
+                text = ""
+                if evt.get("type") == "user":
+                    message = evt.get("message")
+                    text = _msg_text(message.get("content")) \
+                        if isinstance(message, dict) else _msg_text(message)
+                payload = evt.get("payload")
+                payload = payload if isinstance(payload, dict) else {}
+                if not text and payload.get("type") == "user_message":
+                    text = _msg_text(payload.get("message"))
+                elif not text and payload.get("role") == "user":
+                    text = _msg_text(payload.get("content"))
+                if text and not text.lstrip().startswith(_SKIP_PREFIXES):
+                    title = _clean_title(text)
+                    break
+    except OSError:
+        return None
+    if not (_ID_RE.match(sid) and title):
+        return None
+    return sid, cwd, title, branch
+
+
 def _session_file_info(tool, path):
     if tool == "claude":
         info = _claude_session_info(path)
@@ -2285,7 +2546,7 @@ def _session_file_info(tool, path):
         if not info:
             return "incomplete", None
         sid, cwd, title, branch = info
-    else:
+    elif tool == "codex":
         _rollout_meta_cache.pop(str(path), None)
         if _rollout_meta(path).get("subagent"):
             return "ignored", None
@@ -2294,7 +2555,14 @@ def _session_file_info(tool, path):
             return "incomplete", None
         sid, cwd, title = info
         branch = ""
-    project = Path(cwd).name if cwd else (path.parent.name if tool == "claude" else "")
+    else:
+        info = _qoder_session_info(path)
+        if info is _SESSION_IGNORED:
+            return "ignored", None
+        if not info:
+            return "incomplete", None
+        sid, cwd, title, branch = info
+    project = Path(cwd).name if cwd else (path.parent.name if tool != "codex" else "")
     return "indexed", {
         "session_id": sid, "cwd": cwd or "", "title": title,
         "project": project, "branch": branch or "",
@@ -2306,11 +2574,13 @@ def _session_source_files():
     specs = (
         ("claude", claude_sources(), "projects", "*/*.jsonl"),
         ("codex", codex_sources(), "sessions", "*/*/*/rollout-*.jsonl"),
+        ("qoder", qoder_sources(), "projects", "**/*.jsonl"),
     )
     for tool, sources, folder, pattern in specs:
         for src in sources:
             for path in (src["path"] / folder).glob(pattern):
-                if tool == "claude" and path.name.startswith("agent-"):
+                if ((tool == "claude" and path.name.startswith("agent-"))
+                        or (tool == "qoder" and "subagents" in path.parts)):
                     continue
                 try:
                     st = path.stat()
@@ -2416,7 +2686,7 @@ def _sync_pins_to_db(conn):
             snap = dict(value)
             tool = str(snap.get("tool") or "")
             sid = str(snap.get("id") or old_key)
-            if tool not in ("claude", "codex") or not _ID_RE.match(sid):
+            if tool not in AGENT_IDS or not _ID_RE.match(sid):
                 continue
             parts = old_key.split("|", 2)
             account_id = str(snap.get("account_id") or "")
@@ -2658,7 +2928,7 @@ def _decode_session_cursor(raw, scope):
         if (normalized["rev"] < 0 or normalized["p"] not in (0, 1)
                 or not 0 <= normalized["r"] <= 3):
             return None
-        if normalized["t"] not in ("claude", "codex"):
+        if normalized["t"] not in AGENT_IDS:
             return None
         if (not re.fullmatch(r"[a-z0-9-]{1,120}", normalized["a"])
                 or not _ID_RE.match(normalized["s"])):
@@ -2685,7 +2955,9 @@ def _session_cursor_where(cursor):
 
 def _query_session_index(query="", tool="all", limit=None, cursor=""):
     q = (query or "").strip().casefold()[:80]
-    tool = tool if tool in ("claude", "codex") else "all"
+    requested_tools = tuple(agent for agent in AGENT_IDS
+                            if agent in str(tool).split(","))
+    tool = ",".join(requested_tools) if requested_tools else "all"
     if limit is None:
         # 未升级的静态客户端搜索没有分页参数：保留尽可能完整的首批结果；
         # 原生 Swift 客户端始终显式传页大小。
@@ -2693,7 +2965,7 @@ def _query_session_index(query="", tool="all", limit=None, cursor=""):
             limit = _SESSION_PAGE_MAX
         else:
             per_tool = get_settings()["sessions_limit"]
-            limit = per_tool if tool != "all" else per_tool * 2
+            limit = per_tool if tool != "all" else per_tool * len(AGENT_IDS)
     try:
         limit = min(_SESSION_PAGE_MAX, max(1, int(limit)))
     except (TypeError, ValueError):
@@ -2701,8 +2973,8 @@ def _query_session_index(query="", tool="all", limit=None, cursor=""):
 
     where, where_params = ["(source_present=1 OR pinned=1)", "title<>''"], []
     if tool != "all":
-        where.append("tool=?")
-        where_params.append(tool)
+        where.append(f"tool IN ({','.join('?' for _ in requested_tools)})")
+        where_params.extend(requested_tools)
     terms = [part for part in q.split() if part]
     for term in terms:
         where.append("instr(search_text, ?) > 0")
@@ -2773,7 +3045,7 @@ def api_pin(body):
     tool = str(sess.get("tool") or "")
     sid = str(sess.get("id") or "")
     account_id = str(sess.get("account_id") or "default")[:120]
-    if (tool not in ("claude", "codex") or not _ID_RE.match(sid)
+    if (tool not in AGENT_IDS or not _ID_RE.match(sid)
             or not re.fullmatch(r"[a-z0-9-]{1,120}", account_id)):
         return {"ok": False, "error": "invalid id"}
     key = _pin_key(tool, account_id, sid)
@@ -2897,6 +3169,98 @@ def _pid_codex_rollout_info(pid):
     return best
 
 
+def _qoder_transcript_meta(path):
+    """Read only Qoder session identity fields needed by the active-session list."""
+    sid, cwd = path.stem, ""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for _ in range(80):
+                line = f.readline()
+                if not line:
+                    break
+                try:
+                    evt = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(evt, dict):
+                    continue
+                if evt.get("isSidechain"):
+                    return None
+                sid = str(evt.get("sessionId") or evt.get("session_id") or sid)
+                cwd = evt.get("cwd") or cwd
+    except OSError:
+        return None
+    return {"id": sid if _ID_RE.match(sid) else "", "cwd": cwd}
+
+
+def _pid_qoder_transcript_info(pid):
+    """Return the newest main Qoder transcript currently opened by a CLI process."""
+    try:
+        out = subprocess.run(["lsof", "-p", str(pid), "-Fn"],
+                             capture_output=True, text=True, timeout=8).stdout
+        roots = [os.path.realpath(src["path"] / "projects") + os.sep
+                 for src in qoder_sources()]
+    except Exception:
+        return None
+    if not roots:
+        return None
+    best = None
+    for line in out.splitlines():
+        if not line.startswith("n") or not line.endswith(".jsonl"):
+            continue
+        try:
+            path = Path(os.path.realpath(line[1:]))
+        except (OSError, ValueError):
+            continue
+        if "subagents" in path.parts or not any(str(path).startswith(r) for r in roots):
+            continue
+        meta = _qoder_transcript_meta(path)
+        if not meta:
+            continue
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
+        if best is None or mtime > best["mtime"]:
+            best = {**meta, "mtime": mtime}
+    return best
+
+
+def _indexed_session_activity(tool, cwd):
+    """Fallback to the latest indexed transcript for a running process cwd."""
+    if not cwd:
+        return None
+    conn = None
+    try:
+        conn = _session_db_connect()
+        row = conn.execute("""
+            SELECT session_id, cwd, mtime
+            FROM session_index
+            WHERE tool=? AND cwd=? AND source_present=1
+            ORDER BY mtime DESC LIMIT 1
+        """, (tool, cwd)).fetchone()
+    except (OSError, sqlite3.Error):
+        return None
+    finally:
+        if conn is not None:
+            conn.close()
+    if not row:
+        return None
+    return {"id": row[0] or "", "cwd": row[1] or cwd,
+            "mtime": float(row[2] or 0)}
+
+
+def _active_sort_key(entry):
+    """Newest observable activity first, then stable Agent/PID tie breakers."""
+    try:
+        activity = float(entry.get("last_active_at") or 0)
+    except (TypeError, ValueError):
+        activity = 0.0
+    if activity != activity:  # NaN must not make ordering non-deterministic.
+        activity = 0.0
+    return (-activity, str(entry.get("tool") or ""), int(entry.get("pid") or 0))
+
+
 def _iter_claude_pidfiles():
     """所有 Claude 源的 per-PID 索引文件（多账号合并）。"""
     for src in claude_sources():
@@ -2930,6 +3294,7 @@ def _claude_tx_mtime(session_id):
 def api_active():
     def build():
         active, claude_pids = [], {}
+        observed_at = time.time()
         # Claude: 官方 per-PID 索引文件，含 sessionId/cwd/status
         for f in _iter_claude_pidfiles():
             try:
@@ -2954,14 +3319,20 @@ def api_active():
             except ValueError:
                 continue
             ppid_of[pid_i] = ppid_i
-            m = re.match(r"^(?:\S+/)?(claude|codex)(?:\s+(.*))?$", args)
+            m = re.match(r"^(?:\S+/)?(claude|codex|qodercli|qoder)(?:\s+(.*))?$", args)
             if not m or "app-server" in (m.group(2) or ""):
                 continue
-            rows.append((pid_i, m.group(1), etime))
+            raw_tool, tool_args = m.group(1), m.group(2) or ""
+            tool = "qoder" if raw_tool in ("qodercli", "qoder") else raw_tool
+            # AgentDeck's own headless quota probe must never appear as a user session.
+            if tool == "qoder" and ("--no-session-persistence" in tool_args
+                                     or re.search(r"(?:^|\s)-p(?:\s|$)", tool_args)):
+                continue
+            rows.append((pid_i, tool, etime))
             tool_pids.add(pid_i)
 
         def _spawned_by_agent(pid):
-            # 沿父进程链上溯：祖先里有另一个 claude/codex ⇒ 这是 agent 自己拉起的子进程
+            # 沿父进程链上溯：祖先里有另一个 agent ⇒ 这是 agent 自己拉起的子进程
             # （后台标题生成 `claude -p`、子代理等一闪而过的 headless 助手），非用户会话。
             seen, p = set(), ppid_of.get(pid)
             while p and p > 1 and p not in seen:
@@ -2974,8 +3345,10 @@ def api_active():
         for pid_i, tool, etime in rows:
             if _spawned_by_agent(pid_i):
                 continue
+            runtime_secs = _etime_secs(etime)
             entry = {"tool": tool, "pid": pid_i, "runtime": _fmt_etime(etime),
-                     "runtime_secs": _etime_secs(etime),
+                     "runtime_secs": runtime_secs,
+                     "last_active_at": max(0.0, observed_at - runtime_secs),
                      "status": "", "id": "", "cwd": "", "project": ""}
             if tool == "claude":
                 info = claude_pids.get(pid_i)
@@ -2989,6 +3362,15 @@ def api_active():
                 except Exception:
                     pass
             entry["project"] = Path(entry["cwd"]).name if entry["cwd"] else "—"
+            if tool == "qoder":
+                info = _pid_qoder_transcript_info(pid_i) \
+                    or _indexed_session_activity("qoder", entry["cwd"])
+                if info:
+                    entry["id"] = info["id"] or entry["id"]
+                    entry["cwd"] = entry["cwd"] or info["cwd"]
+                    entry["project"] = Path(entry["cwd"]).name if entry["cwd"] else "—"
+                    entry["last_active_at"] = max(entry["last_active_at"], info["mtime"])
+                    entry["status"] = "busy" if observed_at - info["mtime"] < 30 else "idle"
             active.append(entry)
 
         # Codex 无官方状态索引：按其 rollout 文件最近写入时间推断 忙碌/空闲
@@ -3009,6 +3391,7 @@ def api_active():
                     e["id"] = info["id"] or e["id"]
                     e["cwd"] = e["cwd"] or info["cwd"]
                     e["project"] = Path(e["cwd"]).name if e["cwd"] else "—"
+                    e["last_active_at"] = max(e["last_active_at"], info["mtime"])
                     # 当前进程已明确打开某个 rollout 后，该文件的新旧就是该会话的
                     # 结论；不得再按 cwd 回退到同项目另一会话的最近写入时间。
                     e["status"] = "busy" if now - info["mtime"] < 30 else "idle"
@@ -3018,16 +3401,25 @@ def api_active():
                          if c == e["cwd"] or c.startswith(e["cwd"] + "/")
                          or e["cwd"].startswith(c + "/")]
                 if cands:
-                    e["status"] = "busy" if now - max(cands) < 30 else "idle"
+                    latest = max(cands)
+                    e["last_active_at"] = max(e["last_active_at"], latest)
+                    e["status"] = "busy" if now - latest < 30 else "idle"
 
         # Claude 会话的 pidfile 未必带 status（Xcode 自带的旧版 claude 即如此）：
         # 按 transcript 最近写入活跃度判忙闲，与 Codex 同口径，远比 CPU 占用可靠。
         tnow = time.time()
         for e in active:
-            if e["tool"] == "claude" and not e["status"] and e["id"]:
+            if e["tool"] == "claude" and e["id"]:
                 mt = _claude_tx_mtime(e["id"])
                 if mt:
-                    e["status"] = "busy" if tnow - mt < 30 else "idle"
+                    e["last_active_at"] = max(e["last_active_at"], mt)
+                    if not e["status"]:
+                        e["status"] = "busy" if tnow - mt < 30 else "idle"
+            elif e["tool"] == "claude" and e["cwd"]:
+                info = _indexed_session_activity("claude", e["cwd"])
+                if info:
+                    e["id"] = info["id"] or e["id"]
+                    e["last_active_at"] = max(e["last_active_at"], info["mtime"])
 
         # 仍无任何状态来源的会话（无 sessionId、也无 transcript）：末路兜底，按进程
         # CPU 占用粗判（对网络 I/O 密集的流式生成不准，仅作最后手段）
@@ -3080,11 +3472,13 @@ def api_active():
                 start = mt
             active.append({"tool": "codex", "pid": 0, "host": "app",
                            "runtime": _fmt_secs(now - start),
+                           "runtime_secs": max(0, now - start),
+                           "last_active_at": mt,
                            "status": "busy" if now - mt < 30 else "idle",
                            "id": sid, "cwd": cwd,
                            "project": Path(cwd).name if cwd else "—"})
 
-        active.sort(key=lambda a: (a["tool"], a["pid"]))
+        active.sort(key=_active_sort_key)
         return {"active": active, "ts": time.time()}
     return cached("active", 3, build)
 
@@ -3201,14 +3595,17 @@ def api_preview(query):
     tool = query.get("tool", [""])[0]
     sid = query.get("id", [""])[0]
     account_id = query.get("account_id", [""])[0][:120]
-    if tool not in ("claude", "codex") or not _ID_RE.match(sid):
+    if tool not in AGENT_IDS or not _ID_RE.match(sid):
         return {"ok": False, "error": "invalid args"}
     indexed = _session_index_path(tool, sid, account_id)
     files = [indexed] if indexed and indexed.is_file() else []
     if not files:   # 索引初建/旧客户端兜底；正常路径不再全目录 glob
-        sources = claude_sources() if tool == "claude" else codex_sources()
-        pattern = f"*/{sid}.jsonl" if tool == "claude" else f"*/*/*/rollout-*{sid}.jsonl"
-        folder = "projects" if tool == "claude" else "sessions"
+        sources = {"claude": claude_sources, "codex": codex_sources,
+                   "qoder": qoder_sources}[tool]()
+        pattern = ({"claude": f"*/{sid}.jsonl",
+                    "codex": f"*/*/*/rollout-*{sid}.jsonl",
+                    "qoder": f"**/{sid}.jsonl"})[tool]
+        folder = "sessions" if tool == "codex" else "projects"
         for src in sources:
             if account_id and src["id"] != account_id:
                 continue
@@ -3338,6 +3735,39 @@ rm -f "$SELF/claude-stop-hook.sh" "$SELF/integration.json" 2>/dev/null
 exit 0
 '''
 
+_QODER_HOOK_WRAPPER = DATA_DIR / "qoder-stop-hook.sh"
+_QODER_HOOK_MARK = "qoder-stop-hook.sh"
+_QODER_HOOK_CMD = f'sh {json.dumps(str(_QODER_HOOK_WRAPPER))}'
+_QODER_HOOK_WRAPPER_SH = '''#!/bin/sh
+# AgentDeck Qoder Stop hook（自动安装/自清理，勿手改）
+APP="/Applications/AgentDeck.app"
+BODY="$(cat)"
+printf '%s' "$BODY" | python3 -c 'import json,sys; d=json.load(sys.stdin); d["agentdeck_tool"]="qoder"; json.dump(d,sys.stdout)' | \
+  curl -sf -m 3 -X POST http://127.0.0.1:7777/api/event \
+  -H 'Content-Type: application/json' --data-binary @- >/dev/null 2>&1 && exit 0
+[ -d "$APP" ] && exit 0
+python3 - "${QODER_CONFIG_DIR:-$HOME/.qoder}/settings.json" >/dev/null 2>&1 <<'PY'
+import json,sys,os,tempfile
+p=sys.argv[1]
+try: d=json.load(open(p))
+except Exception: raise SystemExit
+h=d.get("hooks") or {}; st=h.get("Stop")
+if isinstance(st,list):
+    kept=[g for g in st if not (isinstance(g,dict) and any(
+        "qoder-stop-hook.sh" in (x.get("command") or "") for x in (g.get("hooks") or [])))]
+    if kept: h["Stop"]=kept
+    else:
+        h.pop("Stop",None)
+        if not h: d.pop("hooks",None)
+    fd,tmp=tempfile.mkstemp(prefix='.settings.json.',dir=os.path.dirname(p))
+    with os.fdopen(fd,'w') as f:
+        json.dump(d,f,ensure_ascii=False,indent=2); f.flush(); os.fsync(f.fileno())
+    os.replace(tmp,p)
+PY
+rm -f "$HOME/Library/Application Support/AgentDeck/qoder-stop-hook.sh" 2>/dev/null
+exit 0
+'''
+
 
 def _integration_state():
     try:
@@ -3436,6 +3866,74 @@ def _remove_claude_hook():
     try:
         _atomic_write_text(_CLAUDE_SETTINGS,
                            json.dumps(d, ensure_ascii=False, indent=2))
+    except OSError:
+        pass
+
+
+def _qoder_hook_is_ours(group):
+    return isinstance(group, dict) and any(
+        _QODER_HOOK_MARK in (hook.get("command") or "")
+        for hook in (group.get("hooks") or []) if isinstance(hook, dict))
+
+
+def _write_qoder_hook_wrapper():
+    try:
+        _atomic_write_text(_QODER_HOOK_WRAPPER, _QODER_HOOK_WRAPPER_SH, mode=0o755)
+        return True
+    except OSError:
+        return False
+
+
+def _install_qoder_hook(settings_path):
+    """Merge AgentDeck's Stop hook into one Qoder config without replacing user hooks."""
+    settings_path = Path(settings_path)
+    try:
+        data = json.loads(settings_path.read_text()) if settings_path.exists() else {}
+    except (OSError, ValueError):
+        return False
+    if not isinstance(data, dict) or not _write_qoder_hook_wrapper():
+        return False
+    hooks = data.setdefault("hooks", {})
+    if not isinstance(hooks, dict):
+        return False
+    stop = hooks.setdefault("Stop", [])
+    if not isinstance(stop, list):
+        return False
+    current = [group for group in stop if _qoder_hook_is_ours(group)]
+    if (len(current) == 1
+            and (current[0].get("hooks") or [{}])[0].get("command") == _QODER_HOOK_CMD):
+        return False
+    stop[:] = [group for group in stop if not _qoder_hook_is_ours(group)]
+    stop.append({"hooks": [{"type": "command", "command": _QODER_HOOK_CMD,
+                             "timeout": 5}]})
+    try:
+        _atomic_write_text(settings_path, json.dumps(data, ensure_ascii=False, indent=2))
+        return True
+    except OSError:
+        return False
+
+
+def _remove_qoder_hook(settings_path):
+    settings_path = Path(settings_path)
+    try:
+        data = json.loads(settings_path.read_text())
+    except (OSError, ValueError):
+        return
+    hooks = data.get("hooks") if isinstance(data, dict) else None
+    stop = hooks.get("Stop") if isinstance(hooks, dict) else None
+    if not isinstance(stop, list):
+        return
+    kept = [group for group in stop if not _qoder_hook_is_ours(group)]
+    if len(kept) == len(stop):
+        return
+    if kept:
+        hooks["Stop"] = kept
+    else:
+        hooks.pop("Stop", None)
+        if not hooks:
+            data.pop("hooks", None)
+    try:
+        _atomic_write_text(settings_path, json.dumps(data, ensure_ascii=False, indent=2))
     except OSError:
         pass
 
@@ -4068,12 +4566,27 @@ def _remove_legacy_codex_stop_hook():
 
 
 def install_integration():
-    """启动时调用（幂等）：自动接好完成事件钩子（Claude Stop + Codex notify 链式转发）。
+    """启动时调用（幂等）：自动接好 Claude/Qoder Stop + Codex notify 完成事件。
     每步各自重读 state 再加标记，避免覆盖 _install_codex_notify 写入的原值备份。"""
     with _integration_lock:
         _remove_legacy_codex_stop_hook()
         if _install_claude_hook():
             st = _integration_state(); st["claude_hook"] = True; _integration_state_save(st)
+        st = _integration_state()
+        current_qoder = [str(src["path"] / "settings.json")
+                         for src in qoder_sources() if not src.get("session_only")]
+        saved_qoder = [str(path) for path in st.get("qoder_hook_targets", [])
+                       if isinstance(path, str)]
+        for stale in set(saved_qoder) - set(current_qoder):
+            _remove_qoder_hook(stale)
+        qoder_changed = False
+        for path in current_qoder:
+            qoder_changed = _install_qoder_hook(path) or qoder_changed
+        st = _integration_state()
+        st["qoder_hook_targets"] = current_qoder
+        if qoder_changed:
+            st["qoder_hook"] = True
+        _integration_state_save(st)
         targets = _codex_notify_targets()
         current_configs = {os.path.realpath(target["config"]) for target in targets}
         st = _integration_state()
@@ -4102,6 +4615,12 @@ def remove_integration():
     with _integration_lock:
         _remove_claude_hook()
         st = _integration_state()
+        current_qoder = [str(src["path"] / "settings.json")
+                         for src in qoder_sources() if not src.get("session_only")]
+        saved_qoder = [str(path) for path in st.get("qoder_hook_targets", [])
+                       if isinstance(path, str)]
+        for path in set(current_qoder + saved_qoder):
+            _remove_qoder_hook(path)
         targets = _saved_codex_notify_targets(st) + _codex_notify_targets()
         seen = set()
         for target in targets:
@@ -4114,7 +4633,7 @@ def remove_integration():
         if os.path.realpath(_CODEX_CONFIG) not in seen:
             _remove_codex_notify()
         _remove_legacy_codex_stop_hook()
-        for f in (_HOOK_WRAPPER, INTEGRATION_FILE):
+        for f in (_HOOK_WRAPPER, _QODER_HOOK_WRAPPER, INTEGRATION_FILE):
             try:
                 f.unlink()
             except OSError:
@@ -4240,6 +4759,32 @@ def _valid_claude_transcript_path(raw_path, sid="", cwd=""):
     return None
 
 
+def _valid_qoder_transcript_path(raw_path, sid="", cwd=""):
+    """Accept only an indexed-shape Qoder main transcript below a discovered config root."""
+    if not raw_path or not sid or not cwd:
+        return None
+    try:
+        path = Path(os.path.realpath(os.path.expanduser(raw_path)))
+        wanted_cwd = os.path.realpath(os.path.expanduser(cwd))
+    except (OSError, ValueError):
+        return None
+    roots = [os.path.realpath(src["path"] / "projects") + os.sep
+             for src in qoder_sources()]
+    if (not any(str(path).startswith(root) for root in roots)
+            or not path.is_file() or path.stem != sid
+            or "subagents" in path.parts):
+        return None
+    info = _qoder_session_info(path)
+    if not info or info is _SESSION_IGNORED:
+        return None
+    parsed_sid, parsed_cwd, _title, _branch = info
+    try:
+        return str(path) if (parsed_sid == sid
+                             and os.path.realpath(os.path.expanduser(parsed_cwd)) == wanted_cwd) else None
+    except (OSError, ValueError):
+        return None
+
+
 _TEMP_ROOTS = tuple(sorted({
     os.path.realpath(b) for b in (tempfile.gettempdir(), "/tmp", "/private/tmp", "/var/folders")
 }))
@@ -4258,7 +4803,7 @@ def _is_temp_cwd(cwd):
 
 
 def api_event(body):
-    """接收 Claude Stop hook / Codex notify 包装脚本推来的完成事件。"""
+    """接收 Claude/Qoder Stop hook 或 Codex notify 推来的完成事件。"""
     s = get_settings()
     # 额度实时更新与“是否展示完成弹丸”是两条独立链路。即使用户关闭完成提醒，
     # Codex notify 仍按 thread-id 精确刷新对应 rollout，不能退回 30s/10min 轮询。
@@ -4275,15 +4820,20 @@ def api_event(body):
     if body.get("hook_event_name") == "Stop":
         if body.get("stop_hook_active"):       # hook 续跑回环，忽略
             return {"ok": True, "skipped": "loop"}
-        tool = "claude"
+        tool = "qoder" if body.get("agentdeck_tool") == "qoder" else "claude"
         sid = body.get("session_id") or ""
         cwd = body.get("cwd") or ""
         project = Path(cwd).name if cwd else ""
         # 外部输入→文件读取的唯一路径：限定在已发现的 Claude 配置目录内，防任意文件读取
-        tp = _valid_claude_transcript_path(body.get("transcript_path") or "", sid, cwd)
+        validator = (_valid_qoder_transcript_path if tool == "qoder"
+                     else _valid_claude_transcript_path)
+        tp = validator(body.get("transcript_path") or "", sid, cwd)
         if not tp:
-            return {"ok": True, "skipped": "invalid_claude_transcript"}
-        t, text = _last_user_msg(tp, sid, cwd)
+            return {"ok": True, "skipped": f"invalid_{tool}_transcript"}
+        # Qoder transcripts may keep cwd/session only in metadata records; path validation
+        # above already bound the file to this session, so the reverse scan can be looser.
+        t, text = _last_user_msg(tp, sid if tool == "claude" else "",
+                                cwd if tool == "claude" else "")
         title = _clean_title(text)[:60]
         if t:
             duration = time.time() - t
@@ -4400,6 +4950,26 @@ def _find_codex_pid(cwd):
                     return int(pid)
             except Exception:
                 continue
+    return None
+
+
+def _find_qoder_pid(cwd):
+    ps = subprocess.run(["ps", "-axo", "pid=,args="],
+                        capture_output=True, text=True, timeout=10)
+    for line in ps.stdout.splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) < 2:
+            continue
+        pid, args = parts
+        if not re.match(r"^(?:\S+/)?(?:qodercli|qoder)(?:\s|$)", args):
+            continue
+        if "--no-session-persistence" in args or re.search(r"(?:^|\s)-p(?:\s|$)", args):
+            continue
+        try:
+            if not cwd or _pid_cwd(int(pid)) == cwd:
+                return int(pid)
+        except Exception:
+            continue
     return None
 
 
@@ -4552,6 +5122,8 @@ def api_focus(body):
         pid = _find_claude_pid(sid)
     elif tool == "codex":
         pid = _find_codex_pid(cwd)
+    elif tool == "qoder":
+        pid = _find_qoder_pid(cwd)
     if not pid:
         # Codex 桌面端线程无独立可寻进程，直接深链（App 未启动 open 也会拉起）
         if tool == "codex" and _ID_RE.match(sid):
@@ -4703,7 +5275,7 @@ def _check_alerts(tool_name, windows, account_id="default", account_label="",
 def _sample_once():
     q = api_quota()
     sample = {"ts": round(time.time())}
-    cl, cx = q.get("claude") or {}, q.get("codex") or {}
+    cl, cx, qo = (q.get("claude") or {}, q.get("codex") or {}, q.get("qoder") or {})
     if cl.get("ok"):
         for w in cl.get("windows", []):
             if w.get("id") == "five_hour":
@@ -4720,7 +5292,8 @@ def _sample_once():
     # 应用官方快照时确认，避免把 rollout 局部值当成完整快照。
     account_groups = q.get("accounts") or {}
     for key, tool_name, primary in (("claude", "Claude", cl),
-                                    ("codex", "Codex", cx)):
+                                    ("codex", "Codex", cx),
+                                    ("qoder", "Qoder", qo)):
         accounts = account_groups.get(key) or ([primary] if primary.get("ok") else [])
         show_account = len(accounts) > 1
         for account in accounts:
@@ -4908,6 +5481,18 @@ def _load_claude_usage_cache():
     return {}
 
 
+def _load_qoder_usage_cache():
+    """Qoder transcripts use the same per-message usage shape as Claude."""
+    try:
+        data = json.loads(QODER_USAGE_CACHE_FILE.read_text())
+        if data.get("version") == _CLAUDE_USAGE_CACHE_VERSION \
+                and isinstance(data.get("files"), dict):
+            return data["files"]
+    except (OSError, ValueError, AttributeError):
+        pass
+    return {}
+
+
 def _cached_claude_file_usage(path, disk_cache):
     stat = path.stat()
     key = str(path)
@@ -4925,6 +5510,11 @@ def _cached_claude_file_usage(path, disk_cache):
                    "size": stat.st_size, "mtime_ns": stat.st_mtime_ns})
     disk_cache[key] = parsed
     return parsed["agg"], True
+
+
+def _cached_qoder_file_usage(path, disk_cache):
+    """Incrementally aggregate Qoder's Claude-compatible assistant usage."""
+    return _cached_claude_file_usage(path, disk_cache)
 
 
 _claude_cwd_cache = {}
@@ -4963,6 +5553,14 @@ def _iter_claude_usage_files():
         projects = src["path"] / "projects"
         files.update(projects.glob("*/*.jsonl"))
         files.update(projects.glob("*/**/subagents/*.jsonl"))
+    return sorted(files)
+
+
+def _iter_qoder_usage_files():
+    """Return Qoder transcripts from every discovered config directory."""
+    files = set()
+    for src in qoder_sources():
+        files.update((src["path"] / "projects").glob("**/*.jsonl"))
     return sorted(files)
 
 
@@ -5193,10 +5791,21 @@ def api_usage():
         week_cut = days[-7]
         now = time.time()
         hour_cut = now - 48 * 3600    # 48h：近 24h 画曲线，前 24h 供环比
-        hourly = {}   # epoch_hour -> {"c": tokens, "x": tokens}
-        projects = {}  # cwd -> {"tokens": n, "cost": $}（近 7 天）
+        hourly = {}   # epoch_hour -> {"c": Claude, "x": Codex, "q": Qoder}
+        projects = {}  # cwd -> {"tokens", "cost", "agents"}（近 7 天）
         with _path_mappings_lock:
             path_mappings = _load_path_mappings()
+
+        def add_project_usage(raw_cwd, tokens, cost, agent):
+            project_cwd = _usage_project_cwd(raw_cwd, path_mappings)
+            if not project_cwd:
+                return
+            project = projects.setdefault(
+                project_cwd, {"tokens": 0, "cost": 0.0, "agents": {}})
+            project["tokens"] += tokens
+            project["cost"] += cost
+            project["agents"][agent] = \
+                project["agents"].get(agent, 0) + tokens
 
         claude_usage_files = _iter_claude_usage_files()
         claude_cache = _load_claude_usage_cache()
@@ -5232,14 +5841,9 @@ def api_usage():
                             if fcwd is None:
                                 fcwd = _claude_file_cwd(path)
                             if fcwd:
-                                project_cwd = _usage_project_cwd(fcwd, path_mappings)
-                                if project_cwd:
-                                    p = projects.setdefault(
-                                        project_cwd, {"tokens": 0, "cost": 0.0})
-                                    p["tokens"] += sum(tk)
-                                    p["cost"] += c
+                                add_project_usage(fcwd, sum(tk), c, "claude")
                     if ep and ep >= hour_cut:
-                        hourly.setdefault(ep, {"c": 0, "x": 0})["c"] += sum(tk)
+                        hourly.setdefault(ep, {"c": 0, "x": 0, "q": 0})["c"] += sum(tk)
 
         if claude_cache_dirty:
             try:
@@ -5285,14 +5889,9 @@ def api_usage():
                         xcost_7d += cost
                         cwd = _rollout_meta(path)["cwd"]
                         if cwd:
-                            project_cwd = _usage_project_cwd(cwd, path_mappings)
-                            if project_cwd:
-                                p = projects.setdefault(
-                                    project_cwd, {"tokens": 0, "cost": 0.0})
-                                p["tokens"] += total
-                                p["cost"] += cost
+                            add_project_usage(cwd, total, cost, "codex")
                 if ep and ep >= hour_cut:
-                    hourly.setdefault(ep, {"c": 0, "x": 0})["x"] += total
+                    hourly.setdefault(ep, {"c": 0, "x": 0, "q": 0})["x"] += total
 
         if cache_dirty:
             try:
@@ -5302,15 +5901,56 @@ def api_usage():
             except OSError:
                 pass
 
+        qoder_daily = {d: 0 for d in days}
+        qoder_usage_files = _iter_qoder_usage_files()
+        qoder_cache = _load_qoder_usage_cache()
+        valid_qoder_paths = {str(path) for path in qoder_usage_files}
+        qoder_cache_dirty = False
+        for stale_key in set(qoder_cache) - valid_qoder_paths:
+            qoder_cache.pop(stale_key, None)
+            qoder_cache_dirty = True
+        for path in qoder_usage_files:
+            try:
+                if path.stat().st_mtime < cutoff:
+                    continue
+                agg, changed = _cached_qoder_file_usage(path, qoder_cache)
+                qoder_cache_dirty = qoder_cache_dirty or changed
+            except OSError:
+                continue
+            qoder_cwd = None
+            for hour, models in agg.items():
+                ep = _hour_epoch(hour)
+                day = datetime.fromtimestamp(ep).strftime("%Y-%m-%d") if ep else hour[:10]
+                total = sum(sum(tokens) for tokens in models.values())
+                if day in qoder_daily:
+                    qoder_daily[day] += total
+                    if total > 0 and day >= week_cut:
+                        if qoder_cwd is None:
+                            qoder_cwd = _claude_file_cwd(path)
+                        if qoder_cwd:
+                            add_project_usage(qoder_cwd, total, 0.0, "qoder")
+                if ep and ep >= hour_cut:
+                    hourly.setdefault(ep, {"c": 0, "x": 0, "q": 0})["q"] += total
+
+        if qoder_cache_dirty:
+            try:
+                _atomic_write_text(QODER_USAGE_CACHE_FILE, json.dumps({
+                    "version": _CLAUDE_USAGE_CACHE_VERSION, "files": qoder_cache},
+                    ensure_ascii=False, separators=(",", ":")))
+            except OSError:
+                pass
+
         top = sorted(projects.items(), key=lambda kv: -kv[1]["tokens"])[:6]
         projects_7d = [{"cwd": cwd, "name": Path(cwd).name or cwd,
-                        "tokens": v["tokens"], "cost": round(v["cost"], 2)}
+                        "tokens": v["tokens"], "cost": round(v["cost"], 2),
+                        "agents": v["agents"]}
                        for cwd, v in top]
 
         return {
             "days": days,
             "claude_daily": claude_daily,
             "codex_daily": codex_daily,
+            "qoder_daily": qoder_daily,
             "hourly": [{"ts": ep, **v} for ep, v in sorted(hourly.items())],
             "projects_7d": projects_7d,
             "cost_daily": {d: round(v, 2) for d, v in cost_daily.items()},
@@ -5415,7 +6055,8 @@ def _forget_session_cwd(original_cwd):
 
 
 def _resume_command(tool, sid, env_prefix, cwd=None):
-    binary = "claude --resume" if tool == "claude" else "codex resume"
+    binary = {"claude": "claude --resume", "codex": "codex resume",
+              "qoder": "qodercli --resume"}[tool]
     command = f"{env_prefix}{binary} {_shell_quote(sid)}"
     return f"cd {_shell_quote(cwd)} && {command}" if cwd else command
 
@@ -5460,10 +6101,11 @@ def api_data(body):
         u = api_usage()
         out = Path.home() / "Downloads" / \
             f"agentdeck-usage-{datetime.now().strftime('%Y%m%d')}.csv"
-        rows = ["day,claude_tokens,codex_tokens,api_cost_usd"]
+        rows = ["day,claude_tokens,codex_tokens,qoder_tokens,api_cost_usd"]
         for d in u["days"]:
             ct = sum(sum(v) for v in (u["claude_daily"].get(d) or {}).values())
             rows.append(f"{d},{ct},{u['codex_daily'].get(d, 0)},"
+                        f"{u['qoder_daily'].get(d, 0)},"
                         f"{u['cost_daily'].get(d, 0)}")
         _atomic_write_text(out, "\n".join(rows) + "\n")
         subprocess.run(["open", "-R", str(out)], timeout=10)   # Finder 中显示
@@ -5508,7 +6150,7 @@ def api_path_mapping(body):
 def api_resume(body):
     tool = body.get("tool")
     sid = body.get("id", "")
-    if tool not in ("claude", "codex") or not _ID_RE.match(sid):
+    if tool not in AGENT_IDS or not _ID_RE.match(sid):
         return {"ok": False, "error": "invalid args"}
 
     # 复合身份里的账号决定 CLI 应读取哪套配置目录。显式传账号时始终固定环境变量，
@@ -5519,11 +6161,13 @@ def api_resume(body):
     if account_id:
         if not re.fullmatch(r"[a-z0-9-]{1,120}", account_id):
             return {"ok": False, "error": "invalid account"}
-        sources = claude_sources() if tool == "claude" else codex_sources()
+        sources = {"claude": claude_sources, "codex": codex_sources,
+                   "qoder": qoder_sources}[tool]()
         source = next((item for item in sources if item["id"] == account_id), None)
         if source is None:
             return {"ok": False, "error": "account not found"}
-        env_name = "CLAUDE_CONFIG_DIR" if tool == "claude" else "CODEX_HOME"
+        env_name = {"claude": "CLAUDE_CONFIG_DIR", "codex": "CODEX_HOME",
+                    "qoder": "QODER_CONFIG_DIR"}[tool]
         env_prefix = f"/usr/bin/env {env_name}={_shell_quote(str(source['path']))} "
 
     original_cwd = _normalize_session_cwd(body.get("cwd"))

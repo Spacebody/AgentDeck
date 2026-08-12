@@ -6,6 +6,8 @@ import Foundation
 struct QuotaResponse: Decodable {
     let claude: QuotaNode?
     let codex: QuotaNode?
+    let qoder: QuotaNode?
+    let agents: [AgentQuota]?
     let accounts: QuotaAccounts?
     let menubar: MenubarConfig?
     let quotaRevision: Int?
@@ -15,6 +17,8 @@ struct QuotaResponse: Decodable {
     init(
         claude: QuotaNode?,
         codex: QuotaNode?,
+        qoder: QuotaNode? = nil,
+        agents: [AgentQuota]? = nil,
         accounts: QuotaAccounts?,
         menubar: MenubarConfig?,
         quotaRevision: Int? = nil,
@@ -23,6 +27,8 @@ struct QuotaResponse: Decodable {
     ) {
         self.claude = claude
         self.codex = codex
+        self.qoder = qoder
+        self.agents = agents
         self.accounts = accounts
         self.menubar = menubar
         self.quotaRevision = quotaRevision
@@ -42,6 +48,76 @@ struct QuotaChangesResponse: Decodable {
 struct QuotaAccounts: Decodable {
     let claude: [QuotaNode]
     let codex: [QuotaNode]
+    let qoder: [QuotaNode]?
+
+    init(claude: [QuotaNode], codex: [QuotaNode], qoder: [QuotaNode]? = nil) {
+        self.claude = claude
+        self.codex = codex
+        self.qoder = qoder
+    }
+}
+
+struct AgentQuota: Decodable, Identifiable {
+    let id: String
+    let name: String
+    let hidden: Bool?
+    let accounts: [QuotaNode]
+}
+
+/// 概览轮播唯一页面单位。所有 Agent 和账号都在同一数组中，不保留二级选择状态。
+struct QuotaPage: Identifiable {
+    let id: String
+    let agentID: String
+    let agentName: String
+    let brand: Brand
+    let account: QuotaNode
+}
+
+func reconciledQuotaSelection(currentID: String?, pages: [QuotaPage]) -> String? {
+    if let currentID, pages.contains(where: { $0.id == currentID }) { return currentID }
+    return pages.first?.id
+}
+
+func normalizedQuotaRotationInterval(_ value: Int) -> Int {
+    [4, 6, 8, 10].contains(value) ? value : 6
+}
+
+extension QuotaResponse {
+    func flatPages(visibleAgents: Set<String>? = nil) -> [QuotaPage] {
+        let groups: [AgentQuota]
+        if let agents, !agents.isEmpty {
+            groups = agents
+        } else {
+            groups = [
+                AgentQuota(id: "claude", name: "Claude", hidden: claude?.hidden,
+                           accounts: legacyAccounts(accounts?.claude, primary: claude)),
+                AgentQuota(id: "codex", name: "Codex", hidden: codex?.hidden,
+                           accounts: legacyAccounts(accounts?.codex, primary: codex)),
+                AgentQuota(id: "qoder", name: "Qoder", hidden: qoder?.hidden,
+                           accounts: legacyAccounts(accounts?.qoder, primary: qoder)),
+            ]
+        }
+        return groups.flatMap { group -> [QuotaPage] in
+            guard Brand(rawValue: group.id) != nil,
+                  visibleAgents?.contains(group.id) ?? !(group.hidden ?? false) else { return [] }
+            let ordered = group.accounts.enumerated().sorted { lhs, rhs in
+                let ld = lhs.element.isDefault == true
+                let rd = rhs.element.isDefault == true
+                return ld == rd ? lhs.offset < rhs.offset : ld && !rd
+            }.map(\.element)
+            return ordered.enumerated().compactMap { offset, account in
+                guard let brand = Brand(rawValue: group.id) else { return nil }
+                let accountID = account.accountId ?? (account.isDefault == true ? "default" : "account-\(offset)")
+                return QuotaPage(id: "\(group.id)::\(accountID)", agentID: group.id,
+                                 agentName: group.name, brand: brand, account: account)
+            }
+        }
+    }
+
+    private func legacyAccounts(_ listed: [QuotaNode]?, primary: QuotaNode?) -> [QuotaNode] {
+        guard let listed, !listed.isEmpty else { return primary.map { [$0] } ?? [] }
+        return listed
+    }
 }
 
 /// 单账号额度节点。主账号（claude/codex 顶层）无 account_id；accounts 列表项带账号标识。
@@ -113,6 +189,19 @@ struct QuotaWindow: Decodable, Identifiable, Hashable {
     let label: String?
     let usedPercent: Double     // used_percent（0~100，已 round 1 位）
     let resetsAt: FlexibleDate? // resets_at（epoch 秒 或 ISO 串）
+    let used: Double?
+    let total: Double?
+    let remaining: Double?
+    let unit: String?
+    let bucketKind: String?
+
+    init(id: String, label: String?, usedPercent: Double, resetsAt: FlexibleDate?,
+         used: Double? = nil, total: Double? = nil, remaining: Double? = nil,
+         unit: String? = nil, bucketKind: String? = nil) {
+        self.id = id; self.label = label; self.usedPercent = usedPercent
+        self.resetsAt = resetsAt; self.used = used; self.total = total
+        self.remaining = remaining; self.unit = unit; self.bucketKind = bucketKind
+    }
 
     /// 阈值配色：≥95 危险 / ≥80 告警 / 否则正常（对应 .wbar i.warn/.danger 与菜单栏 alertFor）。
     enum Level { case normal, warn, danger }
@@ -123,6 +212,7 @@ struct QuotaWindow: Decodable, Identifiable, Hashable {
 struct MenubarConfig: Decodable {
     let claude: Bool?
     let codex: Bool?
+    let qoder: Bool?
     let alertColor: Bool?       // alert_color
     let valueDim: String?       // value_dim：shortest / weekly / max
     let colorDim: String?       // color_dim

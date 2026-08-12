@@ -10,30 +10,26 @@ struct WidgetView: View {
     /// nil 仅用于预览/启动兜底；真实根视图传入本地设置，切换后下一帧生效。
     var showClaudeAgent: Bool? = nil
     var showCodexAgent: Bool? = nil
+    var showQoderAgent: Bool? = nil
     var onTapPanel: () -> Void = {}
     var onFocusActive: (ActiveSession) -> Void = { _ in }
 
     var body: some View {
-        let listedClaude = quota?.accounts?.claude ?? []
-        let listedCodex = quota?.accounts?.codex ?? []
-        let claudeAccts = listedClaude.isEmpty ? (quota?.claude.map { [$0] } ?? []) : listedClaude
-        let codexAccts = listedCodex.isEmpty ? (quota?.codex.map { [$0] } ?? []) : listedCodex
         let showClaude = showClaudeAgent ?? !(quota?.claude?.hidden ?? false)
         let showCodex = showCodexAgent ?? !(quota?.codex?.hidden ?? false)
-        let visibleAccounts = (showClaude ? claudeAccts : []) + (showCodex ? codexAccts : [])
-        let maxWindows = visibleAccounts.map { $0.displayWindows.count }.max() ?? 0
+        let showQoder = showQoderAgent ?? !(quota?.qoder?.hidden ?? false)
+        let visible = Set([showClaude ? "claude" : nil, showCodex ? "codex" : nil,
+                           showQoder ? "qoder" : nil].compactMap { $0 })
+        let pages = quota?.flatPages(visibleAgents: visible) ?? []
+        let widgetPages = Array(pages.prefix(2))
+        let maxWindows = widgetPages.map { $0.account.displayWindows.count }.max() ?? 0
         let activeLimit = maxWindows >= 4 ? 1 : 2
         let activeRows = Array(active.prefix(activeLimit))
         return VStack(spacing: 7) {
             HStack(alignment: .top, spacing: 7) {
-                if showClaude {
-                    QuotaCarousel(brand: .claude, accounts: claudeAccts,
-                                  presentation: .widget)
-                        .frame(maxWidth: .infinity, alignment: .top)
-                        .layoutPriority(1)
-                }
-                if showCodex {
-                    QuotaCarousel(brand: .codex, accounts: codexAccts,
+                ForEach(widgetPages) { page in
+                    QuotaCardView(brand: page.brand, node: page.account,
+                                  accountLabel: page.account.account,
                                   presentation: .widget)
                         .frame(maxWidth: .infinity, alignment: .top)
                         .layoutPriority(1)
@@ -50,6 +46,7 @@ struct WidgetView: View {
         .onTapGesture(perform: onTapPanel)   // 点击小组件 → 打开主面板（body.wgt #quota/#active cursor:pointer）
         .animation(.easeInOut(duration: 0.18), value: showClaude)
         .animation(.easeInOut(duration: 0.18), value: showCodex)
+        .animation(.easeInOut(duration: 0.18), value: showQoder)
     }
 }
 

@@ -5,7 +5,7 @@
 <h1 align="center">AgentDeck</h1>
 
 <p align="center">
-  A macOS menu-bar app that unifies quota, session, and usage monitoring for <b>Claude Code</b> and <b>Codex</b>.
+  A macOS menu-bar app that unifies quota and session monitoring for <b>Claude Code</b>, <b>Codex</b>, and <b>Qoder</b>.
 </p>
 
 <p align="center">
@@ -27,39 +27,39 @@
 </p>
 <p align="center"><sub>Left: overview / sessions panel (trilingual rotation, follows the system language) · Right: settings</sub></p>
 
-AgentDeck integrates quota monitoring, session management, and usage analytics for Claude Code and Codex into a single menu-bar panel. The backend is a pure standard-library Python daemon, and the macOS client is a native AppKit + SwiftUI app in a SwiftPM package. It still has zero third-party runtime dependencies: no Node, Electron, bundlers, or runtime downloads.
+AgentDeck integrates quota monitoring, session management, and usage analytics for Claude Code, Codex, and Qoder into a single menu-bar panel. The backend is a pure standard-library Python daemon, and the macOS client is a native AppKit + SwiftUI app in a SwiftPM package.
 
 ## Design principles
 
 - **Zero third-party dependencies** — stdlib Python + native SwiftPM AppKit / SwiftUI; no Node, Electron, or bundlers
-- **Local-first** — all data is processed on your machine with zero telemetry; exactly two outbound requests (quota query, update check), both transparent in intent and the latter can be disabled
+- **Local-first** — all data is processed on your machine with zero telemetry; Qoder quota is queried through the locally installed `qodercli`
 - **Native experience** — continuous-curvature corners, glass materials, and a desktop widget held to system-widget visual standards
 - **Multilingual** — Simplified Chinese / English / Japanese unified across all three layers (panel / notifications / menus), following the system by default
 
 ## Features
 
 **Quota monitoring**
-- Live aggregation of Claude's official quota (5-hour / 7-day windows) and Codex rate limits
-- Multi-account in parallel: auto-discovers multiple Claude config directories (`CLAUDE_CONFIG_DIR` / `~/.claude-*` / shell startup files), queries quota per account, with a panel carousel and an optional menu-bar rotation across accounts
-- Always-on usage percentage in the menu bar (configurable: one side, both, or hidden; the number and the alert color each pick from the 5h / weekly / tightest window)
-- Adjustable Claude quota interval (10 minutes by default, up to 6 hours); Codex updates on completed turns and periodically reconciles through the CLI's app-server
+- Live aggregation of Claude's official quota, Codex rate limits, and Qoder UsageInfo
+- Flattens every agent/account pair into one full-width peer carousel: no nested account dropdown, optional 4/6/8/10-second auto-rotation, pause, mouse, trackpad, and keyboard controls
+- A fixed-width menubar slot rolls each agent/account icon together with its quota every 6 seconds by default; rotation can be disabled to pin the current item, while number and alert color windows remain independently configurable
+- Adjustable Claude/Qoder quota interval (10 minutes by default, up to 6 hours); Codex updates on completed turns and periodically reconciles through the CLI's app-server
 - Window-reset progress bars; system notifications for nearing or refilled quota (configurable thresholds)
 
 **Session management**
-- Detects active sessions on both sides, covering terminal CLI sessions and Codex desktop sessions
+- Detects active Claude, Codex, and Qoder sessions, covering terminal CLI sessions and Codex desktop sessions
+- Sorts running sessions by most recent transcript/rollout activity, falling back to process start time when no activity timestamp is observable
 - Click an active session to focus its terminal: the host `.app` is auto-detected by walking the process tree, so any terminal works without a maintained allowlist; iTerm2 / Terminal focus the exact tab; Codex desktop sessions deep-link via `codex://`
 - Session-done popups, click to jump back; events are deduplicated and alert once
 - One-click resume for past sessions: direct command injection for iTerm2 / Terminal / Ghostty / kitty / WezTerm / Alacritty; "open app + copy command" for Warp / VS Code / Cursor / Windsurf / Hyper / Tabby / Rio / Wave
 - Session list with search, per-side filtering, pinning, and conversation preview
 
 **Usage analytics**
-- 7- / 30-day token usage and cost estimates (methodology below)
-- Daily digest, 24-hour comparison curve, model breakdown, per-project ranking
+- 7- / 30-day token usage for Claude, Codex, and Qoder; cost estimates for Claude/Codex (methodology below)
+- Daily digest, three-agent 24-hour curves, model/agent breakdown, per-project ranking
 - CSV export
 
 **Interface & system**
-- Theme palette: pick custom Claude / Codex accent colors; quota rings, progress bars, usage curves, and the logo gradient all recolor in sync, with one-click reset to the built-in orange / teal
-- Show-Agent toggles: users of only Claude or only Codex can hide the other side, after which no quota is fetched for it (skips Keychain reads and official-endpoint calls)
+- A single Agent Management page controls panel visibility, menu-bar rotation, and theme color for Claude, Codex, and Qoder in a scalable vertical list
 - Font scaling from 80–160% (panel and widget in sync); panel dimming, minimal mode, and other appearance options
 - Keeps the system awake while sessions are active so long tasks survive sleep (on by default, can be disabled)
 - Works behind corporate proxies: the app's traffic to its local daemon bypasses system-level PAC proxies, avoiding a blank panel when loopback gets rerouted
@@ -75,7 +75,7 @@ git clone https://github.com/Spacebody/AgentDeck.git && cd AgentDeck
 
 Compiles, installs to `/Applications`, and launches; the first launch registers a login item.
 
-**Requirements**: macOS 13+ (produces an Apple Silicon + Intel universal binary); [Claude Code](https://claude.com/claude-code) or [Codex](https://openai.com/codex) installed (either); Xcode Command Line Tools (provides SwiftPM / the Swift toolchain; install via `xcode-select --install`).
+**Requirements**: macOS 13+; [Claude Code](https://claude.com/claude-code), [Codex](https://openai.com/codex), or [Qoder CLI](https://docs.qoder.com/en/cli/quick-start) installed; Xcode Command Line Tools.
 
 Other build targets:
 
@@ -89,9 +89,10 @@ The first "jump to session" prompts for **Automation (Apple Events)** permission
 
 ## Session-Done Alert Integration
 
-Done alerts rely on Claude / Codex event callbacks. The current daemon wires them up **automatically and idempotently** on startup, and only merges / removes entries marked as AgentDeck-owned:
+Done alerts rely on agent event callbacks. The daemon wires them up **automatically and idempotently** and only merges / removes AgentDeck-owned entries:
 
 - Claude Code: merges a Stop hook into `~/.claude/settings.json` that points to `~/Library/Application Support/AgentDeck/claude-stop-hook.sh`.
+- Qoder: merges a Stop hook into each discovered Qoder `settings.json`, forwarding through `qoder-stop-hook.sh`.
 - Codex: points `notify` in `~/.codex/config.toml` to `~/Library/Application Support/AgentDeck/codex-notify.sh`. If another notify command already exists, the generated wrapper chain-forwards back to it.
 - Integration state is stored in `~/Library/Application Support/AgentDeck/integration.json`; `./build.sh uninstall` calls the daemon's `--remove-integration` path to restore only AgentDeck-owned entries.
 
@@ -137,9 +138,11 @@ All data is **processed locally** — no telemetry, no reporting:
 | Claude usage / sessions | parses `projects/**/*.jsonl` under each discovered Claude config directory | token stats, cost estimates, session list |
 | Codex quota | Codex CLI app-server `account/rateLimits/read`, augmented by the matching rollout snapshot when a turn completes | never reads or forwards the login token; falls back to bounded local parsing when app-server is unavailable |
 | Codex usage / sessions | parses local `~/.codex/sessions` rollout files | token stats and session metadata |
-| Done events | AgentDeck-installed Claude Stop hook / Codex notify wrapper callbacks (see Session-Done Alert Integration) | done alerts and the event stream |
+| Qoder quota | local `qodercli` UsageInfo control request | no persistent probe session; user ID, email, avatar, and upgrade URL are discarded |
+| Qoder usage / sessions | parses `projects/**/*.jsonl` under discovered Qoder config directories | usage is deduplicated per message and aggregated into token stats; only session metadata is indexed |
+| Done events | AgentDeck-installed Claude/Qoder Stop hooks and Codex notify wrapper | done alerts and the event stream |
 
-Runtime artifacts: data directory `~/Library/Application Support/AgentDeck/`, log `~/Library/Logs/AgentDeck.log`.
+Runtime artifacts: data directory `~/Library/Application Support/AgentDeck/`, log `~/Library/Logs/AgentDeck.log`. `claude_usage_cache.json`, `codex_usage_cache.json`, and `qoder_usage_cache.json` contain only hourly aggregates and file fingerprints; they do not copy conversation text.
 
 ## Security
 
@@ -153,6 +156,7 @@ Runtime artifacts: data directory `~/Library/Application Support/AgentDeck/`, lo
 
 - **Claude**: usage rows deduplicated by `(message.id, requestId)`; cache writes priced separately for ephemeral 5m / 1h tiers; price table matched by model-version prefix
 - **Codex**: uses `total_token_usage.total_tokens` (cached is a subset of input, reasoning a subset of output, avoiding double counting); API-equivalent reference pricing for subscription plans
+- **Qoder**: aggregates assistant-message input, output, and cache tokens after `(message.id, requestId)` deduplication; tokens are shown without a cost estimate because no stable public model-pricing API is available
 - Cross-calibrated against [ccusage](https://github.com/ryoppippi/ccusage) with roughly ±4% deviation (from cache-tier pricing precision)
 - Each ⓘ entry in the panel documents the exact methodology of its view
 
