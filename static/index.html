@@ -917,7 +917,8 @@ const I18N = {
     'usage.costSplit': 'Claude 7天 ${c7} / 30天 ${c30} · Codex 7天 ${x7} / 30天 ${x30}',
     'usage.today': '今天', 'usage.noUsage': '无用量', 'usage.legend24h': '{name} 24h',
     'session.recent': '最近会话', 'session.all': '全部', 'session.search': '搜索…',
-    'session.resume': '恢复', 'session.copyCmd': '复制恢复命令', 'session.pin': '置顶', 'session.unpin': '取消置顶',
+    'session.resume': '恢复', 'session.open': '打开', 'session.openedApp': '已打开 {app}', 'session.copyCmd': '复制恢复命令', 'session.pin': '置顶', 'session.unpin': '取消置顶',
+    'session.pathMovedPrompt': '原工程目录已不存在：\n{path}\n\n请输入新的工程目录绝对路径；取消则不执行。',
     'session.noMatch': '没有匹配的会话', 'session.loadingPreview': '读取对话…',
     'session.roleUser': '我', 'session.roleAI': 'AI', 'session.noPreview': '没有可预览的内容',
     'session.previewFailed': '预览加载失败', 'session.loadFailed': '会话加载失败',
@@ -1008,7 +1009,8 @@ const I18N = {
     'usage.costSplit': 'Claude 7d ${c7} / 30d ${c30} · Codex 7d ${x7} / 30d ${x30}',
     'usage.today': 'Today', 'usage.noUsage': 'no usage', 'usage.legend24h': '{name} 24h',
     'session.recent': 'Recent sessions', 'session.all': 'All', 'session.search': 'Search…',
-    'session.resume': 'Resume', 'session.copyCmd': 'Copy resume command', 'session.pin': 'Pin', 'session.unpin': 'Unpin',
+    'session.resume': 'Resume', 'session.open': 'Open', 'session.openedApp': 'Opened {app}', 'session.copyCmd': 'Copy resume command', 'session.pin': 'Pin', 'session.unpin': 'Unpin',
+    'session.pathMovedPrompt': 'The original project directory no longer exists:\n{path}\n\nEnter the new absolute project path, or cancel to stop.',
     'session.noMatch': 'No matching sessions', 'session.loadingPreview': 'Loading conversation…',
     'session.roleUser': 'Me', 'session.roleAI': 'AI', 'session.noPreview': 'Nothing to preview',
     'session.previewFailed': 'Preview failed to load', 'session.loadFailed': 'Failed to load sessions',
@@ -1099,7 +1101,8 @@ const I18N = {
     'usage.costSplit': 'Claude 7日 ${c7} / 30日 ${c30} · Codex 7日 ${x7} / 30日 ${x30}',
     'usage.today': '今日', 'usage.noUsage': '使用なし', 'usage.legend24h': '{name} 24h',
     'session.recent': '最近のセッション', 'session.all': 'すべて', 'session.search': '検索…',
-    'session.resume': '再開', 'session.copyCmd': '再開コマンドをコピー', 'session.pin': 'ピン留め', 'session.unpin': 'ピン解除',
+    'session.resume': '再開', 'session.open': '開く', 'session.openedApp': '{app} を開きました', 'session.copyCmd': '再開コマンドをコピー', 'session.pin': 'ピン留め', 'session.unpin': 'ピン解除',
+    'session.pathMovedPrompt': '元のプロジェクトフォルダが見つかりません：\n{path}\n\n新しい絶対パスを入力してください。キャンセルすると中止します。',
     'session.noMatch': '一致するセッションなし', 'session.loadingPreview': '会話を読み込み中…',
     'session.roleUser': '自分', 'session.roleAI': 'AI', 'session.noPreview': 'プレビューする内容なし',
     'session.previewFailed': 'プレビューの読み込みに失敗', 'session.loadFailed': 'セッションの読み込みに失敗',
@@ -1608,14 +1611,14 @@ function renderSessions() {
               <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01z"/>
             </svg>
           </button>
-          <button type="button" class="sbtn" data-act="resume">${t('session.resume')}</button>
-          <button type="button" class="sbtn iconb" data-act="copy" title="${t('session.copyCmd')}">
+          <button type="button" class="sbtn" data-act="resume">${s.source === 'qoder_app' ? t('session.open') : t('session.resume')}</button>
+          ${s.source === 'qoder_app' ? '' : `<button type="button" class="sbtn iconb" data-act="copy" title="${t('session.copyCmd')}">
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
               stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <rect x="9" y="9" width="13" height="13" rx="2.5"/>
               <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
             </svg>
-          </button>
+          </button>`}
         </div>
       </div>
       <div class="spreview"></div>
@@ -1672,7 +1675,8 @@ $('#slist').addEventListener('click', async e => {
     } catch { toast(t('common.opFailed')); }
     return;
   }
-  const resumeBody = {tool: s.tool, id: s.id, cwd: s.cwd, account_id: s.account_id};
+  const resumeBody = {tool: s.tool, id: s.id, cwd: s.cwd,
+    account_id: s.account_id, source: s.source};
   if (btn.dataset.act === 'copy') {
     try {
       const r = await (await fetch('/api/resume', {
@@ -1688,10 +1692,20 @@ $('#slist').addEventListener('click', async e => {
   }
   btn.textContent = '…';
   try {
-    const r = await (await fetch('/api/resume', {
+    let r = await (await fetch('/api/resume', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify(resumeBody),
     })).json();
+    if (r.ok && r.needs_path) {
+      const replacement = window.prompt(t('session.pathMovedPrompt', {
+        path: r.original_cwd || s.cwd || ''
+      }));
+      if (!replacement || !replacement.trim()) return;
+      r = await (await fetch('/api/resume', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({...resumeBody, replacement_cwd: replacement.trim()}),
+      })).json();
+    }
     if (r.ok && r.copy) {        // 设置为「仅复制」模式
       try {
         await navigator.clipboard.writeText(r.command);
@@ -1702,11 +1716,13 @@ $('#slist').addEventListener('click', async e => {
           bridge.postMessage('paste-enter');
         }
       } catch { toast(t('session.copyFailed')); }
+    } else if (r.ok && r.opened) {
+      toast(t('session.openedApp', {app: r.app || 'Qoder'}));
     } else {
       toast(r.ok ? t('session.resumed') : t('session.resumeFailedReason', {err: r.error || ''}));
     }
   } catch { toast(t('session.resumeFailed')); }
-  btn.textContent = t('session.resume');
+  btn.textContent = s.source === 'qoder_app' ? t('session.open') : t('session.resume');
 });
 
 document.querySelectorAll('.shead .chip').forEach(c => c.onclick = () => {
@@ -1767,7 +1783,8 @@ async function focusActive(a) {
   try {
     const r = await (await fetch('/api/focus', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({tool: a.tool, session: a.id, cwd: a.cwd, pid: a.pid}),
+      body: JSON.stringify({tool: a.tool, session: a.id, cwd: a.cwd,
+        pid: a.pid, source: a.source}),
     })).json();
     if (r.ok) {   // 跳转成功 → 收起主面板，让目标终端独占前台；小组件常驻桌面不动
       if (bridge && !document.body.classList.contains('wgt')) bridge.postMessage('hide');

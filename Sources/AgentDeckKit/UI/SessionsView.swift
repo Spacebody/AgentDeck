@@ -418,14 +418,17 @@ private struct SessionRow: View {
                     .foregroundStyle(session.pinned == true ? Color(hex: 0xffd479) : Theme.ink2)
             }.buttonStyle(.plain)
             Button(action: onResume) {
-                Text(L("session.resume")).font(.system(size: 9.5, weight: .semibold)).foregroundStyle(Theme.ink)
+                Text(L(session.source == "qoder_app" ? "session.open" : "session.resume"))
+                    .font(.system(size: 9.5, weight: .semibold)).foregroundStyle(Theme.ink)
                     .padding(.horizontal, 11).frame(height: 25)
                     .background(Capsule().fill(Color.white.opacity(0.10)))
                     .overlay(Capsule().strokeBorder(Theme.edgeHi))
             }.buttonStyle(.plain)
-            Button(action: onCopy) {
-                Image(systemName: "doc.on.doc").font(.system(size: 10)).foregroundStyle(Theme.ink2)
-            }.buttonStyle(.plain)
+            if session.source != "qoder_app" {
+                Button(action: onCopy) {
+                    Image(systemName: "doc.on.doc").font(.system(size: 10)).foregroundStyle(Theme.ink2)
+                }.buttonStyle(.plain)
+            }
         }
         .padding(.horizontal, 4).padding(.vertical, 3)
         .background(Capsule().fill(Color(hex: 0x101018).opacity(0.82)))

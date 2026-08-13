@@ -536,7 +536,8 @@ public struct AgentDeckRootView: View {
     // MARK: 动作接线
     private func focusActive(_ a: ActiveSession) {
         Task {
-            let ok = await store.focus(tool: a.tool, id: a.id ?? "", cwd: a.cwd ?? "", pid: a.pid ?? 0)
+            let ok = await store.focus(tool: a.tool, id: a.id ?? "", cwd: a.cwd ?? "",
+                                       pid: a.pid ?? 0, source: a.source)
             if ok { onHidePanel() } else { showToast(L("active.termNotFound", ["err": ""])) }
         }
     }
@@ -556,15 +557,18 @@ public struct AgentDeckRootView: View {
         Task {
             var result = await store.resume(s, copyOnly: copyOnly)
             if result?.needsPath == true {
-                guard let fallbackCommand = result?.command else {
+                let opensQoderApp = s.source == "qoder_app"
+                if !opensQoderApp, result?.command == nil {
                     showToast(L(copyOnly ? "session.copyFailed" : "session.resumeFailed"))
                     return
                 }
                 guard let replacement = chooseReplacementDirectory(
                     originalPath: result?.originalCwd ?? s.cwd ?? "",
                     expectedProject: s.project ?? "") else {
-                    copyText(fallbackCommand)
-                    showToast(L("session.pathFallbackCopied"))
+                    if let fallbackCommand = result?.command {
+                        copyText(fallbackCommand)
+                        showToast(L("session.pathFallbackCopied"))
+                    }
                     return
                 }
                 result = await store.resume(
@@ -592,7 +596,8 @@ public struct AgentDeckRootView: View {
                     onPasteEnter()
                 }
             } else {
-                showToast(result?.ok == true ? L("session.resumed")
+                showToast(result?.opened == true ? L("session.openedApp", ["app": result?.app ?? "Qoder"])
+                          : result?.ok == true ? L("session.resumed")
                           : L("session.resumeFailedReason", ["err": result?.error ?? ""]))
             }
         }

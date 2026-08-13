@@ -2,6 +2,10 @@ import Foundation
 
 /// Pure state transitions for the single-slot menubar carousel.
 public enum MenubarRotationPolicy {
+    public static func isSuccessfulHTTPStatus(_ statusCode: Int) -> Bool {
+        (200..<300).contains(statusCode)
+    }
+
     public static func reconciledIndex(currentID: String?, itemIDs: [String]) -> Int {
         guard !itemIDs.isEmpty else { return 0 }
         guard let currentID, let index = itemIDs.firstIndex(of: currentID) else { return 0 }
@@ -18,9 +22,17 @@ public enum MenubarRotationPolicy {
         return TimeInterval(configuredSeconds)
     }
 
-    public static func easedProgress(elapsed: TimeInterval, duration: TimeInterval) -> Double {
-        guard duration > 0 else { return 1 }
-        let linear = min(1, max(0, elapsed / duration))
-        return 1 - pow(1 - linear, 3)
+    public static func shouldDeferPassiveRefresh(isAnimating: Bool) -> Bool {
+        isAnimating
     }
+
+    public static func shouldAcceptResponse(requestID: Int, lastAppliedRequestID: Int) -> Bool {
+        requestID > lastAppliedRequestID
+    }
+
+    public static func currentItem<Item>(items: [Item], currentIndex: Int) -> Item? {
+        guard !items.isEmpty else { return nil }
+        return items.indices.contains(currentIndex) ? items[currentIndex] : items[0]
+    }
+
 }

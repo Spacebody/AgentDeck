@@ -18,7 +18,7 @@ AgentDeck 当前以 Claude 和 Codex 为固定对象，额度概览按 Agent 分
 - 页面唯一单位为 `agentId::accountId`，不再存在 Agent 内账号下拉或二级轮播。
 - 后端优先返回通用 Agent 数据，同时保留 Claude/Codex 旧字段，降低升级风险。
 - Agent 不支持额度、未登录或采集失败时仍保留明确状态页，不静默消失。
-- 不引入常驻第三方运行时依赖；Qoder 数据由本机 `qodercli` 和本地会话文件提供。
+- 不引入常驻第三方运行时依赖；Qoder 数据优先来自已登录 Qoder App 的本机只读 IPC，并由 `qodercli` 与本地会话文件降级补充。
 - 主面板概览和状态栏使用彼此独立的轮播设置；桌面小组件不自动轮播。
 
 ## 3. 用户体验方案
@@ -77,10 +77,11 @@ Qoder 首期将 `UsageInfo` 映射为综合、套餐、加油包和组织资源�
 - 会话：扫描 `<config>/projects/**/*.jsonl`，排除 `subagents`、日志和其他非主会话文件。
 - 恢复：使用 `qodercli --resume <sessionId>`，多账号时通过 `QODER_CONFIG_DIR` 绑定对应配置目录。
 - 活跃状态：识别 `qodercli` 及其会话工作目录，复用现有进程采样与防抖逻辑。
+- Qoder App：发现 `SharedClientCache/.info.json` 声明的用户私有 Unix Socket，并校验 Apple 锚定的官方 bundle/服务二进制签名、peer PID 与 socket inode；额度直接复用 App 登录态，会话列表只抽取 ID、标题、工程路径、分支与时间。扫描受全局期限、总响应字节数和总会话数约束，截断或协议异常只保留旧快照、不做删除。App 会话没有稳定的公开精确恢复接口，界面明确使用“打开 Qoder”，不伪造 CLI 恢复命令。
 
 ### 4.3 Qoder 额度采集
 
-Qoder CLI SDK 暴露 `getUsageInfo()` 语义。本实现通过已安装 `qodercli` 的流式控制协议请求 `get_usage_info`，只解析对应响应，不记录初始化响应中的账号和模型信息。
+Qoder App 运行且已登录时，优先通过 LSP 分帧的 JSON-RPC 调用只读 `credit/usage`；App 不可用、未登录或协议变化时回退 Qoder CLI SDK 的 `getUsageInfo()` 语义。CLI 路径通过流式控制协议请求 `get_usage_info`，只解析对应响应，不记录初始化响应中的账号和模型信息。
 
 采集约束：
 
@@ -89,6 +90,8 @@ Qoder CLI SDK 暴露 `getUsageInfo()` 语义。本实现通过已安装 `qodercl
 - 只保留额度数值、到期时间和套餐类型，不回传用户 ID、邮箱、头像或升级链接。
 - 采用短期缓存，避免概览轮询频繁拉起 CLI。
 - CLI 不存在、版本不兼容、未登录或超时时返回稳定错误状态，并由前端显示状态页。
+- App IPC 只允许 `credit/usage` 与 `chat/listAllSessions` 两个只读方法；Socket 必须位于标准缓存目录、归当前用户所有且非组/全局可写，并同时核对 PID、Qoder App 二进制路径、响应 ID、大小和超时。
+- App IPC 属于 Qoder 当前版本的本机内部协议，升级不兼容时必须无损回退 CLI / last-good，不得影响 Claude、Codex 或会话文件索引。
 
 ### 4.4 API 兼容
 

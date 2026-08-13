@@ -46,6 +46,7 @@ struct ActiveSession: Decodable {
     let cwd: String?
     let project: String?
     let host: String?           // "app" 时显示 App 标
+    var source: String? = nil   // qoder_app 等需要专用聚焦路径的来源
     let runtimeSecs: Double?    // runtime_secs（优先）
     let runtime: String?        // 后端预格式化兜底
     let status: String?         // busy / idle / ""

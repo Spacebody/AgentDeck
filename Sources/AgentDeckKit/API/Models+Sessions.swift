@@ -31,6 +31,7 @@ struct SessionItem: Decodable, Identifiable {
     let mtime: Double
     let account: String?
     let accountId: String?
+    var source: String? = nil
     var pinned: Bool?
 
     /// ForEach / 预览 / 置顶复合键；同一会话可被复制到不同账号目录。
@@ -58,12 +59,14 @@ struct SessionResumeRequest: Encodable {
     let accountId: String?
     let copyOnly: Bool
     let replacementCwd: String?
+    let source: String?
 
     enum CodingKeys: String, CodingKey {
         case tool, id, cwd
         case accountId = "account_id"
         case copyOnly = "copy_only"
         case replacementCwd = "replacement_cwd"
+        case source
     }
 }
 
@@ -80,5 +83,6 @@ struct ResumeResult: Decodable {
     let originalCwd: String?
     let resolvedCwd: String?
     let pathMapped: Bool?
+    let opened: Bool?
     let error: String?
 }

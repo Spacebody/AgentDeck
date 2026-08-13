@@ -17,6 +17,7 @@ import concurrent.futures
 import hashlib
 import hmac
 import json
+import mmap
 import os
 import plistlib
 import re
@@ -24,7 +25,9 @@ import select
 import shlex
 import shutil
 import signal
+import socket
 import sqlite3
+import stat
 import subprocess
 import sys
 import tempfile
@@ -75,9 +78,41 @@ CODEX_RECONCILE_SECS = 90      # Codex 官方快照后台自愈周期
 CODEX_OPEN_STALE_SECS = 30     # 开面板时超过该时长便异步校准
 CODEX_STALE_SECS = 180         # 所有实时来源都失联后才标记陈旧
 QODER_QUOTA_TTL = 600          # Qoder CLI 初始化相对较重，默认 10 分钟短缓存
+QODER_APP_QUOTA_TTL = 60       # App IPC 是本机只读请求，可更及时地校准额度
+QODER_NORMAL_BUDGET_SECS = 16  # 普通客户端 20s 超时，预留签名校验、解码与调度余量
+QUOTA_NORMAL_BUDGET_SECS = 18  # 普通 /api/quota 的所有 provider 共用该总预算
 QUOTA_FORCE_BUDGET_SECS = 110  # 留 10s 给原生客户端解码/调度（客户端总超时 120s）
 CODEX_ROLLOUT_FAST_TAIL_BYTES = 512 * 1024
 CODEX_ROLLOUT_TAIL_BYTES = 4 * 1024 * 1024
+# Desktop app-server does not expose ownership of an individual rollout. Keep a
+# missing completion boundary briefly, but do not let one orphan keep the UI and
+# caffeinate busy for hours after a crash or cross-machine file sync.
+CODEX_DESKTOP_BUSY_MAX_SECS = 30 * 60
+QODER_APP_ACTIVE_MAX_SECS = 10 * 60
+_CODEX_WORK_BOUNDARY_MARKERS = tuple(
+    f'"{event}"'.encode() for event in (
+        "task_started", "turn_started", "task_complete",
+        "turn_complete", "turn_aborted"))
+_codex_work_status_cache = {}
+_codex_work_status_lock = threading.Lock()
+
+QODER_APP_SUPPORT = HOME / "Library" / "Application Support" / "Qoder"
+QODER_APP_CACHE = QODER_APP_SUPPORT / "SharedClientCache"
+QODER_APP_WORKSPACES = QODER_APP_SUPPORT / "User" / "workspaceStorage"
+_QODER_IPC_METHODS = frozenset(("credit/usage", "chat/listAllSessions"))
+_QODER_IPC_MAX_HEADER = 16 * 1024
+_QODER_IPC_MAX_BODY = 8 * 1024 * 1024
+_QODER_APP_MAX_WORKSPACES = 16
+_QODER_APP_MAX_SESSIONS_PER_WORKSPACE = 5000
+_QODER_APP_MAX_TOTAL_SESSIONS = 10_000
+_QODER_APP_MAX_SCAN_BYTES = 16 * 1024 * 1024
+_QODER_APP_SCAN_DEADLINE_SECS = 8
+_QODER_WORKSPACE_METADATA_MAX_BYTES = 64 * 1024
+_QODER_BUNDLE_REQUIREMENT = (
+    'anchor apple generic and identifier "com.qoder.ide" and '
+    'certificate leaf[subject.OU] = "T27K5A5ZWD"')
+_qoder_bundle_validation = {}
+_qoder_bundle_validation_lock = threading.Lock()
 
 # 更新检测：向自托管的 Cloudflare Pages 清单查最新版本号（不带任何凭据；可在设置中关闭）。
 # 部署后把域名改成你的 Pages 项目地址即可。
@@ -305,7 +340,10 @@ def api_settings_save(body):
             for key, (_exp, val) in list(_ttl_cache.items()):
                 if ((key.startswith("claude_quota") or key.startswith("qoder_quota"))
                         and isinstance(val, dict) and val.get("ok") and not val.get("stale")):
-                    _ttl_cache[key] = (now + clean["quota_interval"], val)
+                    interval = QODER_APP_QUOTA_TTL \
+                        if key == "qoder_quota" and val.get("source") == "qoder_app" \
+                        else clean["quota_interval"]
+                    _ttl_cache[key] = (now + interval, val)
     if "keep_awake" in clean:   # 立即生效，不阻塞响应
         threading.Thread(target=_update_keepawake, daemon=True).start()
     if "claude_dirs" in clean or "codex_dirs" in clean or "qoder_dirs" in clean:
@@ -541,9 +579,70 @@ def codex_sources():
 
 
 def qoder_sources():
-    return cached("sources_qoder", 30, lambda: _discover(
-        "QODER_CONFIG_DIR", HOME / ".qoder", ".qoder-*",
-        "qoder_dirs", _is_qoder_dir, "默认", proc_tools=("qodercli", "qoder")))
+    def discover():
+        sources = _discover(
+            "QODER_CONFIG_DIR", HOME / ".qoder", ".qoder-*",
+            "qoder_dirs", _is_qoder_dir, "默认", proc_tools=("qodercli",))
+        app_installed = Path("/Applications/Qoder.app").is_dir() \
+            or (HOME / "Applications" / "Qoder.app").is_dir()
+        if app_installed and not any(src.get("is_default") for src in sources):
+            sources.insert(0, {
+                "id": "default", "label": "默认", "path": HOME / ".qoder",
+                "is_default": True, "session_only": False,
+            })
+        return sources
+    return cached("sources_qoder", 30, discover)
+
+
+def _qoder_app_workspace_paths(deadline=None, include_status=False):
+    """Return only local workspace owners declared by Qoder itself."""
+    paths = []
+    complete = True
+    try:
+        roots = []
+        for index, root in enumerate(QODER_APP_WORKSPACES.iterdir()):
+            if index >= 256:
+                complete = False
+                break
+            roots.append(root)
+    except OSError:
+        return (paths, False) if include_status else paths
+    for root in roots:
+        if deadline is not None and time.monotonic() >= deadline:
+            complete = False
+            break
+        metadata = root / "workspace.json"
+        try:
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) \
+                | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0)
+            with os.fdopen(os.open(metadata, flags), "rb") as stream:
+                metadata_stat = os.fstat(stream.fileno())
+                if not stat.S_ISREG(metadata_stat.st_mode) \
+                        or metadata_stat.st_size > _QODER_WORKSPACE_METADATA_MAX_BYTES:
+                    complete = False
+                    continue
+                payload = stream.read(_QODER_WORKSPACE_METADATA_MAX_BYTES + 1)
+            if len(payload) > _QODER_WORKSPACE_METADATA_MAX_BYTES:
+                complete = False
+                continue
+            raw = json.loads(payload)
+        except (OSError, ValueError):
+            complete = False
+            continue
+        value = (raw.get("workspace") or raw.get("folder")) \
+            if isinstance(raw, dict) else None
+        if not isinstance(value, str) or not value.startswith("file://"):
+            complete = False
+            continue
+        try:
+            path = Path(urllib.parse.unquote(urllib.parse.urlparse(value).path))
+            resolved = os.path.realpath(path)
+        except (OSError, ValueError):
+            complete = False
+            continue
+        if resolved and os.path.isabs(resolved) and resolved not in paths:
+            paths.append(resolved)
+    return (paths, complete) if include_status else paths
 
 
 # ----------------------------------------------------------------- 多语言 i18n
@@ -1902,7 +2001,8 @@ def _force_quota_refreshes(settings, ttl, budget=QUOTA_FORCE_BUDGET_SECS):
             futures["codex"] = pool.submit(
                 _codex_quota_manager.force_refresh, max(0.0, budget - 1))
         if settings.get("show_qoder", False):
-            futures["qoder"] = pool.submit(_qoder_quota_accounts, ttl)
+            futures["qoder"] = pool.submit(
+                _qoder_quota_accounts, ttl, False, max(1.0, budget - 1.0))
         done, pending = concurrent.futures.wait(
             futures.values(), timeout=max(0.0, budget))
         if pending:
@@ -1949,6 +2049,225 @@ def _claude_quota_accounts_cached():
 
 # ----------------------------------------------------------------- Qoder 额度
 
+class QoderAppUnavailable(RuntimeError):
+    pass
+
+
+def _qoder_deadline_timeout(deadline, maximum):
+    if deadline is None:
+        return maximum
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise QoderAppUnavailable("Qoder App IPC request timed out")
+    return min(maximum, remaining)
+
+
+def _qoder_verify_app_bundle(app_bundle, binary, deadline=None):
+    """Cache the complete app and IPC-service signature checks by file identity."""
+    seal_path = os.path.join(
+        app_bundle, "Contents", "_CodeSignature", "CodeResources")
+    try:
+        bundle_st = os.stat(app_bundle)
+        seal_st = os.stat(seal_path)
+        binary_st = os.stat(binary)
+        identity = (
+            bundle_st.st_dev, bundle_st.st_ino, bundle_st.st_mtime_ns,
+            bundle_st.st_ctime_ns, seal_st.st_dev, seal_st.st_ino,
+            seal_st.st_size, seal_st.st_mtime_ns, seal_st.st_ctime_ns,
+            binary_st.st_dev, binary_st.st_ino,
+            binary_st.st_size, binary_st.st_mtime_ns, binary_st.st_ctime_ns,
+        )
+    except OSError as exc:
+        raise QoderAppUnavailable("Qoder App bundle is unavailable") from exc
+    now = time.monotonic()
+    with _qoder_bundle_validation_lock:
+        cached_identity = _qoder_bundle_validation.get(app_bundle)
+        if cached_identity and cached_identity[0] == identity \
+                and cached_identity[1] > now:
+            return
+    try:
+        # A cold recursive Electron-bundle verification can exceed three seconds.
+        # Keep the complete resource-seal check, but let it use the Qoder request's
+        # bounded deadline rather than misclassifying a slow valid bundle.
+        bundle_checked = subprocess.run([
+            "/usr/bin/codesign", "--verify", "--strict",
+            f"-R={_QODER_BUNDLE_REQUIREMENT}", app_bundle,
+        ], capture_output=True, text=True,
+            timeout=_qoder_deadline_timeout(deadline, 8))
+        binary_checked = subprocess.run([
+            "/usr/bin/codesign", "--verify", "--strict",
+            '-R=anchor apple generic and identifier "Qoder" and '
+            'certificate leaf[subject.OU] = "T27K5A5ZWD"', binary,
+        ], capture_output=True, text=True,
+            timeout=_qoder_deadline_timeout(deadline, 3))
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise QoderAppUnavailable("Qoder App signature is unavailable") from exc
+    if bundle_checked.returncode != 0 or binary_checked.returncode != 0:
+        raise QoderAppUnavailable("Qoder App signature is invalid")
+    try:
+        verified_bundle = os.stat(app_bundle)
+        verified_seal = os.stat(seal_path)
+        verified_binary = os.stat(binary)
+        verified_identity = (
+            verified_bundle.st_dev, verified_bundle.st_ino,
+            verified_bundle.st_mtime_ns, verified_bundle.st_ctime_ns,
+            verified_seal.st_dev, verified_seal.st_ino, verified_seal.st_size,
+            verified_seal.st_mtime_ns, verified_seal.st_ctime_ns,
+            verified_binary.st_dev, verified_binary.st_ino,
+            verified_binary.st_size, verified_binary.st_mtime_ns,
+            verified_binary.st_ctime_ns,
+        )
+    except OSError as exc:
+        raise QoderAppUnavailable("Qoder App changed during signature verification") from exc
+    if verified_identity != identity:
+        raise QoderAppUnavailable("Qoder App changed during signature verification")
+    with _qoder_bundle_validation_lock:
+        _qoder_bundle_validation[app_bundle] = (identity, now + 3600)
+
+
+def _qoder_app_ipc_endpoint(deadline=None):
+    """Validate Qoder's per-user Unix socket before sending allowlisted requests."""
+    info_path = QODER_APP_CACHE / ".info.json"
+    meta_path = QODER_APP_CACHE / ".process-meta.json"
+    try:
+        info = json.loads(info_path.read_text())
+        meta = json.loads(meta_path.read_text())
+        pid = int(info.get("pid"))
+        meta_pid = int(meta.get("pid"))
+        socket_path = Path(str(info.get("ipcServerPath") or ""))
+    except (OSError, ValueError, TypeError) as exc:
+        raise QoderAppUnavailable("Qoder App is not running") from exc
+    if pid <= 1 or pid != meta_pid or not _pid_alive(pid):
+        raise QoderAppUnavailable("Qoder App service is not running")
+    try:
+        support_root = os.path.realpath(QODER_APP_SUPPORT)
+        cache_root = os.path.realpath(QODER_APP_CACHE)
+        endpoint = os.path.realpath(socket_path)
+        common = os.path.commonpath((cache_root, endpoint))
+        support_stat = os.stat(support_root)
+        st = os.lstat(endpoint)
+    except (OSError, ValueError) as exc:
+        raise QoderAppUnavailable("Qoder App IPC is unavailable") from exc
+    if support_stat.st_uid != os.getuid() or support_stat.st_mode & 0o022:
+        raise QoderAppUnavailable("Qoder App support directory permissions are unsafe")
+    if common != cache_root or not stat.S_ISSOCK(st.st_mode):
+        raise QoderAppUnavailable("Qoder App IPC endpoint is invalid")
+    if st.st_uid != os.getuid() or st.st_mode & 0o022:
+        raise QoderAppUnavailable("Qoder App IPC permissions are unsafe")
+    binary = os.path.realpath(str(meta.get("binaryPath") or ""))
+    app_bundles = (
+        os.path.realpath("/Applications/Qoder.app"),
+        os.path.realpath(HOME / "Applications" / "Qoder.app"),
+    )
+    app_bundle = next((root for root in app_bundles
+                       if binary.startswith(root + os.sep + "Contents" + os.sep)), None)
+    if not app_bundle:
+        raise QoderAppUnavailable("Qoder App service identity is invalid")
+    _qoder_verify_app_bundle(app_bundle, binary, deadline)
+    try:
+        actual = subprocess.run(
+            ["ps", "-o", "comm=", "-p", str(pid)], capture_output=True,
+            text=True, timeout=_qoder_deadline_timeout(deadline, 2)).stdout.strip()
+    except Exception as exc:
+        raise QoderAppUnavailable("Qoder App service identity is unavailable") from exc
+    if os.path.realpath(actual) != binary:
+        raise QoderAppUnavailable("Qoder App service identity mismatch")
+    return {"path": endpoint, "pid": pid, "dev": st.st_dev, "ino": st.st_ino}
+
+
+def _qoder_app_available(deadline=None):
+    try:
+        _qoder_app_ipc_endpoint(deadline)
+        return True
+    except QoderAppUnavailable:
+        return False
+
+
+def _qoder_ipc_remaining(sock, deadline):
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise QoderAppUnavailable("Qoder App IPC request timed out")
+    sock.settimeout(remaining)
+
+
+def _qoder_ipc_recv(sock, size, deadline):
+    data = bytearray()
+    while len(data) < size:
+        _qoder_ipc_remaining(sock, deadline)
+        chunk = sock.recv(min(64 * 1024, size - len(data)))
+        if not chunk:
+            raise QoderAppUnavailable("Qoder App IPC closed unexpectedly")
+        data.extend(chunk)
+    return bytes(data)
+
+
+def _qoder_app_request(method, params=None, timeout=5, include_size=False,
+                       max_body=None):
+    """One-shot LSP-framed JSON-RPC client with a strict read-only allowlist."""
+    if method not in _QODER_IPC_METHODS:
+        raise ValueError("Qoder App IPC method is not allowed")
+    deadline = time.monotonic() + max(0.1, float(timeout))
+    endpoint = _qoder_app_ipc_endpoint(deadline)
+    request_id = uuid.uuid4().hex
+    payload = json.dumps({
+        "jsonrpc": "2.0", "id": request_id, "method": method,
+        "params": params or {},
+    }, separators=(",", ":")).encode()
+    frame = f"Content-Length: {len(payload)}\r\n\r\n".encode() + payload
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            _qoder_ipc_remaining(client, deadline)
+            before = os.lstat(endpoint["path"])
+            if (before.st_dev, before.st_ino) != (endpoint["dev"], endpoint["ino"]):
+                raise QoderAppUnavailable("Qoder App IPC endpoint changed")
+            client.connect(endpoint["path"])
+            peer_raw = client.getsockopt(0, 0x002, 4)  # SOL_LOCAL / LOCAL_PEERPID
+            peer_pid = int.from_bytes(peer_raw, byteorder=sys.byteorder, signed=True)
+            after = os.lstat(endpoint["path"])
+            if peer_pid != endpoint["pid"] or \
+                    (after.st_dev, after.st_ino) != (endpoint["dev"], endpoint["ino"]):
+                raise QoderAppUnavailable("Qoder App IPC peer identity mismatch")
+            _qoder_ipc_remaining(client, deadline)
+            client.sendall(frame)
+            header = bytearray()
+            while b"\r\n\r\n" not in header:
+                _qoder_ipc_remaining(client, deadline)
+                chunk = client.recv(4096)
+                if not chunk:
+                    raise QoderAppUnavailable("Qoder App IPC returned no response")
+                header.extend(chunk)
+                if len(header) > _QODER_IPC_MAX_HEADER:
+                    raise QoderAppUnavailable("Qoder App IPC header is too large")
+            raw_header, initial = bytes(header).split(b"\r\n\r\n", 1)
+            length = None
+            for line in raw_header.split(b"\r\n"):
+                name, sep, value = line.partition(b":")
+                if sep and name.strip().lower() == b"content-length":
+                    length = int(value.strip())
+                    break
+            body_limit = min(_QODER_IPC_MAX_BODY, max_body) \
+                if max_body is not None else _QODER_IPC_MAX_BODY
+            if length is None or not 0 <= length <= body_limit:
+                raise QoderAppUnavailable("Qoder App IPC response size is invalid")
+            body = initial[:length]
+            if len(body) < length:
+                body += _qoder_ipc_recv(client, length - len(body), deadline)
+    except (OSError, ValueError, socket.timeout) as exc:
+        if isinstance(exc, QoderAppUnavailable):
+            raise
+        raise QoderAppUnavailable("Qoder App IPC request failed") from exc
+    try:
+        response = json.loads(body)
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise QoderAppUnavailable("Qoder App IPC returned invalid JSON") from exc
+    if not isinstance(response, dict) or response.get("id") != request_id:
+        raise QoderAppUnavailable("Qoder App IPC response identity mismatch")
+    if isinstance(response.get("error"), dict):
+        message = str(response["error"].get("message") or "request failed")[:160]
+        raise QoderAppUnavailable(f"Qoder App request failed: {message}")
+    result = response.get("result")
+    return (result, len(body)) if include_size else result
+
 def _qoder_cli_path():
     """Resolve qodercli without assuming a login shell PATH in the app daemon."""
     found = shutil.which("qodercli")
@@ -1963,9 +2282,12 @@ def _qoder_expiry(value):
         timestamp = float(value)
     except (TypeError, ValueError):
         return None
-    # UsageInfo expiresAt is currently milliseconds; accept seconds for forwards
-    # compatibility and for unit tests using compact fixtures.
-    return timestamp / 1000 if timestamp > 10_000_000_000 else timestamp
+    # UsageInfo expiresAt is currently milliseconds. Values below 1e12 are treated
+    # as epoch seconds for forwards compatibility; Qoder did not exist before 2001.
+    timestamp = timestamp / 1000 if timestamp >= 1_000_000_000_000 else timestamp
+    # Qoder uses 9999-12-31 for a non-expiring plan. Reject any similarly implausible
+    # far-future timestamp so nearby sentinel variants cannot leak into the countdown.
+    return timestamp if 0 < timestamp <= 4_102_444_800 else None
 
 
 def _qoder_usage_window(window_id, label, node, expires_at=None):
@@ -2033,7 +2355,17 @@ def _qoder_quota_from_usage(usage, sampled_at=None):
     }
 
 
-def _qoder_quota_for(src):
+def _qoder_app_quota(timeout=8):
+    usage = _qoder_app_request("credit/usage", timeout=timeout)
+    if not isinstance(usage, dict):
+        return {"ok": False, "no_quota": True,
+                "error": "Qoder App is not logged in or has no usage snapshot"}
+    quota = _qoder_quota_from_usage(usage)
+    quota["source"] = "qoder_app"
+    return quota
+
+
+def _qoder_cli_quota_for(src, timeout=10):
     binary = _qoder_cli_path()
     if not binary:
         return {"ok": False, "no_quota": True,
@@ -2056,7 +2388,7 @@ def _qoder_quota_for(src):
     try:
         proc = subprocess.run(
             command, input=payload, capture_output=True, text=True,
-            timeout=30, cwd=str(HOME))
+            timeout=timeout, cwd=str(HOME))
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError("Qoder usage request timed out") from exc
     usage = None
@@ -2079,26 +2411,247 @@ def _qoder_quota_for(src):
             raise RuntimeError("Qoder usage request failed")
         return {"ok": False, "no_quota": True,
                 "error": "Qoder usage is unavailable or the account is not logged in"}
-    return _qoder_quota_from_usage(usage)
+    quota = _qoder_quota_from_usage(usage)
+    quota["source"] = "qoder_cli"
+    return quota
 
 
-def _qoder_quota_accounts(ttl=QODER_QUOTA_TTL, cache_only=False):
+def _qoder_quota_for(src):
+    """Prefer the signed-in desktop app; retain CLI as a compatible fallback."""
+    app_error = None
+    if src.get("is_default"):
+        try:
+            quota = _qoder_app_quota(timeout=8)
+            if quota.get("ok"):
+                return quota
+            app_error = quota.get("error")
+        except QoderAppUnavailable as exc:
+            app_error = str(exc)
+    try:
+        quota = _qoder_cli_quota_for(src, timeout=9)
+        if app_error and not quota.get("ok"):
+            quota = dict(quota)
+            quota["error"] = f"{app_error}; {quota.get('error') or 'Qoder CLI unavailable'}"
+        return quota
+    except Exception as exc:
+        if app_error:
+            raise RuntimeError(f"{app_error}; Qoder CLI fallback failed: {exc}") from exc
+        raise
+
+
+def _qoder_cached_snapshot(key):
+    """Return an unexpired result, or explicitly mark persisted last-good stale."""
+    now = time.time()
+    with _cache_lock:
+        hit = _ttl_cache.get(key)
+        if hit and hit[0] > now and isinstance(hit[1], dict):
+            return copy.deepcopy(hit[1])
+    _ensure_last_good_loaded()
+    with _last_good_lock:
+        value = _last_good.get(key)
+        if not isinstance(value, dict):
+            return None
+        return dict(copy.deepcopy(value), stale=True,
+                    error="Qoder quota cache is stale")
+
+
+def _qoder_select_quota(app_quota, cli_quota):
+    if app_quota and app_quota.get("ok") and not app_quota.get("stale"):
+        return app_quota
+    if cli_quota and cli_quota.get("ok"):
+        return cli_quota
+    if app_quota and app_quota.get("ok"):
+        return app_quota
+    if cli_quota:
+        if app_quota and app_quota.get("error"):
+            quota = dict(cli_quota)
+            quota["error"] = "; ".join(filter(None, (
+                str(app_quota.get("error") or ""),
+                str(cli_quota.get("error") or ""))))
+            return quota
+        return cli_quota
+    return app_quota
+
+
+def _qoder_resilient(key, ttl, fn, deadline):
+    """Qoder cache fill with one absolute budget, including compute-lock waits."""
+    _ensure_last_good_loaded()
+    now = time.time()
+    with _cache_lock:
+        hit = _ttl_cache.get(key)
+        if hit and hit[0] > now:
+            return copy.deepcopy(hit[1])
+        lock = _compute_locks.get(key)
+        if lock is None:
+            lock = _compute_locks[key] = threading.Lock()
+    remaining = deadline - time.monotonic()
+    if remaining <= 0 or not lock.acquire(timeout=remaining):
+        cached_value = _qoder_cached_snapshot(key)
+        return cached_value or {"ok": False, "error": "Qoder quota refresh timed out"}
+    try:
+        now = time.time()
+        with _cache_lock:
+            hit = _ttl_cache.get(key)
+            if hit and hit[0] > now:
+                return copy.deepcopy(hit[1])
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise QoderAppUnavailable("Qoder quota refresh timed out")
+        value = fn(remaining)
+        with _cache_lock:
+            _ttl_cache[key] = (time.time() + ttl, value)
+        _remember_last_good(key, value)
+        return value
+    except Exception as exc:
+        err = str(exc)
+        with _last_good_lock:
+            stale = copy.deepcopy(_last_good.get(key))
+        out = dict(stale, stale=True, error=err) if isinstance(stale, dict) \
+            else {"ok": False, "error": err}
+        with _cache_lock:
+            _ttl_cache[key] = (time.time() + 60, out)
+        return out
+    finally:
+        lock.release()
+
+
+def _qoder_quota_accounts(ttl=QODER_QUOTA_TTL, cache_only=False,
+                          budget=QODER_NORMAL_BUDGET_SECS):
     out = []
+    deadline = time.monotonic() + max(1.0, float(budget))
     for src in qoder_sources():
         if src.get("session_only"):
             continue
         key = "qoder_quota" if src["is_default"] else f"qoder_quota_{src['id']}"
         if cache_only:
-            quota = _cached_or_last_good(key) or {
+            app_quota = (_qoder_cached_snapshot("qoder_app_quota")
+                         if src.get("is_default") else None)
+            cli_quota = _qoder_cached_snapshot(key)
+            quota = _qoder_select_quota(app_quota, cli_quota) or {
                 "ok": False, "error": "Qoder quota cache is warming",
             }
         else:
-            quota = _resilient(
-                key, max(QODER_QUOTA_TTL, int(ttl)),
-                lambda source=src: _qoder_quota_for(source))
+            app_quota = None
+            remaining_budget = max(0.1, deadline - time.monotonic())
+            app_timeout = min(12.0, max(0.1, remaining_budget * 0.4))
+            if src.get("is_default"):
+                app_quota = _qoder_resilient(
+                    "qoder_app_quota", QODER_APP_QUOTA_TTL,
+                    lambda remaining, cap=app_timeout:
+                        _qoder_app_quota(timeout=min(cap, remaining)), deadline)
+            cli_quota = None
+            if not (app_quota and app_quota.get("ok")
+                    and not app_quota.get("stale")):
+                cli_quota = _qoder_resilient(
+                    key, max(QODER_QUOTA_TTL, int(ttl)),
+                    lambda remaining, source=src:
+                        _qoder_cli_quota_for(
+                            source, timeout=min(30.0, max(0.1, remaining))),
+                    deadline)
+            quota = _qoder_select_quota(app_quota, cli_quota)
         out.append({"account_id": src["id"], "account": src["label"],
                     "is_default": src["is_default"], **quota})
     return out
+
+
+def _known_source_snapshots(provider, settings):
+    cache_key = f"sources_{provider}"
+    with _cache_lock:
+        hit = _ttl_cache.get(cache_key)
+        cached_sources = copy.deepcopy(hit[1]) if hit and isinstance(hit[1], list) else []
+    if cached_sources:
+        return [source for source in cached_sources if not source.get("session_only")]
+    default_dir = HOME / {"claude": ".claude", "codex": ".codex",
+                          "qoder": ".qoder"}[provider]
+    sources = [{"id": "default", "label": "默认", "is_default": True,
+                "path": default_dir}]
+    seen = {"default"}
+    for raw in settings.get(f"{provider}_dirs", []):
+        path = _expand(raw)
+        source_id = _slug(path.name)
+        if source_id in seen:
+            continue
+        seen.add(source_id)
+        sources.append({"id": source_id, "label": _label_for_dir(path, "默认"),
+                        "is_default": path == default_dir, "path": path})
+    return sources
+
+
+def _quota_timeout_accounts(provider, settings):
+    out = []
+    if provider == "codex":
+        sources = _known_source_snapshots("codex", settings)
+        for source in sources:
+            path_key = os.path.realpath(source["path"])
+            with _codex_quota_manager._lock:
+                state = copy.deepcopy(_codex_quota_manager._states.get(path_key))
+            value = state.get("quota") if isinstance(state, dict) else None
+            if not isinstance(value, dict):
+                value = _cached_or_last_good(
+                    "codex_quota" if source["is_default"]
+                    else f"codex_quota_{source['id']}")
+            error = "Codex quota refresh timed out"
+            quota = dict(value, stale=True, error=error) \
+                if isinstance(value, dict) else {"ok": False, "error": error}
+            out.append({"account_id": source["id"], "account": source["label"],
+                        "is_default": source["is_default"], **quota})
+        return out or [{"account_id": "default", "account": "默认",
+                        "is_default": True, "ok": False,
+                        "error": "Codex quota refresh timed out"}]
+    for source in _known_source_snapshots(provider, settings):
+        if provider == "claude":
+            key = "claude_quota" if source["is_default"] \
+                else f"claude_quota_{source['id']}"
+            value = _cached_or_last_good(key)
+        elif source["is_default"]:
+            value = _qoder_select_quota(
+                _qoder_cached_snapshot("qoder_app_quota"),
+                _qoder_cached_snapshot("qoder_quota"))
+        else:
+            value = _qoder_cached_snapshot(f"qoder_quota_{source['id']}")
+        error = f"{provider.title()} quota refresh timed out"
+        quota = dict(value, stale=True, error=error) \
+            if isinstance(value, dict) else {"ok": False, "error": error}
+        out.append({"account_id": source["id"], "account": source["label"],
+                    "is_default": source["is_default"], **quota})
+    return out
+
+
+def _normal_quota_accounts(settings, ttl, fresh_codex=False,
+                           budget=None):
+    """Run all visible providers concurrently under the native client's budget."""
+    budget = QUOTA_NORMAL_BUDGET_SECS if budget is None else budget
+    pool = concurrent.futures.ThreadPoolExecutor(
+        max_workers=3, thread_name_prefix="agentdeck-quota-normal")
+    futures = {}
+    try:
+        if settings.get("show_claude", True):
+            futures["claude"] = pool.submit(_claude_quota_accounts, ttl)
+        if settings.get("show_codex", True):
+            def codex_accounts():
+                _codex_quota_manager.ensure_fresh(
+                    CODEX_OPEN_STALE_SECS if fresh_codex else CODEX_RECONCILE_SECS)
+                return _codex_quota_accounts()
+            futures["codex"] = pool.submit(codex_accounts)
+        if settings.get("show_qoder", True):
+            futures["qoder"] = pool.submit(
+                _qoder_quota_accounts, ttl, False, max(1.0, budget - 1.0))
+        done, pending = concurrent.futures.wait(
+            futures.values(), timeout=max(0.0, budget))
+        for future in pending:
+            future.cancel()
+        accounts = {}
+        for provider, future in futures.items():
+            if future not in done:
+                accounts[provider] = _quota_timeout_accounts(provider, settings)
+                continue
+            try:
+                accounts[provider] = future.result()
+            except Exception:
+                accounts[provider] = _quota_timeout_accounts(provider, settings)
+        return accounts
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
 
 
 def api_quota(force=False, cache_only=False, fresh_codex=False):
@@ -2116,25 +2669,33 @@ def api_quota(force=False, cache_only=False, fresh_codex=False):
                 _last_force_claude_quota = now
                 for k in [k for k in _ttl_cache
                           if k.startswith("claude_quota")
-                          or k.startswith("qoder_quota")]:
+                          or k.startswith("qoder_quota")
+                          or k == "qoder_app_quota"]:
                     _ttl_cache.pop(k, None)
         forced_claude_accts = _force_quota_refreshes(s, ttl)
-    elif fresh_codex and s.get("show_codex", True):
-        _codex_quota_manager.ensure_fresh(CODEX_OPEN_STALE_SECS)
-    else:
-        _codex_quota_manager.ensure_fresh(CODEX_RECONCILE_SECS)
+    normal_accounts = None
+    if not force and not cache_only:
+        normal_accounts = _normal_quota_accounts(s, ttl, fresh_codex)
+    elif not force and s.get("show_codex", True):
+        _codex_quota_manager.ensure_fresh(
+            CODEX_OPEN_STALE_SECS if fresh_codex else CODEX_RECONCILE_SECS)
 
     if s.get("show_claude", True):
         if forced_claude_accts is not None:
             claude_accts = forced_claude_accts
+        elif normal_accounts is not None:
+            claude_accts = normal_accounts.get("claude", [])
         else:
             claude_accts = _claude_quota_accounts_cached() if cache_only \
                 else _claude_quota_accounts(ttl)
     else:
         claude_accts = []
-    codex_accts = _codex_quota_accounts() if s.get("show_codex", True) else []
-    qoder_accts = (_qoder_quota_accounts(ttl, cache_only=cache_only)
-                   if s.get("show_qoder", True) else [])
+    codex_accts = (normal_accounts.get("codex", []) if normal_accounts is not None
+                   else _codex_quota_accounts()) \
+        if s.get("show_codex", True) else []
+    qoder_accts = (normal_accounts.get("qoder", []) if normal_accounts is not None
+                   else _qoder_quota_accounts(ttl, cache_only=cache_only)) \
+        if s.get("show_qoder", True) else []
     # 向后兼容：各顶层字段仍为「主账号」单对象；agents 是拍平 UI 的自包含契约。
     # 未发现账号时也把明确状态作为合成默认页放进 agents，避免启用的 Agent 静默消失。
     if claude_accts:
@@ -2298,6 +2859,7 @@ _session_index_start_lock = threading.Lock()
 _session_index_state_lock = threading.Lock()
 _session_index_wake = threading.Event()
 _session_index_started = False
+_qoder_app_scan_authoritative = False
 _session_index_state = {
     "indexing": False, "indexed_at": 0.0, "total_files": 0,
     "processed_files": 0, "error": "",
@@ -2538,6 +3100,218 @@ def _qoder_session_info(path):
     return sid, cwd, title, branch
 
 
+def _qoder_app_time(value):
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return 0.0
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value) / 1000 if value > 10_000_000_000 else float(value)
+    return 0.0
+
+
+def _qoder_workspace_project_path(workspace_path):
+    path = Path(workspace_path)
+    if path.is_dir():
+        return os.path.realpath(path)
+    if not path.is_file():
+        return os.path.realpath(path) if path.is_absolute() else ""
+    if path.suffix != ".code-workspace":
+        return os.path.realpath(path)
+    try:
+        document = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return ""
+    folders = document.get("folders") if isinstance(document, dict) else None
+    if not isinstance(folders, list):
+        return ""
+    for folder in folders:
+        if not isinstance(folder, dict):
+            continue
+        value = folder.get("path") or folder.get("uri")
+        if not isinstance(value, str) or not value.strip():
+            continue
+        if value.startswith("file://"):
+            value = urllib.parse.unquote(urllib.parse.urlparse(value).path)
+        candidate = Path(value)
+        if not candidate.is_absolute():
+            candidate = path.parent / candidate
+        if candidate.is_dir():
+            return os.path.realpath(candidate)
+    return ""
+
+
+def _qoder_app_session_metadata(item, workspace_path):
+    """Reduce one private App response to AgentDeck's non-content metadata model."""
+    if not isinstance(item, dict):
+        return None
+    runtime = item.get("sessionRuntimeMetaStore")
+    runtime = runtime if isinstance(runtime, dict) else {}
+    session_type = str(item.get("sessionType") or runtime.get("sessionType") or "")
+    if session_type in ("side_task", "subagent"):
+        return None
+    sid = str(item.get("sessionId") or item.get("session_id") or item.get("id") or "")
+    if not _ID_RE.match(sid):
+        return None
+    title = ""
+    for key in ("title", "sessionName", "name", "summary"):
+        value = item.get(key)
+        if isinstance(value, str) and value.strip():
+            title = _clean_title(value)
+            break
+    if not title:
+        return None
+    cwd = ""
+    for key in ("projectPath", "project_path", "workspacePath", "workspace_path",
+                "projectUri", "project_uri", "cwd"):
+        value = item.get(key)
+        if not isinstance(value, str) or not value.strip():
+            continue
+        if value.startswith("file://"):
+            value = urllib.parse.unquote(urllib.parse.urlparse(value).path)
+        cwd = value.strip()
+        break
+    if not cwd:
+        cwd = _qoder_workspace_project_path(workspace_path)
+    branch = ""
+    for key in ("gitBranch", "git_branch", "branch"):
+        value = item.get(key)
+        if isinstance(value, str):
+            branch = value[:160]
+            break
+    mtime = 0.0
+    for key in ("updatedAt", "updateTime", "modifiedAt", "mtime", "lastActiveAt",
+                "createdAt", "createTime"):
+        mtime = _qoder_app_time(item.get(key))
+        if mtime:
+            break
+    if not mtime:
+        try:
+            mtime = os.path.getmtime(workspace_path)
+        except OSError:
+            mtime = 0.0
+    return {
+        "session_id": sid, "title": title, "cwd": cwd[:2048],
+        "project": Path(cwd).name if cwd else "Qoder", "branch": branch,
+        "mtime": mtime,
+    }
+
+
+def _qoder_app_session_entries_uncached():
+    """Fetch App session metadata; never persist chatRecords or message bodies."""
+    global _qoder_app_scan_authoritative
+    _qoder_app_scan_authoritative = False
+    scan_deadline = time.monotonic() + _QODER_APP_SCAN_DEADLINE_SECS
+    if not _qoder_app_available(scan_deadline):
+        return []
+    entries, selected = [], {}
+    discovery = _qoder_app_workspace_paths(
+        deadline=scan_deadline, include_status=True)
+    if (isinstance(discovery, tuple) and len(discovery) == 2
+            and isinstance(discovery[1], bool)):
+        discovered, discovery_complete = discovery
+    else:  # Compatibility with test doubles and older internal callers.
+        discovered, discovery_complete = discovery, True
+    if time.monotonic() >= scan_deadline:
+        return []
+    workspaces = discovered[:_QODER_APP_MAX_WORKSPACES]
+    complete_scan = discovery_complete \
+        and len(discovered) <= _QODER_APP_MAX_WORKSPACES
+    if not workspaces:
+        _qoder_app_scan_authoritative = complete_scan
+        return []
+
+    def fetch(workspace, max_body):
+        remaining_time = scan_deadline - time.monotonic()
+        if remaining_time <= 0:
+            return workspace, None, False, 0
+        try:
+            result = _qoder_app_request(
+                "chat/listAllSessions", {"workspacePath": workspace},
+                timeout=min(3.0, remaining_time),
+                include_size=True, max_body=max_body)
+        except QoderAppUnavailable:
+            return workspace, None, False, 0
+        result, response_size = result
+        if result is None:  # Qoder serializes a successful empty list as null.
+            return workspace, [], True, response_size
+        if not isinstance(result, list):
+            return workspace, None, False, response_size
+        complete = len(result) <= _QODER_APP_MAX_SESSIONS_PER_WORKSPACE
+        return (workspace, result[:_QODER_APP_MAX_SESSIONS_PER_WORKSPACE],
+                complete, response_size)
+
+    result_count = 0
+    remaining_bytes = _QODER_APP_MAX_SCAN_BYTES
+    total_response_bytes = 0
+    total_sessions = 0
+    for index, workspace in enumerate(workspaces):
+        if time.monotonic() >= scan_deadline or remaining_bytes <= 0:
+            complete_scan = False
+            break
+        result = fetch(workspace, remaining_bytes)
+        result_count += 1
+        _, sessions, complete, response_size = result
+        complete_scan = complete_scan and complete
+        remaining_bytes -= response_size
+        total_response_bytes += response_size
+        if remaining_bytes <= 0 and index + 1 < len(workspaces):
+            complete_scan = False
+            break
+        if sessions is None:
+            complete_scan = False
+            continue
+        if total_response_bytes > _QODER_APP_MAX_SCAN_BYTES:
+            complete_scan = False
+            break
+        for item in sessions:
+            total_sessions += 1
+            if total_sessions > _QODER_APP_MAX_TOTAL_SESSIONS:
+                complete_scan = False
+                break
+            if not isinstance(item, dict):
+                complete_scan = False
+                continue
+            runtime = item.get("sessionRuntimeMetaStore")
+            runtime = runtime if isinstance(runtime, dict) else {}
+            session_type = str(item.get("sessionType")
+                               or runtime.get("sessionType") or "")
+            if session_type in ("side_task", "subagent"):
+                continue
+            info = _qoder_app_session_metadata(item, workspace)
+            if not info:
+                complete_scan = False
+                continue
+            previous = selected.get(info["session_id"])
+            if previous is None or info["mtime"] > previous["mtime"]:
+                selected[info["session_id"]] = info
+        if total_sessions > _QODER_APP_MAX_TOTAL_SESSIONS:
+            break
+    _qoder_app_scan_authoritative = bool(result_count) and complete_scan
+    for info in selected.values():
+        synthetic = "qoder-app://" + info["session_id"]
+        entries.append({
+            "tool": "qoder", "account_id": "default", "account": "默认",
+            "path": synthetic, "inode": 0, "size": 0,
+            "mtime": info.pop("mtime"), "preparsed": info,
+        })
+    return entries
+
+
+def _qoder_app_session_entries():
+    """Short-cache the App snapshot so the 30s index loop does not repeat IPC."""
+    global _qoder_app_scan_authoritative
+
+    def scan():
+        entries = _qoder_app_session_entries_uncached()
+        return entries, _qoder_app_scan_authoritative
+
+    entries, authoritative = cached("qoder_app_session_entries", 120, scan)
+    _qoder_app_scan_authoritative = authoritative
+    return entries
+
+
 def _session_file_info(tool, path):
     if tool == "claude":
         info = _claude_session_info(path)
@@ -2591,6 +3365,7 @@ def _session_source_files():
                     "path": path, "inode": int(getattr(st, "st_ino", 0)),
                     "size": st.st_size, "mtime": st.st_mtime,
                 })
+    entries.extend(_qoder_app_session_entries())
     # 首次建库先产出最近会话，前端可在后台索引未完成时逐步得到可用结果。
     entries.sort(key=lambda e: e["mtime"], reverse=True)
     return entries
@@ -2727,7 +3502,8 @@ def _sync_pins_to_db(conn):
             mtime = float(snap.get("mtime") or 0)
         except (TypeError, ValueError):
             mtime = 0
-        synthetic = "pin://" + hashlib.sha256(
+        scheme = "qoder-app-pin://" if snap.get("source") == "qoder_app" else "pin://"
+        synthetic = scheme + hashlib.sha256(
             _pin_key(tool, account_id, sid).encode()).hexdigest()
         conn.execute("""
             INSERT OR REPLACE INTO session_index (
@@ -2751,7 +3527,8 @@ def _session_index_scan():
             entries = _session_source_files()
             _session_state(total_files=len(entries))
             existing = {row["path"]: row for row in conn.execute(
-                "SELECT path, tool, account_id, account, inode, size, mtime, status "
+                "SELECT path, tool, account_id, account, inode, size, mtime, status, "
+                "session_id, title, cwd, project, branch "
                 "FROM session_file_state")}
             seen, writes, committed_writes, fast_processed = set(), 0, 0, 0
             parse_jobs = []
@@ -2761,13 +3538,26 @@ def _session_index_scan():
                 old = existing.get(path)
                 same_identity = old and old["tool"] == entry["tool"] \
                     and old["account_id"] == entry["account_id"]
-                stable_file = same_identity and old["inode"] == entry["inode"]
+                preparsed = entry.get("preparsed")
+                stable_app_entry = bool(preparsed and same_identity
+                    and old["status"] == "indexed"
+                    and old["account"] == entry["account"]
+                    and old["mtime"] == entry["mtime"]
+                    and old["session_id"] == preparsed.get("session_id", "")
+                    and old["title"] == preparsed.get("title", "")
+                    and old["cwd"] == preparsed.get("cwd", "")
+                    and old["project"] == preparsed.get("project", "")
+                    and old["branch"] == preparsed.get("branch", ""))
+                stable_file = (same_identity and old["inode"] == entry["inode"]
+                               and not preparsed)
                 complete = old and old["status"] in ("indexed", "ignored")
                 unchanged_incomplete = old and old["status"] == "incomplete" \
                     and entry["size"] == old["size"] and entry["mtime"] == old["mtime"]
                 # 已解析/忽略的文件追加增长不改变会话头；不完整文件有变化则重试。
-                if stable_file and ((complete and entry["size"] >= old["size"])
-                                    or unchanged_incomplete):
+                if stable_app_entry:
+                    fast_processed += 1
+                elif stable_file and ((complete and entry["size"] >= old["size"])
+                                      or unchanged_incomplete):
                     if (old["size"] != entry["size"] or old["mtime"] != entry["mtime"]
                             or old["account"] != entry["account"]):
                         conn.execute(
@@ -2786,7 +3576,10 @@ def _session_index_scan():
 
             def parse(job):
                 entry, old = job
-                status, info = _session_file_info(entry["tool"], entry["path"])
+                if entry.get("preparsed"):
+                    status, info = "indexed", entry["preparsed"]
+                else:
+                    status, info = _session_file_info(entry["tool"], entry["path"])
                 return entry, old, status, info
 
             if parse_jobs:
@@ -2806,6 +3599,9 @@ def _session_index_scan():
                             _session_state(processed_files=fast_processed + offset)
 
             for path in existing.keys() - seen:
+                if (path.startswith("qoder-app://")
+                        and not _qoder_app_scan_authoritative):
+                    continue
                 conn.execute("DELETE FROM session_file_state WHERE path=?", (path,))
             _rebuild_session_rows(conn)
             _sync_pins_to_db(conn)
@@ -3023,6 +3819,8 @@ def _query_session_index(query="", tool="all", limit=None, cursor=""):
         "cwd": row["cwd"], "project": row["project"], "branch": row["branch"],
         "mtime": row["mtime"], "size": row["size"], "account": row["account"],
         "account_id": row["account_id"], "pinned": bool(row["pinned"]),
+        "source": "qoder_app" if str(row["path"]).startswith(
+            ("qoder-app://", "qoder-app-pin://")) else None,
     } for row in page]
     status = _session_status()
     return {
@@ -3054,7 +3852,7 @@ def api_pin(body):
         if body.get("pinned"):
             pins[key] = {k: sess.get(k, "") for k in
                          ("tool", "id", "title", "cwd", "project", "branch",
-                          "mtime", "account", "account_id")}
+                          "mtime", "account", "account_id", "source")}
         else:
             pins.pop(key, None)
             # 兼容尚未迁移的 v2.1.3 以前单 id 键。
@@ -3128,19 +3926,130 @@ def _pid_cwd(pid):
     return ""
 
 
+def _codex_rollout_work_status(path):
+    """Return busy/idle from the newest completed Codex task boundary.
+
+    Rollout mtime alone is insufficient: a network request or tool can run for
+    minutes without appending a line even though the turn is still active.
+    """
+    boundary_status = {
+        "task_started": "busy", "turn_started": "busy",
+        "task_complete": "idle", "turn_complete": "idle",
+        "turn_aborted": "idle",
+    }
+    try:
+        with open(path, "rb") as stream:
+            stat_result = os.fstat(stream.fileno())
+            identity = (stat_result.st_dev, stat_result.st_ino)
+            size = stat_result.st_size
+            mtime_ns = stat_result.st_mtime_ns
+            key = str(path)
+            with _codex_work_status_lock:
+                previous = _codex_work_status_cache.get(key)
+            if previous and previous["identity"] == identity \
+                    and previous["size"] == size and previous["mtime_ns"] == mtime_ns:
+                return previous["status"]
+            appended = previous and previous["identity"] == identity \
+                and size > previous["size"] and mtime_ns >= previous["mtime_ns"]
+            start = max(0, previous.get("scan_offset", 0) - 1) if appended else 0
+            status = previous["status"] if appended else None
+            scan_offset = 0
+            if size:
+                with mmap.mmap(stream.fileno(), length=0, access=mmap.ACCESS_READ) as data:
+                    cursor = size
+                    while cursor > start:
+                        positions = [data.rfind(marker, start, cursor)
+                                     for marker in _CODEX_WORK_BOUNDARY_MARKERS]
+                        position = max(positions)
+                        if position < 0:
+                            break
+                        line_start = data.rfind(b"\n", start, position) + 1
+                        line_end = data.find(b"\n", position, size)
+                        if line_end < 0:
+                            cursor = position
+                            continue
+                        try:
+                            event = json.loads(data[line_start:line_end])
+                        except (TypeError, ValueError):
+                            cursor = position
+                            continue
+                        payload = event.get("payload") \
+                            if isinstance(event, dict) and event.get("type") == "event_msg" \
+                            else None
+                        event_type = payload.get("type") \
+                            if isinstance(payload, dict) else None
+                        if event_type in boundary_status:
+                            status = boundary_status[event_type]
+                            break
+                        cursor = position
+                    last_newline = data.rfind(b"\n", start, size)
+                    scan_offset = last_newline + 1 if last_newline >= 0 else start
+    except OSError:
+        return None
+    with _codex_work_status_lock:
+        _codex_work_status_cache[key] = {
+            "identity": identity, "size": size, "mtime_ns": mtime_ns,
+            "scan_offset": scan_offset, "status": status,
+        }
+        while len(_codex_work_status_cache) > 128:
+            _codex_work_status_cache.pop(next(iter(_codex_work_status_cache)))
+    return status
+
+
+def _recent_codex_activity_files(limit=60):
+    """Newest rollouts by actual write time, so resumed old threads are included."""
+    def build():
+        ranked = []
+        for path in _iter_codex_files(limit=None):
+            try:
+                ranked.append((path.stat().st_mtime, path))
+            except OSError:
+                continue
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        return [path for _mtime, path in ranked[:limit]]
+    return cached("active_codex_activity_files", 10, build)
+
+
+def _codex_desktop_rollout_candidates(recent_limit=60):
+    candidates = list(_recent_codex_activity_files(recent_limit))
+    with _codex_work_status_lock:
+        busy = [Path(path) for path, state in _codex_work_status_cache.items()
+                if state.get("status") == "busy"]
+    for path in busy:
+        if path not in candidates and path.is_file():
+            candidates.append(path)
+    return candidates
+
+
+def _codex_desktop_rollout_is_active(mtime, work_status, app_server_alive, now):
+    age = max(0, now - mtime)
+    if not app_server_alive:
+        return False
+    return age <= 600 or (work_status == "busy"
+                          and age <= CODEX_DESKTOP_BUSY_MAX_SECS)
+
+
+def _is_codex_desktop_app_server(args):
+    """Only an app-bundled server proves the Codex Desktop host is alive."""
+    if "app-server" not in args or "--stdio" in args:
+        return False
+    executable = args.split(None, 1)[0]
+    return bool(re.match(
+        r"^/(?:Applications|Users/[^/]+/Applications)/"
+        r"(?:ChatGPT|Codex)[.]app/Contents/(?:Resources|MacOS)/codex$",
+        executable))
+
+
 def _pid_codex_rollout_info(pid):
     """Codex CLI 会长时间 resume 旧 rollout 文件；仅按文件名扫描最近 N 个会漏掉。
     直接读取该 pid 当前打开的 rollout-*.jsonl，并返回该会话的稳定身份。"""
     try:
         out = subprocess.run(["lsof", "-p", str(pid), "-Fn"],
                              capture_output=True, text=True, timeout=8).stdout
-    except Exception:
-        return None
-    try:
         roots = [os.path.realpath(src["path"] / "sessions") + os.sep
                  for src in codex_sources()]
     except Exception:
-        roots = []
+        return None
     best = None
     for line in out.splitlines():
         if not line.startswith("n"):
@@ -3150,22 +4059,25 @@ def _pid_codex_rollout_info(pid):
         if not (name.startswith("rollout-") and name.endswith(".jsonl")):
             continue
         try:
-            rp = os.path.realpath(raw)
+            path = Path(os.path.realpath(raw))
         except (OSError, ValueError):
             continue
-        if roots and not any(rp.startswith(r) for r in roots):
+        if roots and not any(str(path).startswith(root) for root in roots):
             continue
         try:
-            mt = os.path.getmtime(rp)
+            mt = path.stat().st_mtime
         except OSError:
             continue
-        meta = _rollout_meta(Path(rp))
+        meta = _rollout_meta(path)
         if meta.get("subagent"):
             continue
         if best is None or mt > best["mtime"]:
             fm = re.search(r"-([0-9a-f-]{36})[.]jsonl$", name)
             best = {"mtime": mt, "id": meta.get("id") or (fm.group(1) if fm else ""),
                     "cwd": meta.get("cwd") or ""}
+            status = _codex_rollout_work_status(path)
+            if status:
+                best["status"] = status
     return best
 
 
@@ -3261,6 +4173,30 @@ def _active_sort_key(entry):
     return (-activity, str(entry.get("tool") or ""), int(entry.get("pid") or 0))
 
 
+def _qoder_app_active_entries(rows, now, app_alive):
+    """Convert recent App session metadata into short-lived active rows."""
+    if not app_alive:
+        return []
+    out = []
+    for row in rows:
+        try:
+            mt = float(row[3] or 0)
+        except (TypeError, ValueError, IndexError):
+            continue
+        if mt <= 0 or now - mt > QODER_APP_ACTIVE_MAX_SECS:
+            continue
+        cwd = row[1] or ""
+        out.append({"tool": "qoder", "pid": 0, "host": "app",
+                    "source": "qoder_app",
+                    "runtime": _fmt_secs(now - mt),
+                    "runtime_secs": max(0, now - mt),
+                    "last_active_at": mt,
+                    "status": "busy" if now - mt < 30 else "idle",
+                    "id": row[0] or "", "cwd": cwd,
+                    "project": row[2] or (Path(cwd).name if cwd else "Qoder")})
+    return out
+
+
 def _iter_claude_pidfiles():
     """所有 Claude 源的 per-PID 索引文件（多账号合并）。"""
     for src in claude_sources():
@@ -3308,7 +4244,8 @@ def api_active():
 
         ps = subprocess.run(["ps", "-axo", "pid=,ppid=,etime=,args="],
                             capture_output=True, text=True, timeout=10)
-        ppid_of, rows, tool_pids = {}, [], set()
+        ppid_of, rows, tool_pids, codex_app_server_pids = {}, [], set(), set()
+        qoder_app_service_alive = False
         for line in ps.stdout.splitlines():
             parts = line.strip().split(None, 3)
             if len(parts) < 4:
@@ -3319,10 +4256,20 @@ def api_active():
             except ValueError:
                 continue
             ppid_of[pid_i] = ppid_i
+            if re.match(
+                    r"^/(?:Applications|Users/[^/]+/Applications)/Qoder[.]app/"
+                    r"Contents/Resources/app/resources/bin/[^/]+/Qoder\s+start(?:\s|$)",
+                    args):
+                qoder_app_service_alive = True
+                continue
             m = re.match(r"^(?:\S+/)?(claude|codex|qodercli|qoder)(?:\s+(.*))?$", args)
-            if not m or "app-server" in (m.group(2) or ""):
+            if not m:
                 continue
             raw_tool, tool_args = m.group(1), m.group(2) or ""
+            if raw_tool == "codex" and "app-server" in tool_args:
+                if _is_codex_desktop_app_server(args):
+                    codex_app_server_pids.add(pid_i)
+                continue
             tool = "qoder" if raw_tool in ("qodercli", "qoder") else raw_tool
             # AgentDeck's own headless quota probe must never appear as a user session.
             if tool == "qoder" and ("--no-session-persistence" in tool_args
@@ -3394,7 +4341,8 @@ def api_active():
                     e["last_active_at"] = max(e["last_active_at"], info["mtime"])
                     # 当前进程已明确打开某个 rollout 后，该文件的新旧就是该会话的
                     # 结论；不得再按 cwd 回退到同项目另一会话的最近写入时间。
-                    e["status"] = "busy" if now - info["mtime"] < 30 else "idle"
+                    e["status"] = info.get("status") \
+                        or ("busy" if now - info["mtime"] < 30 else "idle")
                     continue
                 # Codex 桌面端 rollout cwd 可能是进程 cwd 的子目录，前缀匹配
                 cands = [mt for c, mt in cwd_mtime.items()
@@ -3448,12 +4396,14 @@ def api_active():
         # 改按 rollout 近期写入 + originator == "Codex Desktop" 识别
         now = time.time()
         term_ids = {e["id"] for e in active if e["tool"] == "codex" and e["id"]}
-        for f in _iter_codex_files(20):
+        for f in _codex_desktop_rollout_candidates():
             try:
                 mt = f.stat().st_mtime
             except OSError:
                 continue
-            if now - mt > 600:        # 10 分钟内有写入才算「正在运行」
+            work_status = _codex_rollout_work_status(f)
+            if not _codex_desktop_rollout_is_active(
+                    mt, work_status, bool(codex_app_server_pids), now):
                 continue
             meta = _rollout_meta(f)
             cwd = meta["cwd"]
@@ -3474,9 +4424,30 @@ def api_active():
                            "runtime": _fmt_secs(now - start),
                            "runtime_secs": max(0, now - start),
                            "last_active_at": mt,
-                           "status": "busy" if now - mt < 30 else "idle",
+                           "status": work_status or ("busy" if now - mt < 30 else "idle"),
                            "id": sid, "cwd": cwd,
                            "project": Path(cwd).name if cwd else "—"})
+
+        # Qoder App 的服务进程是常驻后台，不能把进程本身当成一个活跃会话。
+        # 只将 App 会话索引里近期更新的项目作为短生命周期状态行；写入后 30s
+        # 内为 busy，随后短暂 idle，并在 10 分钟后自动消失。
+        conn = None
+        try:
+            conn = _session_db_connect()
+            qoder_rows = conn.execute("""
+                SELECT session_id, cwd, project, mtime
+                FROM session_index
+                WHERE tool='qoder' AND path LIKE 'qoder-app://%'
+                  AND source_present=1 AND mtime>=?
+                ORDER BY mtime DESC LIMIT 20
+            """, (now - QODER_APP_ACTIVE_MAX_SECS,)).fetchall()
+        except (OSError, sqlite3.Error):
+            qoder_rows = []
+        finally:
+            if conn is not None:
+                conn.close()
+        active.extend(_qoder_app_active_entries(
+            qoder_rows, now, qoder_app_service_alive))
 
         active.sort(key=_active_sort_key)
         return {"active": active, "ts": time.time()}
@@ -5116,6 +6087,11 @@ def api_focus(body):
     pid = None
     # 调用方已知进程 PID（如活跃会话卡片）可直接传入，免去反查
     raw_pid = body.get("pid")
+    if tool == "qoder" and body.get("source") == "qoder_app":
+        proc = subprocess.run(["open", "-a", "Qoder"] + ([cwd] if cwd else []),
+                              capture_output=True, text=True, timeout=10)
+        return {"ok": proc.returncode == 0, "via": "qoder-app", "app": "Qoder",
+                "error": proc.stderr.strip() if proc.returncode else None}
     if isinstance(raw_pid, int) and raw_pid > 0 and _pid_alive(raw_pid):
         pid = raw_pid
     elif tool == "claude" and _ID_RE.match(sid):
@@ -6152,6 +7128,32 @@ def api_resume(body):
     sid = body.get("id", "")
     if tool not in AGENT_IDS or not _ID_RE.match(sid):
         return {"ok": False, "error": "invalid args"}
+
+    if tool == "qoder" and body.get("source") == "qoder_app":
+        if body.get("copy_only") is True:
+            return {"ok": False,
+                    "error": "Qoder App sessions do not expose a resume command"}
+        original_cwd = _normalize_session_cwd(body.get("cwd"))
+        cwd = None
+        if original_cwd:
+            replacement = body.get("replacement_cwd")
+            if replacement is not None:
+                cwd = _remember_session_cwd(original_cwd, replacement)
+                if cwd is None:
+                    return {"ok": False, "error": "invalid replacement directory"}
+            else:
+                cwd = _mapped_session_cwd(original_cwd)
+                if cwd is None and os.path.isdir(original_cwd):
+                    cwd = os.path.realpath(original_cwd)
+            if cwd is None:
+                return {"ok": True, "needs_path": True,
+                        "original_cwd": original_cwd}
+        elif body.get("replacement_cwd") is not None:
+            return {"ok": False, "error": "invalid original directory"}
+        proc = subprocess.run(["open", "-a", "Qoder"] + ([cwd] if cwd else []),
+                              capture_output=True, text=True, timeout=10)
+        return {"ok": proc.returncode == 0, "opened": proc.returncode == 0,
+                "app": "Qoder", "error": proc.stderr.strip() if proc.returncode else None}
 
     # 复合身份里的账号决定 CLI 应读取哪套配置目录。显式传账号时始终固定环境变量，
     # 包括 default：否则用户 shell 里已有的 CLAUDE_CONFIG_DIR/CODEX_HOME 会把恢复

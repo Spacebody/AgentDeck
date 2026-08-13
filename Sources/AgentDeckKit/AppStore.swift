@@ -516,7 +516,7 @@ public final class AppStore: ObservableObject {
         let request = SessionResumeRequest(
             tool: s.tool, id: s.id, cwd: s.cwd ?? "",
             accountId: s.accountId, copyOnly: copyOnly,
-            replacementCwd: replacementCwd)
+            replacementCwd: replacementCwd, source: s.source)
         return try? await api.post("/api/resume", body: request)
     }
 
@@ -545,14 +545,18 @@ public final class AppStore: ObservableObject {
             "tool": s.tool, "id": s.id, "title": s.title ?? "", "cwd": s.cwd ?? "",
             "project": s.project ?? "", "branch": s.branch ?? "", "mtime": s.mtime,
             "account": s.account ?? "", "account_id": s.accountId ?? "",
+            "source": s.source ?? "",
         ]
         _ = try? await api.postJSON("/api/pin", body: ["pinned": !(s.pinned ?? false), "session": session])
         await loadSessionPage(reset: true, generation: generation)
     }
 
     @discardableResult
-    func focus(tool: String, id: String, cwd: String, pid: Int) async -> Bool {
-        let r = try? await api.postJSON("/api/focus", body: ["tool": tool, "session": id, "cwd": cwd, "pid": pid])
+    func focus(tool: String, id: String, cwd: String, pid: Int,
+               source: String? = nil) async -> Bool {
+        var body: [String: Any] = ["tool": tool, "session": id, "cwd": cwd, "pid": pid]
+        if let source { body["source"] = source }
+        let r = try? await api.postJSON("/api/focus", body: body)
         return (r?["ok"] as? Bool) ?? false
     }
 

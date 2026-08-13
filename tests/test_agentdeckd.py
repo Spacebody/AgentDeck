@@ -2,6 +2,7 @@ import json
 import io
 import os
 import plistlib
+import sys
 import tempfile
 import threading
 import time
@@ -1118,6 +1119,59 @@ class SessionIndexTests(unittest.TestCase):
         self.assertEqual(fallback["total"], 1)
         self.assertEqual(fallback["sessions"][0]["title"], "older copy")
 
+    def test_qoder_app_metadata_is_indexed_without_message_content(self):
+        sid = self.session_id(42)
+        self.qoder_sources.append({
+            "id": "default", "label": "Default", "path": self.root / "qoder"})
+        app_entry = {
+            "tool": "qoder", "account_id": "default", "account": "Default",
+            "path": f"qoder-app://{sid}", "inode": 0, "size": 0, "mtime": 42,
+            "preparsed": {"session_id": sid, "title": "Desktop session",
+                          "cwd": "/work/desktop", "project": "desktop", "branch": ""},
+        }
+        with mock.patch.object(daemon, "_qoder_app_session_entries",
+                               return_value=[app_entry]):
+            daemon._session_index_scan()
+        result = daemon._query_session_index(tool="qoder", limit=10)
+        self.assertEqual(result["total"], 1)
+        self.assertEqual(result["sessions"][0]["source"], "qoder_app")
+        self.assertEqual(result["sessions"][0]["title"], "Desktop session")
+
+    def test_unchanged_qoder_app_metadata_is_not_rewritten(self):
+        sid = self.session_id(44)
+        app_entry = {
+            "tool": "qoder", "account_id": "default", "account": "Default",
+            "path": f"qoder-app://{sid}", "inode": 0, "size": 0, "mtime": 44,
+            "preparsed": {"session_id": sid, "title": "Stable desktop session",
+                          "cwd": "/work/desktop", "project": "desktop", "branch": ""},
+        }
+        with mock.patch.object(daemon, "_qoder_app_session_entries",
+                               return_value=[app_entry]), \
+                mock.patch.object(daemon, "_session_file_state_upsert",
+                                  wraps=daemon._session_file_state_upsert) as upsert:
+            daemon._session_index_scan()
+            self.assertEqual(upsert.call_count, 1)
+            daemon._session_index_scan()
+            self.assertEqual(upsert.call_count, 1)
+
+    def test_qoder_app_ipc_outage_keeps_previous_index_snapshot(self):
+        sid = self.session_id(43)
+        app_entry = {
+            "tool": "qoder", "account_id": "default", "account": "Default",
+            "path": f"qoder-app://{sid}", "inode": 0, "size": 0, "mtime": 43,
+            "preparsed": {"session_id": sid, "title": "Keep during outage",
+                          "cwd": "/work/desktop", "project": "desktop", "branch": ""},
+        }
+        daemon._qoder_app_scan_authoritative = True
+        with mock.patch.object(daemon, "_qoder_app_session_entries",
+                               return_value=[app_entry]):
+            daemon._session_index_scan()
+        daemon._qoder_app_scan_authoritative = False
+        with mock.patch.object(daemon, "_qoder_app_session_entries", return_value=[]):
+            daemon._session_index_scan()
+        result = daemon._query_session_index(tool="qoder", limit=10)
+        self.assertEqual(result["sessions"][0]["title"], "Keep during outage")
+
     def test_malformed_cursor_falls_back_to_first_page(self):
         base = self.source()
         self.write_codex(base, 1, "first")
@@ -1131,6 +1185,34 @@ class SessionIndexTests(unittest.TestCase):
 
 
 class ActiveSessionTests(unittest.TestCase):
+    def test_api_active_empty_runtime_and_index_returns_without_error(self):
+        class EmptyCursor:
+            def fetchall(self):
+                return []
+
+        class EmptyConnection:
+            def execute(self, *_args, **_kwargs):
+                return EmptyCursor()
+            def close(self):
+                pass
+
+        with daemon._cache_lock:
+            previous = daemon._ttl_cache.pop("active", None)
+        try:
+            with mock.patch.object(daemon, "_iter_claude_pidfiles", return_value=[]), \
+                    mock.patch.object(daemon.subprocess, "run",
+                                      return_value=SimpleNamespace(stdout="")), \
+                    mock.patch.object(daemon, "_codex_desktop_rollout_candidates",
+                                      return_value=[]), \
+                    mock.patch.object(daemon, "_session_db_connect",
+                                      return_value=EmptyConnection()):
+                self.assertEqual(daemon.api_active()["active"], [])
+        finally:
+            with daemon._cache_lock:
+                daemon._ttl_cache.pop("active", None)
+                if previous is not None:
+                    daemon._ttl_cache["active"] = previous
+
     def test_active_sessions_sort_by_latest_activity_then_stable_tie_breakers(self):
         active = [
             {"tool": "qoder", "pid": 30, "last_active_at": 100},
@@ -1169,6 +1251,112 @@ class ActiveSessionTests(unittest.TestCase):
             self.assertEqual(info["id"], parent_id)
             self.assertEqual(info["cwd"], "/parent")
 
+    def test_codex_rollout_status_stays_busy_during_silent_tool_execution(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "rollout.jsonl"
+            _jsonl(path, [
+                {"type": "event_msg", "payload": {"type": "task_started"}},
+                {"type": "response_item", "payload": {
+                    "type": "custom_tool_call", "name": "long-running"}},
+            ])
+            os.utime(path, (100, 100))
+
+            self.assertEqual(daemon._codex_rollout_work_status(path), "busy")
+
+    def test_codex_rollout_status_finds_boundary_before_large_silent_payload(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "rollout.jsonl"
+            _jsonl(path, [
+                {"type": "event_msg", "payload": {"type": "task_started"}},
+                {"type": "response_item", "payload": {
+                    "type": "custom_tool_call_output", "output": "x" * 600_000}},
+            ])
+
+            self.assertEqual(daemon._codex_rollout_work_status(path), "busy")
+
+    def test_codex_rollout_status_cache_processes_appended_completion(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "rollout.jsonl"
+            _jsonl(path, [
+                {"type": "event_msg", "payload": {"type": "task_started"}},
+            ])
+            self.assertEqual(daemon._codex_rollout_work_status(path), "busy")
+            with path.open("a") as stream:
+                stream.write(json.dumps({
+                    "type": "event_msg", "payload": {"type": "task_complete"}
+                }) + "\n")
+            self.assertEqual(daemon._codex_rollout_work_status(path), "idle")
+
+    def test_codex_rollout_status_reparses_long_partial_final_line(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "rollout.jsonl"
+            event = json.dumps({
+                "type": "event_msg", "padding": "x" * 1000,
+                "payload": {"type": "task_started"},
+            }).encode()
+            path.write_bytes(event[:-1])
+            self.assertIsNone(daemon._codex_rollout_work_status(path))
+            with path.open("ab") as stream:
+                stream.write(event[-1:] + b"\n")
+            self.assertEqual(daemon._codex_rollout_work_status(path), "busy")
+
+    def test_busy_desktop_rollout_has_bounded_silent_grace(self):
+        self.assertTrue(daemon._codex_desktop_rollout_is_active(
+            mtime=100, work_status="busy", app_server_alive=True,
+            now=100 + daemon.CODEX_DESKTOP_BUSY_MAX_SECS))
+        self.assertFalse(daemon._codex_desktop_rollout_is_active(
+            mtime=100, work_status="busy", app_server_alive=False, now=10_000))
+        self.assertFalse(daemon._codex_desktop_rollout_is_active(
+            mtime=100, work_status="busy", app_server_alive=True,
+            now=101 + daemon.CODEX_DESKTOP_BUSY_MAX_SECS))
+        self.assertFalse(daemon._codex_desktop_rollout_is_active(
+            mtime=9_500, work_status="idle", app_server_alive=False, now=10_000))
+        self.assertTrue(daemon._codex_desktop_rollout_is_active(
+            mtime=9_500, work_status="idle", app_server_alive=True, now=10_000))
+
+    def test_desktop_app_server_excludes_agentdeck_and_editor_helpers(self):
+        self.assertTrue(daemon._is_codex_desktop_app_server(
+            "/Applications/ChatGPT.app/Contents/Resources/codex "
+            "-c features.code_mode_host=true app-server --analytics-default-enabled"))
+        self.assertFalse(daemon._is_codex_desktop_app_server(
+            "/opt/homebrew/bin/codex app-server --stdio"))
+        self.assertFalse(daemon._is_codex_desktop_app_server(
+            "/Users/test/.vscode/extensions/openai/bin/codex app-server"))
+
+    def test_desktop_candidates_keep_known_busy_rollout_after_recent_cutoff(self):
+        old = Path("/tmp/old.jsonl")
+        recent = [Path(f"/tmp/recent-{index}.jsonl") for index in range(20)]
+        with daemon._codex_work_status_lock:
+            previous = dict(daemon._codex_work_status_cache)
+            daemon._codex_work_status_cache.clear()
+            daemon._codex_work_status_cache[str(old)] = {"status": "busy"}
+        try:
+            with mock.patch.object(daemon, "_recent_codex_activity_files",
+                                   return_value=recent), \
+                    mock.patch.object(Path, "is_file", return_value=True):
+                candidates = daemon._codex_desktop_rollout_candidates()
+            self.assertEqual(candidates[:-1], recent)
+            self.assertEqual(candidates[-1], old)
+        finally:
+            with daemon._codex_work_status_lock:
+                daemon._codex_work_status_cache.clear()
+                daemon._codex_work_status_cache.update(previous)
+
+    def test_codex_rollout_status_uses_latest_completion_boundary(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "rollout.jsonl"
+            _jsonl(path, [
+                {"type": "event_msg", "payload": {"type": "task_started"}},
+                {"type": "event_msg", "payload": {"type": "task_complete"}},
+            ])
+            self.assertEqual(daemon._codex_rollout_work_status(path), "idle")
+
+            _jsonl(path, [
+                {"type": "event_msg", "payload": {"type": "task_started"}},
+                {"type": "event_msg", "payload": {"type": "turn_aborted"}},
+            ])
+            self.assertEqual(daemon._codex_rollout_work_status(path), "idle")
+
     def test_qoder_activity_uses_newest_open_main_transcript(self):
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
@@ -1196,6 +1384,23 @@ class ActiveSessionTests(unittest.TestCase):
 
             self.assertEqual(info, {
                 "id": newer_id, "cwd": "/work/newer", "mtime": 200})
+
+    def test_qoder_app_active_rows_require_live_host_and_expire(self):
+        sid = "11111111-1111-1111-1111-111111111111"
+        rows = [(sid, "/work/app", "app", 990.0)]
+        active = daemon._qoder_app_active_entries(rows, now=1000, app_alive=True)
+        self.assertEqual(len(active), 1)
+        self.assertEqual(active[0]["status"], "busy")
+        self.assertEqual(active[0]["source"], "qoder_app")
+        self.assertEqual(active[0]["host"], "app")
+        self.assertEqual(
+            daemon._qoder_app_active_entries(rows, now=1000, app_alive=False), [])
+        self.assertEqual(daemon._qoder_app_active_entries(
+            rows, now=991 + daemon.QODER_APP_ACTIVE_MAX_SECS + 1,
+            app_alive=True), [])
+
+    def test_codex_desktop_orphan_busy_grace_is_at_most_thirty_minutes(self):
+        self.assertLessEqual(daemon.CODEX_DESKTOP_BUSY_MAX_SECS, 30 * 60)
 
 
 class ResumeCommandTests(unittest.TestCase):
@@ -1893,6 +2098,143 @@ class CodexQuotaRealtimeTests(unittest.TestCase):
             self.assertEqual(
                 daemon._force_quota_refreshes(settings, ttl=600), unavailable)
 
+    def test_normal_quota_refreshes_enforces_all_provider_budget(self):
+        settings = {**daemon.DEFAULT_SETTINGS,
+                    "show_claude": True, "show_codex": True, "show_qoder": True}
+        gate = threading.Event()
+        def blocked(*_args, **_kwargs):
+            gate.wait(1)
+            return []
+        started = time.monotonic()
+        try:
+            with mock.patch.object(daemon, "_claude_quota_accounts",
+                                   side_effect=blocked), \
+                    mock.patch.object(daemon, "_qoder_quota_accounts",
+                                      side_effect=blocked), \
+                    mock.patch.object(daemon, "_codex_quota_accounts",
+                                      side_effect=blocked), \
+                    mock.patch.object(daemon._codex_quota_manager,
+                                      "ensure_fresh"):
+                accounts = daemon._normal_quota_accounts(settings, 300, budget=0.05)
+        finally:
+            gate.set()
+        self.assertLess(time.monotonic() - started, 0.5)
+        self.assertTrue(accounts["claude"][0].get("stale")
+                        or not accounts["claude"][0].get("ok"))
+        self.assertTrue(accounts["qoder"][0].get("stale")
+                        or not accounts["qoder"][0].get("ok"))
+
+    def test_api_quota_normal_request_honors_shared_provider_budget(self):
+        settings = {**daemon.DEFAULT_SETTINGS,
+                    "show_claude": True, "show_codex": True, "show_qoder": True}
+        gate = threading.Event()
+        def blocked(*_args, **_kwargs):
+            gate.wait(1)
+            return []
+        started = time.monotonic()
+        try:
+            with mock.patch.object(daemon, "get_settings", return_value=settings), \
+                    mock.patch.object(daemon, "QUOTA_NORMAL_BUDGET_SECS", 0.05), \
+                    mock.patch.object(daemon, "_claude_quota_accounts",
+                                      side_effect=blocked), \
+                    mock.patch.object(daemon, "_qoder_quota_accounts",
+                                      side_effect=blocked), \
+                    mock.patch.object(daemon, "_codex_quota_accounts",
+                                      side_effect=blocked), \
+                    mock.patch.object(daemon._codex_quota_manager,
+                                      "ensure_fresh"):
+                result = daemon.api_quota()
+        finally:
+            gate.set()
+        self.assertLess(time.monotonic() - started, 0.5)
+        self.assertEqual([agent["id"] for agent in result["agents"]],
+                         ["claude", "codex", "qoder"])
+
+    def test_quota_timeout_preserves_known_multi_account_shape(self):
+        settings = {**daemon.DEFAULT_SETTINGS,
+                    "claude_dirs": ["/tmp/claude-work"],
+                    "qoder_dirs": ["/tmp/qoder-work"]}
+        claude_sources = [
+            {"id": "default", "label": "默认", "is_default": True},
+            {"id": "work", "label": "work", "is_default": False},
+        ]
+        qoder_sources = [
+            {"id": "default", "label": "默认", "is_default": True},
+            {"id": "work", "label": "work", "is_default": False},
+        ]
+        with daemon._cache_lock:
+            previous_claude = daemon._ttl_cache.get("sources_claude")
+            previous_qoder = daemon._ttl_cache.get("sources_qoder")
+            daemon._ttl_cache["sources_claude"] = (time.time() + 60, claude_sources)
+            daemon._ttl_cache["sources_qoder"] = (time.time() + 60, qoder_sources)
+        try:
+            claude = daemon._quota_timeout_accounts("claude", settings)
+            qoder = daemon._quota_timeout_accounts("qoder", settings)
+        finally:
+            with daemon._cache_lock:
+                if previous_claude is None:
+                    daemon._ttl_cache.pop("sources_claude", None)
+                else:
+                    daemon._ttl_cache["sources_claude"] = previous_claude
+                if previous_qoder is None:
+                    daemon._ttl_cache.pop("sources_qoder", None)
+                else:
+                    daemon._ttl_cache["sources_qoder"] = previous_qoder
+        self.assertEqual([item["account_id"] for item in claude], ["default", "work"])
+        self.assertEqual([item["account_id"] for item in qoder], ["default", "work"])
+
+    def test_codex_timeout_never_uses_qoder_cache(self):
+        source = {"id": "default", "label": "默认", "is_default": True,
+                  "path": Path("/tmp/codex")}
+        codex_value = {"ok": True, "source": "codex_app_server", "windows": []}
+        qoder_value = {"ok": True, "source": "qoder_app", "windows": []}
+        with daemon._cache_lock:
+            previous_sources = daemon._ttl_cache.get("sources_codex")
+            daemon._ttl_cache["sources_codex"] = (time.time() + 60, [source])
+        with daemon._codex_quota_manager._lock:
+            previous_states = daemon._codex_quota_manager._states
+            daemon._codex_quota_manager._states = {
+                os.path.realpath(source["path"]): {"quota": codex_value}}
+        try:
+            with mock.patch.object(
+                    daemon, "_qoder_cached_snapshot",
+                    return_value=qoder_value) as qoder_cache:
+                account = daemon._quota_timeout_accounts(
+                    "codex", daemon.DEFAULT_SETTINGS)[0]
+        finally:
+            with daemon._cache_lock:
+                if previous_sources is None:
+                    daemon._ttl_cache.pop("sources_codex", None)
+                else:
+                    daemon._ttl_cache["sources_codex"] = previous_sources
+            with daemon._codex_quota_manager._lock:
+                daemon._codex_quota_manager._states = previous_states
+        self.assertEqual(account["source"], "codex_app_server")
+        self.assertTrue(account["stale"])
+        qoder_cache.assert_not_called()
+
+    def test_codex_timeout_preserves_multi_account_shape(self):
+        sources = [
+            {"id": "default", "label": "默认", "is_default": True,
+             "path": Path("/tmp/codex")},
+            {"id": "work", "label": "work", "is_default": False,
+             "path": Path("/tmp/codex-work")},
+        ]
+        with daemon._cache_lock:
+            previous = daemon._ttl_cache.get("sources_codex")
+            daemon._ttl_cache["sources_codex"] = (time.time() + 60, sources)
+        try:
+            accounts = daemon._quota_timeout_accounts(
+                "codex", daemon.DEFAULT_SETTINGS)
+        finally:
+            with daemon._cache_lock:
+                if previous is None:
+                    daemon._ttl_cache.pop("sources_codex", None)
+                else:
+                    daemon._ttl_cache["sources_codex"] = previous
+        self.assertEqual([item["account_id"] for item in accounts],
+                         ["default", "work"])
+
     def test_stopping_manager_cannot_spawn_a_new_app_server(self):
         manager = daemon.CodexQuotaManager()
         manager._stop.set()
@@ -2258,6 +2600,480 @@ class PersistenceAndUpdateTests(unittest.TestCase):
 
 
 class QoderSupportTests(unittest.TestCase):
+    def setUp(self):
+        with daemon._cache_lock:
+            self.cached_app_sessions = daemon._ttl_cache.pop(
+                "qoder_app_session_entries", None)
+
+    def tearDown(self):
+        with daemon._cache_lock:
+            daemon._ttl_cache.pop("qoder_app_session_entries", None)
+            if self.cached_app_sessions is not None:
+                daemon._ttl_cache["qoder_app_session_entries"] = \
+                    self.cached_app_sessions
+
+    def test_qoder_ipc_client_rejects_unlisted_method(self):
+        with self.assertRaises(ValueError):
+            daemon._qoder_app_request("auth/token")
+
+    def test_qoder_ipc_client_decodes_lsp_frame_and_checks_response_id(self):
+        class FakeSocket:
+            def __init__(self, bad_id=False):
+                self.bad_id = bad_id
+                self.sent = b""
+                self.response = b""
+
+            def __enter__(self): return self
+            def __exit__(self, *_): return False
+            def settimeout(self, _): pass
+            def connect(self, _): pass
+            def getsockopt(self, *_):
+                return (123).to_bytes(4, byteorder=sys.byteorder, signed=True)
+            def sendall(self, data):
+                self.sent = data
+                request_id = json.loads(data.split(b"\r\n\r\n", 1)[1])["id"]
+                body = json.dumps({"jsonrpc": "2.0",
+                                   "id": "wrong" if self.bad_id else request_id,
+                                   "result": {"totalUsagePercentage": 7}}).encode()
+                self.response = (f"Content-Length: {len(body)}\r\n\r\n".encode()
+                                 + body)
+            def recv(self, size):
+                chunk, self.response = self.response[:size], self.response[size:]
+                return chunk
+
+        good = FakeSocket()
+        with mock.patch.object(daemon, "_qoder_app_ipc_endpoint",
+                               return_value={"path": "/tmp/qoder.sock", "pid": 123,
+                                             "dev": 1, "ino": 2}), \
+                mock.patch.object(daemon.os, "lstat", return_value=SimpleNamespace(
+                    st_dev=1, st_ino=2)), \
+                mock.patch.object(daemon.socket, "socket", return_value=good):
+            self.assertEqual(daemon._qoder_app_request("credit/usage"),
+                             {"totalUsagePercentage": 7})
+        self.assertIn(b'"method":"credit/usage"', good.sent)
+
+        bad = FakeSocket(bad_id=True)
+        with mock.patch.object(daemon, "_qoder_app_ipc_endpoint",
+                               return_value={"path": "/tmp/qoder.sock", "pid": 123,
+                                             "dev": 1, "ino": 2}), \
+                mock.patch.object(daemon.os, "lstat", return_value=SimpleNamespace(
+                    st_dev=1, st_ino=2)), \
+                mock.patch.object(daemon.socket, "socket", return_value=bad), \
+                self.assertRaises(daemon.QoderAppUnavailable):
+            daemon._qoder_app_request("credit/usage")
+
+    def test_qoder_ipc_client_rejects_wrong_peer_pid(self):
+        class FakeSocket:
+            def __enter__(self): return self
+            def __exit__(self, *_): return False
+            def settimeout(self, _): pass
+            def connect(self, _): pass
+            def getsockopt(self, *_):
+                return (999).to_bytes(4, byteorder=sys.byteorder, signed=True)
+
+        endpoint = {"path": "/tmp/qoder.sock", "pid": 123,
+                    "dev": 1, "ino": 2}
+        with mock.patch.object(daemon, "_qoder_app_ipc_endpoint",
+                               return_value=endpoint), \
+                mock.patch.object(daemon.os, "lstat", return_value=SimpleNamespace(
+                    st_dev=1, st_ino=2)), \
+                mock.patch.object(daemon.socket, "socket", return_value=FakeSocket()), \
+                self.assertRaises(daemon.QoderAppUnavailable):
+            daemon._qoder_app_request("credit/usage")
+
+    def test_qoder_ipc_read_uses_absolute_deadline(self):
+        sock = mock.Mock()
+        sock.recv.return_value = b"x"
+        with mock.patch.object(daemon.time, "monotonic", side_effect=[0.0, 0.2, 1.1]), \
+                self.assertRaisesRegex(daemon.QoderAppUnavailable, "timed out"):
+            daemon._qoder_ipc_recv(sock, 3, deadline=1.0)
+
+    def test_qoder_ipc_endpoint_rejects_socket_outside_private_cache(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "cache"
+            root.mkdir()
+            outside = Path(td) / "outside.sock"
+            (root / ".info.json").write_text(json.dumps({
+                "pid": 123, "ipcServerPath": str(outside)}))
+            (root / ".process-meta.json").write_text(json.dumps({
+                "pid": 123,
+                "binaryPath": "/Applications/Qoder.app/Contents/Resources/Qoder"}))
+            socket_stat = SimpleNamespace(st_mode=daemon.stat.S_IFSOCK | 0o600,
+                                          st_uid=os.getuid())
+            with mock.patch.object(daemon, "QODER_APP_CACHE", root), \
+                    mock.patch.object(daemon, "_pid_alive", return_value=True), \
+                    mock.patch.object(daemon.os, "lstat", return_value=socket_stat), \
+                    self.assertRaises(daemon.QoderAppUnavailable):
+                daemon._qoder_app_ipc_endpoint()
+
+    def test_qoder_signature_cache_identity_includes_service_binary(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = Path(td) / "Qoder.app"
+            seal = app / "Contents" / "_CodeSignature" / "CodeResources"
+            binary = app / "Contents" / "Resources" / "Qoder"
+            seal.parent.mkdir(parents=True)
+            binary.parent.mkdir(parents=True)
+            seal.write_bytes(b"seal")
+            binary.write_bytes(b"one")
+            checked = daemon.subprocess.CompletedProcess([], 0, stdout="", stderr="")
+            daemon._qoder_bundle_validation.clear()
+            with mock.patch.object(daemon.subprocess, "run",
+                                   return_value=checked) as run:
+                daemon._qoder_verify_app_bundle(str(app), str(binary))
+                daemon._qoder_verify_app_bundle(str(app), str(binary))
+                self.assertEqual(run.call_count, 2)
+                binary.write_bytes(b"changed")
+                daemon._qoder_verify_app_bundle(str(app), str(binary))
+                self.assertEqual(run.call_count, 4)
+
+    def test_qoder_signature_cache_identity_includes_resource_seal(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = Path(td) / "Qoder.app"
+            seal = app / "Contents" / "_CodeSignature" / "CodeResources"
+            binary = app / "Contents" / "Resources" / "Qoder"
+            seal.parent.mkdir(parents=True)
+            binary.parent.mkdir(parents=True)
+            seal.write_bytes(b"seal")
+            binary.write_bytes(b"service")
+            checked = daemon.subprocess.CompletedProcess([], 0, stdout="", stderr="")
+            daemon._qoder_bundle_validation.clear()
+            with mock.patch.object(daemon.subprocess, "run",
+                                   return_value=checked) as run:
+                daemon._qoder_verify_app_bundle(str(app), str(binary))
+                daemon._qoder_verify_app_bundle(str(app), str(binary))
+                self.assertEqual(run.call_count, 2)
+                seal.write_bytes(b"changed")
+                daemon._qoder_verify_app_bundle(str(app), str(binary))
+                self.assertEqual(run.call_count, 4)
+
+    def test_qoder_signature_cache_rejects_change_during_verification(self):
+        with tempfile.TemporaryDirectory() as td:
+            app = Path(td) / "Qoder.app"
+            seal = app / "Contents" / "_CodeSignature" / "CodeResources"
+            binary = app / "Contents" / "Resources" / "Qoder"
+            seal.parent.mkdir(parents=True)
+            binary.parent.mkdir(parents=True)
+            seal.write_bytes(b"seal")
+            binary.write_bytes(b"one")
+            checked = daemon.subprocess.CompletedProcess([], 0, stdout="", stderr="")
+            calls = 0
+            def run(*_args, **_kwargs):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    binary.write_bytes(b"changed")
+                return checked
+            daemon._qoder_bundle_validation.clear()
+            with mock.patch.object(daemon.subprocess, "run", side_effect=run), \
+                    self.assertRaisesRegex(
+                        daemon.QoderAppUnavailable, "changed during"):
+                daemon._qoder_verify_app_bundle(str(app), str(binary))
+
+    def test_qoder_sources_keeps_cli_process_environment_discovery(self):
+        with daemon._cache_lock:
+            previous = daemon._ttl_cache.pop("sources_qoder", None)
+        try:
+            with mock.patch.object(daemon, "_discover", return_value=[]) as discover:
+                daemon.qoder_sources()
+            self.assertEqual(discover.call_args.kwargs["proc_tools"], ("qodercli",))
+        finally:
+            with daemon._cache_lock:
+                daemon._ttl_cache.pop("sources_qoder", None)
+                if previous is not None:
+                    daemon._ttl_cache["sources_qoder"] = previous
+
+    def test_qoder_app_quota_uses_allowlisted_ipc_and_drops_identity(self):
+        usage = {
+            "userId": "must-not-leak", "userType": "pro",
+            "totalUsagePercentage": 35,
+            "userQuota": {"total": 100, "used": 35, "remaining": 65,
+                          "percentage": 35, "unit": "credits"},
+        }
+        with mock.patch.object(daemon, "_qoder_app_request",
+                               return_value=usage) as request:
+            quota = daemon._qoder_app_quota()
+        request.assert_called_once_with("credit/usage", timeout=8)
+        self.assertEqual(quota["source"], "qoder_app")
+        self.assertNotIn("must-not-leak", json.dumps(quota))
+
+    def test_default_qoder_prefers_app_and_falls_back_to_cli(self):
+        source = {"path": Path("/tmp/qoder-test"), "is_default": True}
+        app_quota = {"ok": True, "source": "qoder_app", "windows": []}
+        with mock.patch.object(daemon, "_qoder_app_quota", return_value=app_quota), \
+                mock.patch.object(daemon, "_qoder_cli_quota_for") as cli:
+            self.assertEqual(daemon._qoder_quota_for(source), app_quota)
+            cli.assert_not_called()
+        cli_quota = {"ok": True, "source": "qoder_cli", "windows": []}
+        with mock.patch.object(daemon, "_qoder_app_quota",
+                               side_effect=daemon.QoderAppUnavailable("offline")), \
+                mock.patch.object(daemon, "_qoder_cli_quota_for",
+                                  return_value=cli_quota):
+            self.assertEqual(daemon._qoder_quota_for(source), cli_quota)
+
+    def test_qoder_cache_only_prefers_cli_success_over_app_failure(self):
+        source = {"id": "default", "label": "Default", "is_default": True,
+                  "path": Path("/tmp/qoder-test")}
+        snapshots = {
+            "qoder_app_quota": {"ok": False, "error": "app unavailable"},
+            "qoder_quota": {"ok": True, "source": "qoder_cli", "windows": []},
+        }
+        with mock.patch.object(daemon, "qoder_sources", return_value=[source]), \
+                mock.patch.object(daemon, "_qoder_cached_snapshot",
+                                  side_effect=lambda key: snapshots.get(key)):
+            account = daemon._qoder_quota_accounts(cache_only=True)[0]
+        self.assertTrue(account["ok"])
+        self.assertEqual(account["source"], "qoder_cli")
+
+    def test_qoder_normal_refresh_stays_within_client_budget(self):
+        source = {"id": "default", "label": "Default", "is_default": True,
+                  "path": Path("/tmp/qoder-test")}
+        calls = []
+        app_failure = {"ok": False, "error": "app timed out"}
+        cli_success = {"ok": True, "source": "qoder_cli", "windows": []}
+        def resilient(key, _ttl, fn, deadline):
+            result = fn(max(0.1, deadline - daemon.time.monotonic()))
+            calls.append((key, result))
+            return result
+        with mock.patch.object(daemon, "qoder_sources", return_value=[source]), \
+                mock.patch.object(daemon, "_qoder_resilient", side_effect=resilient), \
+                mock.patch.object(daemon, "_qoder_app_quota",
+                                  side_effect=lambda timeout: (
+                                      calls.append(("app_timeout", timeout)) or app_failure)), \
+                mock.patch.object(daemon, "_qoder_cli_quota_for",
+                                  side_effect=lambda _src, timeout: (
+                                      calls.append(("cli_timeout", timeout)) or cli_success)):
+            account = daemon._qoder_quota_accounts(budget=18)[0]
+        app_timeout = next(value for key, value in calls if key == "app_timeout")
+        cli_timeout = next(value for key, value in calls if key == "cli_timeout")
+        self.assertLessEqual(app_timeout, 7.2)
+        self.assertLessEqual(cli_timeout, 18)
+        self.assertEqual(account["source"], "qoder_cli")
+
+    def test_qoder_app_session_metadata_never_persists_chat_records(self):
+        sid = "00000000-0000-0000-0000-000000000123"
+        metadata = daemon._qoder_app_session_metadata({
+            "sessionId": sid, "title": "Implement App support",
+            "project_uri": "file:///work/qoder", "updatedAt": 1_800_000_000_000,
+            "chatRecords": [{"message": "private body"}],
+            "userId": "private-user",
+        }, "/work/sample.code-workspace")
+        self.assertEqual(metadata["session_id"], sid)
+        self.assertEqual(metadata["cwd"], "/work/qoder")
+        self.assertNotIn("private body", json.dumps(metadata))
+        self.assertNotIn("private-user", json.dumps(metadata))
+
+    def test_qoder_app_session_metadata_filters_side_tasks(self):
+        item = {"sessionId": "00000000-0000-0000-0000-000000000123",
+                "title": "hidden", "sessionType": "side_task"}
+        self.assertIsNone(daemon._qoder_app_session_metadata(item, "/work/test"))
+
+    def test_qoder_app_session_scan_is_not_authoritative_on_protocol_error(self):
+        with mock.patch.object(daemon, "_qoder_app_available", return_value=True), \
+                mock.patch.object(daemon, "_qoder_app_workspace_paths",
+                                  return_value=["/work/qoder"]), \
+                mock.patch.object(daemon, "_qoder_app_request",
+                                  return_value=({"unexpected": True}, 128)):
+            self.assertEqual(daemon._qoder_app_session_entries(), [])
+        self.assertFalse(daemon._qoder_app_scan_authoritative)
+
+    def test_qoder_app_empty_workspace_snapshot_is_authoritative(self):
+        with mock.patch.object(daemon, "_qoder_app_available", return_value=True), \
+                mock.patch.object(daemon, "_qoder_app_workspace_paths",
+                                  return_value=([], True)):
+            self.assertEqual(daemon._qoder_app_session_entries(), [])
+        self.assertTrue(daemon._qoder_app_scan_authoritative)
+
+    def test_qoder_app_session_scan_is_short_cached(self):
+        with mock.patch.object(daemon, "_qoder_app_session_entries_uncached",
+                               return_value=[]) as scan:
+            daemon._qoder_app_scan_authoritative = True
+            daemon._qoder_app_session_entries()
+            daemon._qoder_app_session_entries()
+        scan.assert_called_once()
+
+    def test_qoder_app_session_scan_is_not_authoritative_on_item_schema_drift(self):
+        with mock.patch.object(daemon, "_qoder_app_available", return_value=True), \
+                mock.patch.object(daemon, "_qoder_app_workspace_paths",
+                                  return_value=["/work/qoder"]), \
+                mock.patch.object(daemon, "_qoder_app_request",
+                                  return_value=([{"newSessionShape": True}], 128)):
+            self.assertEqual(daemon._qoder_app_session_entries(), [])
+        self.assertFalse(daemon._qoder_app_scan_authoritative)
+
+    def test_qoder_app_session_scan_is_not_authoritative_when_truncated(self):
+        item = {"sessionId": "00000000-0000-0000-0000-000000000123",
+                "title": "kept"}
+        with mock.patch.object(daemon, "_QODER_APP_MAX_SESSIONS_PER_WORKSPACE", 1), \
+                mock.patch.object(daemon, "_qoder_app_available", return_value=True), \
+                mock.patch.object(daemon, "_qoder_app_workspace_paths",
+                                  return_value=["/work/qoder"]), \
+                mock.patch.object(daemon, "_qoder_app_request",
+                                  return_value=([item, item], 256)):
+            entries = daemon._qoder_app_session_entries()
+        self.assertEqual(len(entries), 1)
+        self.assertFalse(daemon._qoder_app_scan_authoritative)
+
+    def test_qoder_app_workspace_discovery_keeps_moved_path(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            storage = root / "storage" / "one"
+            storage.mkdir(parents=True)
+            missing = root / "moved-project"
+            (storage / "workspace.json").write_text(json.dumps({
+                "folder": missing.as_uri()}))
+            with mock.patch.object(daemon, "QODER_APP_WORKSPACES", root / "storage"):
+                self.assertEqual(daemon._qoder_app_workspace_paths(),
+                                 [os.path.realpath(missing)])
+
+    def test_qoder_workspace_discovery_skips_symlink_and_oversized_metadata(self):
+        with tempfile.TemporaryDirectory() as td:
+            storage = Path(td) / "storage"
+            target = Path(td) / "target.json"
+            target.write_text(json.dumps({"folder": Path(td).as_uri()}))
+            linked = storage / "linked"
+            linked.mkdir(parents=True)
+            (linked / "workspace.json").symlink_to(target)
+            large = storage / "large"
+            large.mkdir()
+            (large / "workspace.json").write_bytes(
+                b"x" * (daemon._QODER_WORKSPACE_METADATA_MAX_BYTES + 1))
+            with mock.patch.object(daemon, "QODER_APP_WORKSPACES", storage):
+                self.assertEqual(daemon._qoder_app_workspace_paths(), [])
+
+    def test_qoder_workspace_discovery_marks_corrupt_metadata_incomplete(self):
+        with tempfile.TemporaryDirectory() as td:
+            storage = Path(td) / "storage"
+            broken = storage / "broken"
+            broken.mkdir(parents=True)
+            (broken / "workspace.json").write_text("not-json")
+            with mock.patch.object(daemon, "QODER_APP_WORKSPACES", storage):
+                self.assertEqual(
+                    daemon._qoder_app_workspace_paths(include_status=True),
+                    ([], False))
+
+    def test_qoder_workspace_discovery_does_not_block_on_fifo(self):
+        with tempfile.TemporaryDirectory() as td:
+            storage = Path(td) / "storage"
+            fifo_dir = storage / "fifo"
+            fifo_dir.mkdir(parents=True)
+            os.mkfifo(fifo_dir / "workspace.json")
+            started = time.monotonic()
+            with mock.patch.object(daemon, "QODER_APP_WORKSPACES", storage):
+                self.assertEqual(daemon._qoder_app_workspace_paths(), [])
+            self.assertLess(time.monotonic() - started, 0.5)
+
+    def test_qoder_app_session_scan_total_limit_preserves_old_snapshot(self):
+        first = {"sessionId": "00000000-0000-0000-0000-000000000123",
+                 "title": "one"}
+        second = {"sessionId": "00000000-0000-0000-0000-000000000124",
+                  "title": "two"}
+        response = ([first, second], 256)
+        with mock.patch.object(daemon, "_QODER_APP_MAX_TOTAL_SESSIONS", 1), \
+                mock.patch.object(daemon, "_qoder_app_available", return_value=True), \
+                mock.patch.object(daemon, "_qoder_app_workspace_paths",
+                                  return_value=["/work/qoder"]), \
+                mock.patch.object(daemon, "_qoder_app_request",
+                                  return_value=response):
+            daemon._qoder_app_session_entries()
+        self.assertFalse(daemon._qoder_app_scan_authoritative)
+
+    def test_qoder_app_scan_enforces_remaining_bytes_before_read(self):
+        observed_limits = []
+        item = {"sessionId": "00000000-0000-0000-0000-000000000123",
+                "title": "one"}
+        def request(*_args, **kwargs):
+            observed_limits.append(kwargs["max_body"])
+            return [item], 60
+        with mock.patch.object(daemon, "_QODER_APP_MAX_SCAN_BYTES", 100), \
+                mock.patch.object(daemon, "_qoder_app_available", return_value=True), \
+                mock.patch.object(daemon, "_qoder_app_workspace_paths",
+                                  return_value=["/work/one", "/work/two"]), \
+                mock.patch.object(daemon, "_qoder_app_request",
+                                  side_effect=request):
+            daemon._qoder_app_session_entries()
+        self.assertEqual(observed_limits, [100, 40])
+
+    def test_qoder_app_session_scan_has_one_global_deadline(self):
+        observed_timeouts = []
+        def blocked(*_args, **kwargs):
+            observed_timeouts.append(kwargs["timeout"])
+            time.sleep(kwargs["timeout"])
+            raise daemon.QoderAppUnavailable("late")
+        started = time.monotonic()
+        with mock.patch.object(daemon, "_QODER_APP_SCAN_DEADLINE_SECS", 0.05), \
+                mock.patch.object(daemon, "_qoder_app_available", return_value=True), \
+                mock.patch.object(daemon, "_qoder_app_workspace_paths",
+                                  return_value=[f"/work/{i}" for i in range(8)]), \
+                mock.patch.object(daemon, "_qoder_app_request",
+                                  side_effect=blocked):
+            self.assertEqual(daemon._qoder_app_session_entries(), [])
+        self.assertLess(time.monotonic() - started, 0.5)
+        self.assertLessEqual(sum(observed_timeouts), 0.06)
+        self.assertFalse(daemon._qoder_app_scan_authoritative)
+
+    def test_qoder_app_resume_opens_app_without_creating_cli_command(self):
+        with tempfile.TemporaryDirectory() as td:
+            project = Path(td) / "qoder"
+            project.mkdir()
+            body = {"tool": "qoder",
+                    "id": "00000000-0000-0000-0000-000000000123",
+                    "source": "qoder_app", "cwd": str(project)}
+            completed = daemon.subprocess.CompletedProcess([], 0, stdout="", stderr="")
+            with mock.patch.object(daemon.subprocess, "run",
+                                   return_value=completed) as run:
+                result = daemon.api_resume(body)
+        self.assertTrue(result["opened"])
+        self.assertEqual(run.call_args.args[0],
+                         ["open", "-a", "Qoder", os.path.realpath(project)])
+
+    def test_qoder_app_focus_never_selects_matching_cli_process(self):
+        body = {"tool": "qoder", "session":
+                "00000000-0000-0000-0000-000000000123",
+                "source": "qoder_app", "cwd": "/work/qoder"}
+        completed = daemon.subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        with mock.patch.object(daemon, "_find_qoder_pid") as find_cli, \
+                mock.patch.object(daemon.subprocess, "run",
+                                  return_value=completed) as run:
+            result = daemon.api_focus(body)
+        self.assertTrue(result["ok"])
+        find_cli.assert_not_called()
+        self.assertEqual(run.call_args.args[0], ["open", "-a", "Qoder", "/work/qoder"])
+
+    def test_qoder_app_resume_uses_saved_path_mapping(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            old = root / "old"
+            new = root / "new"
+            new.mkdir()
+            mappings = root / "mappings.json"
+            mappings.write_text(json.dumps({
+                "version": 1, "mappings": {str(old): str(new)}}))
+            body = {"tool": "qoder",
+                    "id": "00000000-0000-0000-0000-000000000123",
+                    "source": "qoder_app", "cwd": str(old)}
+            completed = daemon.subprocess.CompletedProcess([], 0, stdout="", stderr="")
+            with mock.patch.object(daemon, "PATH_MAPPINGS_FILE", mappings), \
+                    mock.patch.object(daemon.subprocess, "run",
+                                      return_value=completed) as run:
+                result = daemon.api_resume(body)
+        self.assertTrue(result["opened"])
+        self.assertEqual(run.call_args.args[0],
+                         ["open", "-a", "Qoder", os.path.realpath(new)])
+
+    def test_qoder_app_resume_requests_replacement_for_missing_project(self):
+        with tempfile.TemporaryDirectory() as td:
+            missing = Path(td) / "moved"
+            body = {"tool": "qoder",
+                    "id": "00000000-0000-0000-0000-000000000123",
+                    "source": "qoder_app", "cwd": str(missing)}
+            with mock.patch.object(
+                    daemon, "PATH_MAPPINGS_FILE", Path(td) / "mappings.json"), \
+                    mock.patch.object(daemon.subprocess, "run") as run:
+                result = daemon.api_resume(body)
+        self.assertTrue(result["needs_path"])
+        self.assertEqual(result["original_cwd"], str(missing))
+        run.assert_not_called()
+
     def test_enabled_agent_without_account_has_explicit_flat_status_page(self):
         settings = {**daemon.DEFAULT_SETTINGS,
                     "show_claude": False, "show_codex": False, "show_qoder": True}
@@ -2291,6 +3107,25 @@ class QoderSupportTests(unittest.TestCase):
         self.assertEqual(quota["windows"][1]["total"], 1000)
         self.assertNotIn("userId", json.dumps(quota))
 
+    def test_usage_info_omits_qoder_non_expiring_sentinel(self):
+        quota = daemon._qoder_quota_from_usage({
+            "userType": "pro",
+            "totalUsagePercentage": 42.5,
+            "expiresAt": 253_402_214_400_000,
+            "userQuota": {"total": 1000, "used": 400, "remaining": 600,
+                          "percentage": 40, "unit": "credits"},
+        })
+
+        self.assertTrue(quota["ok"])
+        self.assertIsNone(quota["windows"][0]["resets_at"])
+        self.assertIsNone(quota["windows"][1]["resets_at"])
+
+    def test_qoder_expiry_accepts_epoch_units_and_rejects_far_future_seconds(self):
+        self.assertEqual(daemon._qoder_expiry(1_800_000_000), 1_800_000_000)
+        self.assertEqual(daemon._qoder_expiry(1_800_000_000_000), 1_800_000_000)
+        self.assertIsNone(daemon._qoder_expiry(253_402_214_400))
+        self.assertIsNone(daemon._qoder_expiry(253_402_214_399))
+
     def test_qoder_cli_parses_only_named_usage_control_response(self):
         stream = "\n".join([
             json.dumps({"type": "control_response", "response": {
@@ -2304,7 +3139,9 @@ class QoderSupportTests(unittest.TestCase):
         ])
         source = {"path": Path("/tmp/qoder-test")}
         completed = daemon.subprocess.CompletedProcess([], 0, stdout=stream, stderr="")
-        with mock.patch.object(daemon, "_qoder_cli_path", return_value="qodercli"), \
+        with mock.patch.object(daemon, "_qoder_app_quota",
+                               side_effect=daemon.QoderAppUnavailable("offline")), \
+                mock.patch.object(daemon, "_qoder_cli_path", return_value="qodercli"), \
                 mock.patch.object(daemon.subprocess, "run", return_value=completed) as run:
             quota = daemon._qoder_quota_for(source)
 

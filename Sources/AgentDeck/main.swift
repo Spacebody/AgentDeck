@@ -661,6 +661,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var rotateTimer: Timer?
     var menubarAnimationTimer: Timer?
     var currentMenubarImage: NSImage?
+    var menubarRequestID = 0
+    var menubarAppliedRequestID = 0
     var menubarSlotWidth: CGFloat = 17
     var mbFull: [MBItem] = []      // 全部 (tool×账号) 同级页面
     var rotateSecs = 0
@@ -997,7 +999,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return out
     }
 
-    /// 模板图与彩色告警图交叉时先按当前菜单栏明暗展开模板色，避免过渡帧出现黑块。
     func resolvedAnimationImage(_ image: NSImage) -> NSImage {
         guard image.isTemplate else { return image }
         let isDark = statusItem.button?.effectiveAppearance
@@ -1014,25 +1015,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return out
     }
 
-    func rollingMenubarImage(from previous: NSImage, to next: NSImage,
-                             progress: CGFloat) -> NSImage {
-        let templatePair = previous.isTemplate && next.isTemplate
-        let outgoing = templatePair ? previous : resolvedAnimationImage(previous)
-        let incoming = templatePair ? next : resolvedAnimationImage(next)
+    func drumMenubarImage(from outgoing: NSImage, to incoming: NSImage,
+                          progress: CGFloat) -> NSImage {
         let size = NSSize(width: max(outgoing.size.width, incoming.size.width),
                           height: max(outgoing.size.height, incoming.size.height))
-        let out = NSImage(size: size, flipped: false) { rect in
-            NSGraphicsContext.current?.cgContext.clip(to: rect)
-            outgoing.draw(in: NSRect(x: (rect.width - outgoing.size.width) / 2,
-                                      y: rect.height * progress,
-                                      width: outgoing.size.width, height: outgoing.size.height))
-            incoming.draw(in: NSRect(x: (rect.width - incoming.size.width) / 2,
-                                      y: -rect.height * (1 - progress),
-                                      width: incoming.size.width, height: incoming.size.height))
+        let angle = progress * .pi / 2
+        let incomingAngle = (.pi / 2) - angle
+        let image = NSImage(size: size, flipped: false) { bounds in
+            NSGraphicsContext.current?.cgContext.clip(to: bounds)
+            func drawFace(_ source: NSImage, angle: CGFloat, direction: CGFloat) {
+                let scale = max(0.02, cos(angle))
+                let height = max(0.5, source.size.height * scale)
+                let center = bounds.midY + direction * sin(angle) * bounds.height / 2
+                let rect = NSRect(x: (bounds.width - source.size.width) / 2,
+                                  y: center - height / 2,
+                                  width: source.size.width, height: height)
+                source.draw(in: rect, from: .zero, operation: .sourceOver,
+                            fraction: 0.32 + 0.68 * scale)
+            }
+            drawFace(outgoing, angle: angle, direction: 1)
+            drawFace(incoming, angle: incomingAngle, direction: -1)
             return true
         }
-        out.isTemplate = templatePair
-        return out
+        image.isTemplate = false
+        return image
     }
 
     func setMenubarImage(_ image: NSImage) {
@@ -1050,8 +1056,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return
         }
         menubarAnimationTimer?.invalidate()
+        let outgoing = resolvedAnimationImage(previous)
+        let incoming = resolvedAnimationImage(next)
+        guard let button = statusItem.button else {
+            setMenubarImage(next)
+            return
+        }
+        let duration: TimeInterval = 0.62
         let started = ProcessInfo.processInfo.systemUptime
-        let duration: TimeInterval = 0.24
         let timer = Timer(timeInterval: 1 / 60, repeats: true) { [weak self] timer in
             Task { @MainActor in
                 guard let self, self.menubarAnimationTimer === timer else {
@@ -1059,15 +1071,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     return
                 }
                 let elapsed = ProcessInfo.processInfo.systemUptime - started
-                let progress = MenubarRotationPolicy.easedProgress(
-                    elapsed: elapsed, duration: duration)
-                self.statusItem.button?.image = self.rollingMenubarImage(
-                    from: previous, to: next, progress: CGFloat(progress))
-                if progress >= 1 {
+                let linear = min(1, max(0, elapsed / duration))
+                let progress = CGFloat(linear * linear * (3 - 2 * linear))
+                button.image = self.drumMenubarImage(
+                    from: outgoing, to: incoming, progress: progress)
+                button.needsDisplay = true
+                button.displayIfNeeded()
+                if linear >= 1 {
                     timer.invalidate()
                     self.menubarAnimationTimer = nil
-                    self.statusItem.button?.image = next
                     self.currentMenubarImage = next
+                    // A quota refresh may have changed or removed the current item mid-roll.
+                    let current = MenubarRotationPolicy.currentItem(
+                        items: self.mbFull, currentIndex: self.rotateIdx).map { [$0] } ?? []
+                    self.drawMenubar(current, animated: false)
                 }
             }
         }
@@ -1560,11 +1577,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func updateIconState() {
         // 菜单栏只读 daemon 已有快照，绝不因 Codex 实时更新顺带触发慢速 Claude 出站。
         guard let url = URL(string: "\(kBase)/api/quota?cached=1") else { return }
-        kDirectSession.dataTask(with: url) { [weak self] data, _, _ in
-            guard let data,
+        menubarRequestID += 1
+        let requestID = menubarRequestID
+        kDirectSession.dataTask(with: url) { [weak self] data, response, _ in
+            guard let http = response as? HTTPURLResponse,
+                  MenubarRotationPolicy.isSuccessfulHTTPStatus(http.statusCode),
+                  let data,
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
             else { return }
             let mb = json["menubar"] as? [String: Any]
+            guard mb != nil, json["accounts"] != nil || json["agents"] != nil else { return }
             let alertEnabled = mb?["alert_color"] as? Bool ?? true   // 设置开关：菜单栏告警变色
             let rotateSecs = mb?["rotate_secs"] as? Int ?? 0
             let accounts = json["accounts"] as? [String: Any]
@@ -1614,6 +1636,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
             DispatchQueue.main.async {
                 guard let self else { return }
+                guard MenubarRotationPolicy.shouldAcceptResponse(
+                    requestID: requestID,
+                    lastAppliedRequestID: self.menubarAppliedRequestID) else { return }
+                self.menubarAppliedRequestID = requestID
                 self.statusItem.isVisible = true   // 兜底：被系统/误操作隐藏后自动恢复
                 self.statusItem.button?.contentTintColor = nil
                 let currentID = self.mbFull.indices.contains(self.rotateIdx)
@@ -1644,7 +1670,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             rotateTimer = nil
         }
         if rotateIdx >= mbFull.count { rotateIdx = 0 }
-        drawMenubar(mbFull.isEmpty ? [] : [mbFull[rotateIdx]], animated: false)
+        // A quota poll may land during the short rolling transition. Do not cancel that
+        // transition with a non-animated redraw; its final frame already owns the slot.
+        if !MenubarRotationPolicy.shouldDeferPassiveRefresh(
+                isAnimating: menubarAnimationTimer != nil) {
+            drawMenubar(mbFull.isEmpty ? [] : [mbFull[rotateIdx]], animated: false)
+        }
     }
 
     func advanceRotation() {

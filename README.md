@@ -32,7 +32,7 @@ AgentDeck 将 Claude Code、Codex 与 Qoder 的额度监控、会话管理和用
 ## 设计原则
 
 - **零第三方依赖** — 标准库 Python + SwiftPM 原生 AppKit / SwiftUI；不引入 Node、Electron 或任何打包器
-- **本地优先** — 数据全程本机处理，零遥测；daemon 只直接访问 Claude 额度与版本清单，Qoder 额度由已安装的本机 `qodercli` 查询
+- **本地优先** — 数据全程本机处理，零遥测；daemon 只直接访问 Claude 额度与版本清单，Qoder 额度优先读取已登录 Qoder App 的本机 IPC，失败时回退 `qodercli`
 - **原生体验** — 连续曲率圆角、玻璃材质、桌面小组件，对齐系统组件的视觉标准
 - **多语言** — 简体中文 / English / 日本語三层（面板 / 通知 / 菜单）统一，默认跟随系统
 
@@ -76,7 +76,7 @@ git clone https://github.com/Spacebody/AgentDeck.git && cd AgentDeck
 
 编译、安装至 `/Applications` 并启动，首次启动注册登录项实现自启。
 
-**环境要求**：macOS 13+（产出 Apple Silicon + Intel 通用二进制）；已安装 [Claude Code](https://claude.com/claude-code)、[Codex](https://openai.com/codex) 或 [Qoder CLI](https://docs.qoder.com/en/cli/quick-start)（任一）；Xcode Command Line Tools（提供 SwiftPM / Swift toolchain，可经 `xcode-select --install` 安装）。
+**环境要求**：macOS 13+（产出 Apple Silicon + Intel 通用二进制）；已安装 [Claude Code](https://claude.com/claude-code)、[Codex](https://openai.com/codex)、Qoder App 或 [Qoder CLI](https://docs.qoder.com/en/cli/quick-start)（任一）；Xcode Command Line Tools（提供 SwiftPM / Swift toolchain，可经 `xcode-select --install` 安装）。
 
 其余构建目标：
 
@@ -139,8 +139,8 @@ scripts/             图标与 DMG 背景生成、Codex notify 包装、CSRF 回
 | Claude 用量 / 会话 | 解析已发现的各 Claude 配置目录下 `projects/**/*.jsonl` | token 统计、成本估算；会话标题、路径等头部元数据增量写入本地 SQLite 索引 |
 | Codex 额度 | Codex CLI `app-server` 的 `account/rateLimits/read`，完成事件时辅以对应 rollout 的最新快照 | 不读取或转发登录 token；app-server 不可用时自动降级到有界本地解析 |
 | Codex 用量 / 会话 | 解析本地 `~/.codex/sessions` rollout 文件 | token 统计；搜索和分页只读元数据索引，不逐次扫描原始会话 |
-| Qoder 额度 | 本机 `qodercli` 的 UsageInfo 控制请求 | 不创建持久会话，不保存用户 ID、邮箱、头像或升级链接；结果短期缓存 |
-| Qoder 用量 / 会话 | 解析已发现 Qoder 配置目录下的 `projects/**/*.jsonl` | usage 按消息去重后聚合 token；只将标题、路径、分支、时间等元数据写入本地索引 |
+| Qoder 额度 | 已登录 Qoder App 的用户私有 Unix Socket；不可用时回退本机 `qodercli` UsageInfo | IPC 仅允许只读 `credit/usage`，校验进程、路径、所有权和权限；不保存用户 ID、邮箱、头像或升级链接 |
+| Qoder 用量 / 会话 | 配置目录下的 `projects/**/*.jsonl`；Qoder App 运行时补充其只读会话列表 | App 响应在适配器入口丢弃消息正文和身份字段；索引只保存 ID、标题、路径、分支和时间 |
 | 完成事件 | AgentDeck 自动安装的 Claude / Qoder Stop hook 与 Codex notify wrapper 回调 | 完成提醒与事件流 |
 
 运行时产物：数据目录 `~/Library/Application Support/AgentDeck/`，日志 `~/Library/Logs/AgentDeck.log`。其中 `claude_usage_cache.json`、`codex_usage_cache.json`、`qoder_usage_cache.json` 与 `session_index.sqlite3` 均为可重建缓存；用量缓存只保存按小时聚合值与文件指纹，会话索引只保存标题、项目、路径、分支、时间与文件指纹，均不保存完整对话正文。`pins.json` 是置顶状态真源，`path_mappings.json` 保存用户确认的工程迁移路径；删除数据库不会丢失这两类用户状态，只会触发后台重建索引。
@@ -153,6 +153,7 @@ scripts/             图标与 DMG 背景生成、Codex notify 包装、CSRF 回
 - 账号诊断接口 `/api/diag` 输出全程脱敏（token 仅留末 4 位）
 - 自动更新仅接受固定 GitHub Release 路径，安装前核对 bundle ID、清单版本、完整代码签名、Team ID 与 Gatekeeper assessment；复制或复验失败会原子恢复旧 App
 - 健康检查带身份校验，避免端口被其他进程占用时误判
+- Qoder App IPC 只连接标准 `SharedClientCache` 下、当前用户所有且非组/全局可写的 Unix Socket；同时核对 Apple 证书链、官方 bundle 与服务二进制签名、服务 PID、连接后的 peer PID 与 socket inode，方法固定白名单并限制单次/全扫描响应大小、条数和端到端超时
 
 ## 统计口径
 

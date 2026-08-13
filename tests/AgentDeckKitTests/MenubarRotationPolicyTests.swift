@@ -2,6 +2,13 @@ import XCTest
 @testable import AgentDeckKit
 
 final class MenubarRotationPolicyTests: XCTestCase {
+    func testOnlySuccessfulHTTPStatusCanApplyMenubarSnapshot() {
+        XCTAssertTrue(MenubarRotationPolicy.isSuccessfulHTTPStatus(200))
+        XCTAssertTrue(MenubarRotationPolicy.isSuccessfulHTTPStatus(299))
+        XCTAssertFalse(MenubarRotationPolicy.isSuccessfulHTTPStatus(500))
+        XCTAssertFalse(MenubarRotationPolicy.isSuccessfulHTTPStatus(304))
+    }
+
     func testSelectionSurvivesQuotaRefreshByStableID() {
         let ids = ["claude::default", "codex::default", "qoder::work"]
         XCTAssertEqual(
@@ -24,9 +31,30 @@ final class MenubarRotationPolicyTests: XCTestCase {
         XCTAssertEqual(MenubarRotationPolicy.interval(configuredSeconds: 6, itemCount: 3), 6)
     }
 
-    func testAnimationProgressIsClampedAndEased() {
-        XCTAssertEqual(MenubarRotationPolicy.easedProgress(elapsed: -1, duration: 0.25), 0)
-        XCTAssertGreaterThan(MenubarRotationPolicy.easedProgress(elapsed: 0.125, duration: 0.25), 0.5)
-        XCTAssertEqual(MenubarRotationPolicy.easedProgress(elapsed: 1, duration: 0.25), 1)
+    func testPassiveRefreshWaitsForAnimationAndCompletionUsesLatestItem() {
+        XCTAssertTrue(MenubarRotationPolicy.shouldDeferPassiveRefresh(isAnimating: true))
+        XCTAssertFalse(MenubarRotationPolicy.shouldDeferPassiveRefresh(isAnimating: false))
+
+        var items = ["codex 10%", "qoder 20%"]
+        items[1] = "qoder 21%"
+        XCTAssertEqual(MenubarRotationPolicy.currentItem(items: items, currentIndex: 1),
+                       "qoder 21%")
+    }
+
+    func testAnimationCompletionHandlesRemovedOrEmptyItemList() {
+        XCTAssertEqual(MenubarRotationPolicy.currentItem(items: ["codex"], currentIndex: 1),
+                       "codex")
+        XCTAssertNil(MenubarRotationPolicy.currentItem(items: [String](), currentIndex: 1))
+    }
+
+    func testOlderMenubarResponseCannotOverwriteNewerSnapshot() {
+        XCTAssertTrue(MenubarRotationPolicy.shouldAcceptResponse(
+            requestID: 8, lastAppliedRequestID: 7))
+        XCTAssertFalse(MenubarRotationPolicy.shouldAcceptResponse(
+            requestID: 7, lastAppliedRequestID: 8))
+        // A later request may fail before decoding. The older valid response is
+        // still newer than the last applied snapshot and must not be discarded.
+        XCTAssertTrue(MenubarRotationPolicy.shouldAcceptResponse(
+            requestID: 8, lastAppliedRequestID: 6))
     }
 }
