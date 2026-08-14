@@ -73,6 +73,12 @@ struct QuotaPage: Identifiable {
     let account: QuotaNode
 }
 
+public func stableQuotaPageID(agentID: String, accountID: String?,
+                              isDefault: Bool, fallbackIndex: Int) -> String {
+    let resolved = accountID ?? (isDefault ? "default" : "account-\(fallbackIndex)")
+    return "\(agentID)::\(resolved)"
+}
+
 func reconciledQuotaSelection(currentID: String?, pages: [QuotaPage]) -> String? {
     if let currentID, pages.contains(where: { $0.id == currentID }) { return currentID }
     return pages.first?.id
@@ -107,8 +113,10 @@ extension QuotaResponse {
             }.map(\.element)
             return ordered.enumerated().compactMap { offset, account in
                 guard let brand = Brand(rawValue: group.id) else { return nil }
-                let accountID = account.accountId ?? (account.isDefault == true ? "default" : "account-\(offset)")
-                return QuotaPage(id: "\(group.id)::\(accountID)", agentID: group.id,
+                let pageID = stableQuotaPageID(
+                    agentID: group.id, accountID: account.accountId,
+                    isDefault: account.isDefault == true, fallbackIndex: offset)
+                return QuotaPage(id: pageID, agentID: group.id,
                                  agentName: group.name, brand: brand, account: account)
             }
         }

@@ -21,18 +21,20 @@
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/i18n-demo.gif" width="300" alt="概览与会话面板（中 / 英 / 日）">
-  &nbsp;
-  <img src="docs/screenshots/settings-zh.png" width="300" alt="设置面板">
+  <img src="docs/screenshots/i18n-demo.gif" width="380" alt="Claude、Codex 与 Qoder 概览面板（中 / 英 / 日）">
 </p>
-<p align="center"><sub>左：概览 / 会话面板（三语轮播，默认跟随系统语言）· 右：设置</sub></p>
+<p align="center"><sub>Claude、Codex 与 Qoder 概览（三语轮播，默认跟随系统语言）</sub></p>
+<p align="center">
+  <img src="docs/screenshots/settings-zh.png" width="480" alt="Agent 管理面板">
+</p>
+<p align="center"><sub>Agent 管理：分别控制面板、状态栏与主题色</sub></p>
 
 AgentDeck 将 Claude Code、Codex 与 Qoder 的额度监控、会话管理和用量统计集成在一个菜单栏面板中。后端为纯标准库 Python daemon，macOS 客户端为 SwiftPM 工程中的原生 AppKit + SwiftUI 应用，仍保持零第三方运行时依赖、无 Electron / 打包器、无运行时下载。
 
 ## 设计原则
 
 - **零第三方依赖** — 标准库 Python + SwiftPM 原生 AppKit / SwiftUI；不引入 Node、Electron 或任何打包器
-- **本地优先** — 数据全程本机处理，零遥测；daemon 只直接访问 Claude 额度与版本清单，Qoder 额度优先读取已登录 Qoder App 的本机 IPC，失败时回退 `qodercli`
+- **本地优先** — 数据全程本机处理，零遥测；自动后台联网仅查询 Claude 额度与版本清单，Qoder 额度优先读取已登录 Qoder App 的本机 IPC，失败时回退 `qodercli`；只有用户确认更新后才从固定 GitHub Release 地址下载 DMG
 - **原生体验** — 连续曲率圆角、玻璃材质、桌面小组件，对齐系统组件的视觉标准
 - **多语言** — 简体中文 / English / 日本語三层（面板 / 通知 / 菜单）统一，默认跟随系统
 
@@ -41,14 +43,14 @@ AgentDeck 将 Claude Code、Codex 与 Qoder 的额度监控、会话管理和用
 **额度监控**
 - 实时聚合 Claude 官方额度（5 小时 / 7 天窗口）、Codex rate limits 与 Qoder UsageInfo
 - 多账号并行：自动发现 Claude / Codex / Qoder 配置目录；概览将“不同 Agent × 多个账号”拍平成同级全宽卡片，默认 6 秒自动轮播，可暂停并支持鼠标、触控板与键盘切换
-- 状态栏用一个固定宽度槽位逐项滚动“Agent/账号图标＋对应额度”，默认 6 秒；可关闭后固定当前项，数字与变色各自可选 5h / 周 / 最吃紧窗口
+- 状态栏用一个固定宽度槽位逐项滚动“Agent/账号图标＋对应额度”，默认 6 秒；对同时参与两处展示的 Agent/账号，与概览卡同步自动轮播、手动切换及暂停状态；可关闭后固定当前项，数字与变色各自可选 5h / 周 / 最吃紧窗口
 - Claude / Qoder 额度查询间隔可调（默认 10 分钟，可至 6 小时）；Codex 由完成事件实时更新，并由 CLI 自带 app-server 周期校准
 - 窗口重置进度条；额度临界与回满的系统通知（阈值可配置）
 
 **会话管理**
 - 识别 Claude / Codex / Qoder 活跃会话，覆盖终端内 CLI 会话与 Codex 桌面端会话
 - “正在运行”按 transcript / rollout 最近活跃时间倒序排列；缺少观测时间时回退进程启动时间
-- 点击活跃会话聚焦其所在终端：沿进程链自动识别宿主 `.app`，兼容任意终端，无需维护终端清单；iTerm2 / Terminal 精确至标签页；Codex 桌面端经 `codex://` 深链直达线程
+- 点击活跃会话聚焦其所在终端：沿进程链自动识别宿主 `.app`，兼容任意终端，无需维护终端清单；iTerm2 / Terminal 精确至标签页；Codex 桌面端经 `codex://` 深链直达线程，Qoder App 会话直接回到 App
 - 会话完成弹窗提醒，点击跳转回会话；事件去重，仅提醒一次
 - 历史会话一键恢复：iTerm2 / Terminal / Ghostty / kitty / WezTerm / Alacritty 直接注入命令启动；Warp / VS Code / Cursor / Windsurf / Hyper / Tabby / Rio / Wave 走「打开应用 + 复制命令」
 - 原工程目录移动后可选择新位置并记住映射；取消选择时复制不含旧路径的安全恢复命令，右键会话可重新选择或忘记映射
@@ -64,10 +66,16 @@ AgentDeck 将 Claude Code、Codex 与 Qoder 的额度监控、会话管理和用
 - 字体大小 80–160% 整体缩放（面板与小组件同步）；暗化强度、精简模式等外观配置
 - 活跃会话期间保持系统唤醒，防止长任务因休眠断流（默认开，可关）
 - 兼容企业代理环境：App 访问本机 daemon 的流量绕过系统级 PAC 代理，避免回环被改道导致面板空白
-- 版本更新发现：自动检查（仅查询版本号，可关闭）与设置内手动检查；有新版时面板顶部横幅提示
+- 版本更新发现：自动检查（仅查询版本号，可关闭）与设置内手动检查；发现新版后可在面板内下载、校验、安装并自动清理安装包，无需跳转网页
 - 桌面小组件：常驻桌面层的玻璃信息卡，支持拖动、缩放与位置记忆
 
 ## 安装
+
+推荐下载经过 Developer ID 签名与 Apple 公证的最新版本：
+
+<p align="center"><a href="https://github.com/Spacebody/AgentDeck/releases/latest"><b>下载最新 AgentDeck DMG</b></a></p>
+
+也可以从源码构建：
 
 ```bash
 git clone https://github.com/Spacebody/AgentDeck.git && cd AgentDeck
@@ -76,7 +84,7 @@ git clone https://github.com/Spacebody/AgentDeck.git && cd AgentDeck
 
 编译、安装至 `/Applications` 并启动，首次启动注册登录项实现自启。
 
-**环境要求**：macOS 13+（产出 Apple Silicon + Intel 通用二进制）；已安装 [Claude Code](https://claude.com/claude-code)、[Codex](https://openai.com/codex)、Qoder App 或 [Qoder CLI](https://docs.qoder.com/en/cli/quick-start)（任一）；Xcode Command Line Tools（提供 SwiftPM / Swift toolchain，可经 `xcode-select --install` 安装）。
+**环境要求**：macOS 13+（Apple Silicon + Intel 通用二进制）；至少安装一个需要监控的 Agent：[Claude Code](https://claude.com/claude-code)、[Codex](https://openai.com/codex)、Qoder App 或 [Qoder CLI](https://docs.qoder.com/en/cli/quick-start)。仅从源码构建时需要 Xcode Command Line Tools（可经 `xcode-select --install` 安装）。
 
 其余构建目标：
 
@@ -149,7 +157,7 @@ scripts/             图标与 DMG 背景生成、Codex notify 包装、CSRF 回
 
 - daemon 仅绑定回环地址 `127.0.0.1`，不对局域网暴露
 - 全部 `/api/*` GET 及 POST 接口校验本机 Host；POST 额外要求 Content-Type 精确匹配及 Origin 结构化同源校验，封锁 DNS rebinding / 浏览器 CSRF；附回归测试 `scripts/test-csrf.sh`
-- 「按请求参数读取文件」的路径统一收口至已发现的 Claude 配置目录内（realpath 校验）
+- 「按请求参数读取文件」的路径统一收口至对应 Agent 已发现的配置目录内（realpath 校验）
 - 账号诊断接口 `/api/diag` 输出全程脱敏（token 仅留末 4 位）
 - 自动更新仅接受固定 GitHub Release 路径，安装前核对 bundle ID、清单版本、完整代码签名、Team ID 与 Gatekeeper assessment；复制或复验失败会原子恢复旧 App
 - 健康检查带身份校验，避免端口被其他进程占用时误判

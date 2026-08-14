@@ -43,7 +43,7 @@ public enum PreviewRender {
         store.settings["show_claude"] = .bool(false)
         store.settings["show_codex"] = .bool(true)
         store.quota = PreviewSamples.response
-        return png(AgentDeckRootView(previewStore: store, version: "2.7.5")
+        return png(AgentDeckRootView(previewStore: store, version: "2.8.0")
             .frame(width: 420, height: 920), scale: scale)
     }
 
@@ -54,7 +54,7 @@ public enum PreviewRender {
         store.settings["show_claude"] = .bool(true)
         store.settings["show_codex"] = .bool(true)
         store.quota = PreviewSamples.codexOnlyResponse
-        return png(AgentDeckRootView(previewStore: store, version: "2.7.5")
+        return png(AgentDeckRootView(previewStore: store, version: "2.8.0")
             .frame(width: 420, height: 920), scale: scale)
     }
 
@@ -239,7 +239,7 @@ public enum PreviewRender {
     /// 设置页（全展开，不滚动以便整图自检）。
     public static func settingsPNG(scale: CGFloat = 2) -> Data? {
         png(PanelChrome(height: 1480) {
-            SettingsView(values: PreviewSamples.settingsValues, scrollable: false, version: "2.7.5")
+            SettingsView(values: PreviewSamples.settingsValues, scrollable: false, version: "2.8.0")
         }, scale: scale)
     }
 
@@ -254,7 +254,7 @@ public enum PreviewRender {
                 }
                 .foregroundStyle(Theme.ink)
                 SettingsView(values: PreviewSamples.settingsValues, scrollable: false,
-                             page: .agents, version: "2.7.5")
+                             page: .agents, version: "2.8.0")
             }
         }, scale: scale)
     }
@@ -327,8 +327,29 @@ public enum PreviewRender {
         // mock 使用 120% 字体；真实窗口也会同步放大，预览必须匹配外框尺寸，
         // 否则 ScaledContainer 会被固定 420pt 画布裁掉左右边缘。
         let fontScale = previewFontScale
-        return png(AgentDeckRootView(previewStore: mockStore(), version: "2.7.5")
+        return png(AgentDeckRootView(previewStore: mockStore(), version: "2.8.0")
             .frame(width: 420 * fontScale, height: 1040 * fontScale), scale: scale)
+    }
+
+    /// README 主图：展示三 Agent，首屏选中 Qoder，不注入测试用更新横幅。
+    /// 先按真实的“窗口随字体缩放”尺寸布局，再缩回 README 的稳定 420pt 画布；
+    /// 这样 120% 字体不会被裁切，也不会把仓库截图放大成 1008px 宽。
+    public static func readmePNG(scale: CGFloat = 2) -> Data? {
+        let fontScale = previewFontScale
+        let store = mockStore()
+        store.quota = PreviewSamples.readmeResponse
+        store.update = nil
+        return png(
+            AgentDeckRootView(previewStore: store, version: "2.8.0")
+                .frame(width: 420 * fontScale, height: 1000 * fontScale)
+                .scaleEffect(1 / fontScale, anchor: .topLeading)
+                .frame(width: 420, height: 1000, alignment: .topLeading),
+            scale: scale)
+    }
+
+    /// README Agent 管理图：固定 420pt 画布，分别由 AD_LOCALE 生成中英文版本。
+    public static func readmeSettingsPNG(scale: CGFloat = 2) -> Data? {
+        agentSettingsPNG(scale: scale)
     }
 
     /// 小组件整壳（store 驱动）。
@@ -416,7 +437,7 @@ public enum PreviewRender {
         s.sessions = PreviewSamples.sessions
         s.settings = PreviewSamples.settingsValues
         s.settings["font_scale"] = .int(Int((previewFontScale * 100).rounded()))
-        s.update = UpdateInfo(current: "2.7.5", latest: "2.8.0", available: true,
+        s.update = UpdateInfo(current: "2.8.0", latest: "2.9.0", available: true,
                               url: "https://github.com/Spacebody/AgentDeck/releases",
                               dmg: nil, notesUrl: nil)
         return s

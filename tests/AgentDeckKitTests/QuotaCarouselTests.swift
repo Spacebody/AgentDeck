@@ -2,6 +2,18 @@ import XCTest
 @testable import AgentDeckKit
 
 final class QuotaCarouselTests: XCTestCase {
+    func testStablePageIDMatchesMenubarAndOverviewFallbacks() {
+        XCTAssertEqual(stableQuotaPageID(
+            agentID: "codex", accountID: "work", isDefault: false, fallbackIndex: 4),
+            "codex::work")
+        XCTAssertEqual(stableQuotaPageID(
+            agentID: "qoder", accountID: nil, isDefault: true, fallbackIndex: 2),
+            "qoder::default")
+        XCTAssertEqual(stableQuotaPageID(
+            agentID: "claude", accountID: nil, isDefault: false, fallbackIndex: 2),
+            "claude::account-2")
+    }
+
     private func decode(_ json: String) throws -> QuotaResponse {
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase

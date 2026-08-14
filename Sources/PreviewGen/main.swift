@@ -3,10 +3,10 @@
 import Foundation
 import AgentDeckKit
 
-// 用法：PreviewGen [overview|codexonly|visibilityoff|visibilityon|quotacases|quotadual|quotaclaude|quotaduplicate|quotaharmony|charts|chartsfiltered|sessions|settings|agentsettings|widget|widgetsizes|widgetfour|widgetstress|root|widgetroot] [outPath]
+// 用法：PreviewGen [overview|codexonly|visibilityoff|visibilityon|quotacases|quotadual|quotaclaude|quotaduplicate|quotaharmony|charts|chartsfiltered|sessions|settings|agentsettings|widget|widgetsizes|widgetfour|widgetstress|root|readme|readmesettings|widgetroot] [outPath]
 var args = Array(CommandLine.arguments.dropFirst())
 let mode = ["overview", "codexonly", "visibilityoff", "visibilityon", "quotacases", "quotadual", "quotaclaude", "quotaduplicate", "quotaharmony", "charts", "chartsfiltered",
-            "sessions", "settings", "agentsettings", "widget", "widgetsizes", "widgetfour", "widgetstress", "root", "widgetroot", "carousel"].contains(args.first)
+            "sessions", "settings", "agentsettings", "widget", "widgetsizes", "widgetfour", "widgetstress", "root", "readme", "readmesettings", "widgetroot", "carousel"].contains(args.first)
     ? args.removeFirst() : "overview"
 let outPath = args.first ?? "/tmp/agentdeck-\(mode).png"
 
@@ -36,6 +36,8 @@ let data = MainActor.assumeIsolated { () -> Data? in
     case "widgetfour": return PreviewRender.widgetFourWindowPNG()
     case "widgetstress": return PreviewRender.widgetStressPNG()
     case "root":       return PreviewRender.rootPNG()
+    case "readme":     return PreviewRender.readmePNG()
+    case "readmesettings": return PreviewRender.readmeSettingsPNG()
     case "widgetroot": return PreviewRender.widgetRootPNG()
     case "carousel":   return PreviewRender.carouselPNG()
     default:           return PreviewRender.overviewPNG()

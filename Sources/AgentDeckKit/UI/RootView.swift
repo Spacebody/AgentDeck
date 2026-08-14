@@ -364,9 +364,13 @@ public struct AgentDeckRootView: View {
                 active: store.activeShown, done: store.doneShown, showActive: store.showActive,
                 showClaudeAgent: showClaude, showCodexAgent: showCodex,
                 showQoderAgent: showQoder,
-                quotaAutoRotate: store.settings["quota_auto_rotate"]?.boolVal ?? true,
+                quotaAutoRotate: (store.settings["quota_auto_rotate"]?.boolVal ?? true)
+                    && !store.menubarRotationActive,
                 quotaRotateSecs: store.settings["quota_rotate_secs"]?.intVal ?? 6,
                 carouselActive: tab == "overview" && !showSettings,
+                quotaSelectionID: store.quotaSelectionID,
+                onSelectQuota: { store.selectQuotaPage($0, notifyMenubar: true) },
+                onQuotaRotationPauseChange: { store.setQuotaRotationPaused($0) },
                 onFocusActive: focusActive, onFocusDone: focusDone)
         } else {
             sessionsCard

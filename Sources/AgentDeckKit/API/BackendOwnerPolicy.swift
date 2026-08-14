@@ -1,6 +1,31 @@
 import Foundation
 
 public enum BackendOwnerPolicy {
+    public static func shouldWaitForOwnedBackend(
+        forceRestart: Bool, healthAlive: Bool, ownedProcessRunning: Bool
+    ) -> Bool {
+        !forceRestart && !healthAlive && ownedProcessRunning
+    }
+
+    public static func belongsToCurrentApp(
+        alive: Bool,
+        remoteVersion: String?,
+        remoteParentPID: Int32?,
+        remoteUpdateTransaction: String?,
+        remoteOwnerToken: String?,
+        currentPID: Int32,
+        currentVersion: String,
+        expectedUpdateTransaction: String?,
+        expectedOwnerToken: String
+    ) -> Bool {
+        alive
+            && remoteVersion == currentVersion
+            && remoteParentPID == currentPID
+            && remoteOwnerToken == expectedOwnerToken
+            && (expectedUpdateTransaction == nil
+                || remoteUpdateTransaction == expectedUpdateTransaction)
+    }
+
     public static func shouldShare(
         currentVersion: String,
         currentScript: String,

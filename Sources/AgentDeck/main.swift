@@ -14,10 +14,24 @@ struct BackendHealth {
     let pid: pid_t?
     let parentPID: pid_t?
     let instanceID: String?
+    let updateTransaction: String?
+    let ownerToken: String?
     let scriptPath: String?
 
-    func belongs(to appPID: pid_t, version expected: String) -> Bool {
-        alive && version == expected && parentPID == appPID
+    func belongs(
+        to appPID: pid_t, version expected: String,
+        updateTransaction expectedTransaction: String?, ownerToken expectedOwner: String
+    ) -> Bool {
+        BackendOwnerPolicy.belongsToCurrentApp(
+            alive: alive,
+            remoteVersion: version,
+            remoteParentPID: parentPID,
+            remoteUpdateTransaction: updateTransaction,
+            remoteOwnerToken: ownerToken,
+            currentPID: appPID,
+            currentVersion: expected,
+            expectedUpdateTransaction: expectedTransaction,
+            expectedOwnerToken: expectedOwner)
     }
 }
 
@@ -599,6 +613,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var backend: Process?
     var backendTransitioning = false
     var backendReadyWaiters: [BackendReadyCallback] = []
+    var restartStoreAfterBackendTransition = false
+    var storeStarted = false
+    let backendOwnerToken = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
     var pollTimer: Timer?
     var eventTask: Task<Void, Never>?
     var lastEventId = 0
@@ -607,6 +624,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     // 菜单栏明暗变化 → 重绘混色图标，改用系统主题分布式通知（见 didFinishLaunching），不再 KVO 自激
 
     var appVersion: String { Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev" }
+
+    /// The detached installer injects this one-shot token into the replacement App.
+    /// Its daemon must echo the same token before the update can be committed.
+    var updateTransaction: String? {
+        let value = ProcessInfo.processInfo.environment["AGENTDECK_UPDATE_TRANSACTION"] ?? ""
+        guard value.range(of: "^[0-9a-f]{32}$", options: .regularExpression) != nil else {
+            return nil
+        }
+        return value
+    }
 
     /// 主面板根视图（接 store + 动作闭包）。
     func makeRootView() -> AgentDeckRootView {
@@ -667,6 +694,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var mbFull: [MBItem] = []      // 全部 (tool×账号) 同级页面
     var rotateSecs = 0
     var rotateIdx = 0
+    var quotaRotationPaused = false
+    var overviewSelectionOutsideMenubar = false
 
     override init() {
         let defaults = UserDefaults.standard
@@ -711,12 +740,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // 设置变更 → 即时重绘菜单栏（语言/常显用量/告警阈值等，等价 v1 "sync" 桥消息）
         store.onSettingsChanged = { [weak self] in self?.updateIconState() }
         store.onQuotaChanged = { [weak self] in self?.updateIconState() }
+        store.onQuotaSelectionChanged = { [weak self] id in
+            self?.selectMenubarPage(id: id, animated: true)
+        }
+        store.onQuotaRotationPauseChanged = { [weak self] paused in
+            guard let self, self.quotaRotationPaused != paused else { return }
+            self.quotaRotationPaused = paused
+            self.configureMenubar()
+        }
 
         ensureBackend { [weak self] in
             DispatchQueue.main.async {
-                self?.store.start()   // 后端就绪后开始轮询（面板/小组件共用）
-                self?.loaded = true
-                if self?.widgetEnabled == true { self?.showWidget() }
+                guard let self else { return }
+                self.store.start(forceInitialRefresh: self.updateTransaction != nil)
+                self.storeStarted = true
+                self.loaded = true
+                if self.widgetEnabled { self.showWidget() }
             }
         }
 
@@ -1202,6 +1241,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // 仍持续吃 CPU（额度可取时 live 点呼吸尤甚）。把承载视图从窗口摘下：无窗口可渲染，
         // AppKit 即停掉它的 display link；@State 仍存活在 panelHost 上，重开 reattach 即恢复。
         panelHost?.view.removeFromSuperview()
+        if overviewSelectionOutsideMenubar {
+            overviewSelectionOutsideMenubar = false
+            publishMenubarSelection()
+            configureMenubar()
+        }
         statusItem.button?.highlight(false)
         if let m = clickMonitor { NSEvent.removeMonitor(m); clickMonitor = nil }
         if let m = keyMonitor { NSEvent.removeMonitor(m); keyMonitor = nil }
@@ -1387,15 +1431,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             guard let self else { return }
             // 同版本不等于同实例：快速重开时旧 daemon 仍会短暂健康，随后因旧父
             // App 消失而退出。只有 parent_pid 明确指向当前 App 才允许复用。
-            if !forceRestart, health.belongs(to: appPID, version: mine) {
+            if !forceRestart, health.belongs(
+                to: appPID, version: mine,
+                updateTransaction: self.updateTransaction,
+                ownerToken: self.backendOwnerToken
+            ) {
                 self.finishBackendTransition()
+                return
+            }
+            if BackendOwnerPolicy.shouldWaitForOwnedBackend(
+                forceRestart: forceRestart,
+                healthAlive: health.alive,
+                ownedProcessRunning: self.backend?.isRunning == true
+            ) {
+                // A large first session scan can briefly hold Python's GIL after
+                // startup. The daemon still belongs to this App, so tolerate the
+                // transient health miss instead of creating a terminate/spawn loop.
+                self.waitHealthy(retries: 20, transitionPrepared: false)
                 return
             }
             self.replaceBackend(health)
         }
     }
 
+    private func prepareForBackendReplacement() {
+        menubarRequestID += 1
+        menubarAppliedRequestID = menubarRequestID
+        eventTask?.cancel()
+        eventTask = nil
+        if storeStarted && !restartStoreAfterBackendTransition {
+            store.stop()
+            store.markBackendUnavailable()
+            restartStoreAfterBackendTransition = true
+        }
+    }
+
     private func replaceBackend(_ health: BackendHealth) {
+        prepareForBackendReplacement()
         if let owned = backend, owned.isRunning {
             stopOwnedBackend(owned) { [weak self] in self?.spawnAndWait() }
             return
@@ -1414,35 +1486,71 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func spawnAndWait() {
         spawnBackend()
-        waitHealthy(retries: 20)
+        waitHealthy(retries: 20, transitionPrepared: true)
     }
 
-    private func waitHealthy(retries: Int) {
+    private func waitHealthy(retries: Int, transitionPrepared: Bool) {
         let mine = appVersion
         let appPID = ProcessInfo.processInfo.processIdentifier
         healthCheck { [weak self] health in
             guard let self else { return }
-            if health.belongs(to: appPID, version: mine) {
+            if health.belongs(
+                to: appPID, version: mine,
+                updateTransaction: self.updateTransaction,
+                ownerToken: self.backendOwnerToken
+            ) {
                 self.finishBackendTransition()
                 return
             }
             if health.alive, let instanceID = health.instanceID {
+                if !transitionPrepared {
+                    self.prepareForBackendReplacement()
+                }
                 self.handleForeignBackend(health, instanceID: instanceID)
                 return
             }
             if retries <= 0 {
                 NSLog("AgentDeck: backend did not become healthy")
-                self.finishBackendTransition()
+                if transitionPrepared {
+                    self.store.markBackendUnavailable()
+                } else {
+                    // The optimistic wait started outside a replacement
+                    // transition. Prepare the store/event lifecycle before the
+                    // timeout path actually terminates and respawns the daemon.
+                    self.prepareForBackendReplacement()
+                }
+                // The update installer treats this App as healthy only after its
+                // transaction-bound daemon owns the port. Keep recovering instead
+                // of allowing the UI to consume a stale or unrelated service.
+                if let process = self.backend, process.isRunning {
+                    self.stopOwnedBackend(process) { [weak self] in
+                        self?.spawnAndWait()
+                    }
+                } else {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                        self.spawnAndWait()
+                    }
+                }
                 return
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                self.waitHealthy(retries: retries - 1)
+                self.waitHealthy(retries: retries - 1,
+                                 transitionPrepared: transitionPrepared)
             }
         }
     }
 
     private func finishBackendTransition() {
         backendTransitioning = false
+        if restartStoreAfterBackendTransition {
+            restartStoreAfterBackendTransition = false
+            store.start(forceInitialRefresh: true)
+        }
+        if eventTask == nil {
+            eventTask = Task { [weak self] in
+                await self?.watchEvents()
+            }
+        }
         let waiters = backendReadyWaiters
         backendReadyWaiters.removeAll()
         waiters.forEach { $0() }
@@ -1463,6 +1571,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     pid: (obj?["pid"] as? NSNumber)?.int32Value,
                     parentPID: (obj?["parent_pid"] as? NSNumber)?.int32Value,
                     instanceID: obj?["instance_id"] as? String,
+                    updateTransaction: obj?["update_transaction"] as? String,
+                    ownerToken: obj?["owner_token"] as? String,
                     scriptPath: obj?["script_path"] as? String))
             }
         }.resume()
@@ -1470,9 +1580,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func handleForeignBackend(_ health: BackendHealth, instanceID: String) {
         let ownerIsAlive = health.parentPID.map { Darwin.kill($0, 0) == 0 } ?? false
+        let transactionMatches = updateTransaction == nil
+            || health.updateTransaction == updateTransaction
         // 所有 App 对 owner 使用同一排序：高版本优先；同版本优先 /Applications，
         // 其余路径稳定排序。这样旧 App 会共享新版 daemon，跨 bundle 也不会互相抢占。
-        if BackendOwnerPolicy.shouldShare(
+        if transactionMatches && BackendOwnerPolicy.shouldShare(
             currentVersion: appVersion,
             currentScript: backendScript(),
             remoteVersion: health.version,
@@ -1509,8 +1621,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 self.spawnAndWait()
                 return
             }
-            if health.belongs(to: ProcessInfo.processInfo.processIdentifier,
-                              version: self.appVersion) {
+            if health.belongs(
+                to: ProcessInfo.processInfo.processIdentifier,
+                version: self.appVersion,
+                updateTransaction: self.updateTransaction,
+                ownerToken: self.backendOwnerToken
+            ) {
                 self.finishBackendTransition()
                 return
             }
@@ -1523,7 +1639,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
             if retries <= 0 {
                 NSLog("AgentDeck: foreign backend did not exit (instance \(instanceID ?? "legacy"))")
-                self.finishBackendTransition()
+                self.store.markBackendUnavailable()
+                // Never mark a foreign daemon ready: the replacement UI would keep
+                // reading old code and cache. Keep retrying with the instance token.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                    if let instanceID {
+                        self.requestBackendShutdown(instanceID: instanceID) {
+                            self.waitForForeignBackendExit(
+                                instanceID: instanceID, retries: 20)
+                        }
+                    } else {
+                        self.waitForForeignBackendExit(instanceID: nil, retries: 20)
+                    }
+                }
                 return
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
@@ -1564,6 +1692,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         p.arguments = ["python3", backendScript()]
+        var environment = ProcessInfo.processInfo.environment
+        environment["AGENTDECK_BACKEND_OWNER_TOKEN"] = backendOwnerToken
+        if let updateTransaction {
+            environment["AGENTDECK_UPDATE_TRANSACTION"] = updateTransaction
+        }
+        p.environment = environment
         p.standardOutput = FileHandle.nullDevice
         FileManager.default.createFile(atPath: logPath, contents: nil)
         p.standardError = (try? FileHandle(forWritingTo:
@@ -1628,9 +1762,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     let label = raw.count > 10 ? String(raw.prefix(10)) + "…" : raw  // 防长名撑宽菜单栏
                     // 轮转项：同 tool 多账号时带账号名区分；否则仅百分比
                     let text = (multi && !label.isEmpty) ? "\(label) \(pctStr)" : pctStr
-                    let accountID = node["account_id"] as? String
-                        ?? node["account"] as? String ?? "account-\(i)"
-                    full.append(MBItem(id: "\(tool)::\(accountID)", tool: tool,
+                    let pageID = stableQuotaPageID(
+                        agentID: tool, accountID: node["account_id"] as? String,
+                        isDefault: node["is_default"] as? Bool ?? false,
+                        fallbackIndex: i)
+                    full.append(MBItem(id: pageID, tool: tool,
                                        text: text, alert: alert))
                 }
             }
@@ -1642,8 +1778,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 self.menubarAppliedRequestID = requestID
                 self.statusItem.isVisible = true   // 兜底：被系统/误操作隐藏后自动恢复
                 self.statusItem.button?.contentTintColor = nil
-                let currentID = self.mbFull.indices.contains(self.rotateIdx)
-                    ? self.mbFull[self.rotateIdx].id : nil
+                let sharedID = self.store.quotaSelectionID
+                let sharedTool = sharedID?.split(separator: ":", maxSplits: 1)
+                    .first.map(String.init)
+                let sharedToolEnabled = sharedTool.flatMap { mb?[$0] as? Bool } ?? false
+                self.overviewSelectionOutsideMenubar =
+                    MenubarRotationPolicy.selectionIsOutsideMenubar(
+                        sharedID: sharedID, sharedToolEnabled: sharedToolEnabled,
+                        itemIDs: full.map(\.id), panelVisible: self.panel?.isVisible == true)
+                let currentID = sharedID.flatMap { id in
+                    full.contains(where: { $0.id == id }) ? id : nil
+                } ?? (self.mbFull.indices.contains(self.rotateIdx)
+                    ? self.mbFull[self.rotateIdx].id : nil)
                 self.mbFull = full
                 self.rotateIdx = MenubarRotationPolicy.reconciledIndex(
                     currentID: currentID, itemIDs: full.map(\.id))
@@ -1656,8 +1802,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// 状态栏始终只显示一个同级页面；rotate_secs=0 时固定当前页，大于 0 时自动滚动。
     func configureMenubar() {
         updateMenubarSlotWidth()
-        if let interval = MenubarRotationPolicy.interval(
-                configuredSeconds: rotateSecs, itemCount: mbFull.count) {
+        let interval = MenubarRotationPolicy.interval(
+            configuredSeconds: rotateSecs, itemCount: mbFull.count)
+        store.setMenubarRotationActive(interval != nil)
+        if let interval, !quotaRotationPaused && !overviewSelectionOutsideMenubar {
             if rotateTimer == nil || rotateTimer?.timeInterval != interval {
                 rotateTimer?.invalidate()
                 rotateTimer = Timer.scheduledTimer(withTimeInterval: interval,
@@ -1676,12 +1824,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 isAnimating: menubarAnimationTimer != nil) {
             drawMenubar(mbFull.isEmpty ? [] : [mbFull[rotateIdx]], animated: false)
         }
+        if !overviewSelectionOutsideMenubar { publishMenubarSelection() }
     }
 
     func advanceRotation() {
         guard mbFull.count > 1 else { return }
         rotateIdx = MenubarRotationPolicy.nextIndex(current: rotateIdx, itemCount: mbFull.count)
+        publishMenubarSelection()
         drawMenubar([mbFull[rotateIdx]], animated: true)
+    }
+
+    func selectMenubarPage(id: String, animated: Bool) {
+        guard let index = mbFull.firstIndex(where: { $0.id == id }) else {
+            let tool = id.split(separator: ":", maxSplits: 1).first.map(String.init)
+            let toolEnabled = tool.map { menubarAgentEnabled($0) } ?? false
+            overviewSelectionOutsideMenubar =
+                MenubarRotationPolicy.selectionIsOutsideMenubar(
+                    sharedID: id, sharedToolEnabled: toolEnabled,
+                    itemIDs: mbFull.map(\.id), panelVisible: panel?.isVisible == true)
+            configureMenubar()
+            return
+        }
+        overviewSelectionOutsideMenubar = false
+        let changed = index != rotateIdx
+        rotateIdx = index
+        if let timer = rotateTimer {
+            timer.fireDate = Date().addingTimeInterval(timer.timeInterval)
+        }
+        publishMenubarSelection()
+        if changed || currentMenubarImage == nil {
+            drawMenubar([mbFull[index]], animated: animated)
+        }
+    }
+
+    func publishMenubarSelection() {
+        let id = MenubarRotationPolicy.currentItem(items: mbFull, currentIndex: rotateIdx)?.id
+        store.selectQuotaPage(id, notifyMenubar: false)
+    }
+
+    private func menubarAgentEnabled(_ tool: String) -> Bool {
+        switch tool {
+        case "claude", "codex", "qoder": return store.menubarAgentEnabled(tool)
+        default: return false
+        }
     }
 
     func drawMenubar(_ items: [MBItem], animated: Bool) {

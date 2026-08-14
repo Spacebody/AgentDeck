@@ -67,6 +67,14 @@ try:
 except OSError:
     VERSION = "dev"
 _DAEMON_INSTANCE_ID = uuid.uuid4().hex
+_DAEMON_STARTED_AT = time.time()
+_UPDATE_TRANSACTION_RE = re.compile(r"^[0-9a-f]{32}$")
+_UPDATE_TRANSACTION = os.environ.get("AGENTDECK_UPDATE_TRANSACTION", "").strip().lower()
+if not _UPDATE_TRANSACTION_RE.fullmatch(_UPDATE_TRANSACTION):
+    _UPDATE_TRANSACTION = ""
+_BACKEND_OWNER_TOKEN = os.environ.get("AGENTDECK_BACKEND_OWNER_TOKEN", "").strip().lower()
+if not _UPDATE_TRANSACTION_RE.fullmatch(_BACKEND_OWNER_TOKEN):
+    _BACKEND_OWNER_TOKEN = ""
 _daemon_shutdown_requested = None
 SAMPLE_INTERVAL = 180          # 额度采样周期（秒）
 HISTORY_KEEP = 7 * 86400       # 历史保留 7 天
@@ -361,7 +369,7 @@ def api_settings_save(body):
     }
     if quota_keys.intersection(clean):
         _bump_quota_revision()
-    if "show_codex" in clean or "codex_dirs" in clean:
+    if {"show_codex", "menubar_codex", "codex_dirs"}.intersection(clean):
         _codex_quota_manager.request_reconcile()
     return {"ok": True, "settings": _settings_response()}
 
@@ -819,6 +827,183 @@ def _run_checked(cmd, **kw):
     return r
 
 
+def _update_install_script(tmp, stage, mount, version, transaction):
+    """Build the detached, transactional installer script."""
+    python = shlex.quote(sys.executable)
+    return f'''#!/bin/sh
+set -eu
+APP="/Applications/AgentDeck.app"
+NEW={shlex.quote(str(stage / "AgentDeck.app"))}
+MOUNT={shlex.quote(str(mount))}
+TMP={shlex.quote(str(tmp))}
+OLD="$TMP/AgentDeck.old.app"
+VERSION={shlex.quote(version)}
+TRANSACTION={shlex.quote(transaction)}
+PYTHON={python}
+APP_PATTERN='/Contents/MacOS/AgentDeck$'
+DAEMON_PATTERN='/Contents/Resources/agentdeckd[.]py$'
+PROCESS_SNAPSHOT="$TMP/process-snapshot"
+process_count() {{
+  PIDS=$(/usr/bin/pgrep -f "$1" 2>/dev/null || true)
+  printf '%s\n' "$PIDS" | /usr/bin/awk 'NF {{ n++ }} END {{ print n + 0 }}'
+}}
+wait_for_exit() {{
+  PATTERN="$1"
+  LIMIT="${{2:-300}}"
+  N=0
+  while /usr/bin/pgrep -f "$PATTERN" >/dev/null 2>&1 && [ "$N" -lt "$LIMIT" ]; do
+    sleep 0.1
+    N=$((N + 1))
+  done
+  ! /usr/bin/pgrep -f "$PATTERN" >/dev/null 2>&1
+}}
+signal_tree() {{
+  PID="$1"
+  SIGNAL="$2"
+  for CHILD in $(/usr/bin/pgrep -P "$PID" 2>/dev/null || true); do
+    signal_tree "$CHILD" "$SIGNAL"
+  done
+  /bin/kill "-$SIGNAL" "$PID" >/dev/null 2>&1 || true
+}}
+kill_matches_tree() {{
+  PATTERN="$1"
+  SIGNAL="$2"
+  for PID in $(/usr/bin/pgrep -f "$PATTERN" 2>/dev/null || true); do
+    signal_tree "$PID" "$SIGNAL"
+  done
+}}
+snapshot_tree() {{
+  PID="$1"
+  # The detached installer is still a direct child of the old daemon even with
+  # start_new_session=True. Never snapshot itself or commands it launches.
+  [ "$PID" = "$$" ] && return 0
+  for CHILD in $(/usr/bin/pgrep -P "$PID" 2>/dev/null || true); do
+    snapshot_tree "$CHILD"
+  done
+  START=$(/bin/ps -p "$PID" -o lstart= 2>/dev/null || true)
+  [ -n "$START" ] && printf '%s|%s\n' "$PID" "$START" >> "$PROCESS_SNAPSHOT"
+}}
+snapshot_installed() {{
+  : > "$PROCESS_SNAPSHOT"
+  for PID in $(/usr/bin/pgrep -f "$APP_PATTERN" 2>/dev/null || true); do
+    snapshot_tree "$PID"
+  done
+  for PID in $(/usr/bin/pgrep -f "$DAEMON_PATTERN" 2>/dev/null || true); do
+    snapshot_tree "$PID"
+  done
+}}
+signal_snapshot() {{
+  SIGNAL="$1"
+  [ -f "$PROCESS_SNAPSHOT" ] || return 0
+  while IFS='|' read -r PID START; do
+    [ -n "$PID" ] || continue
+    CURRENT=$(/bin/ps -p "$PID" -o lstart= 2>/dev/null || true)
+    [ "$CURRENT" = "$START" ] && /bin/kill "-$SIGNAL" "$PID" >/dev/null 2>&1 || true
+  done < "$PROCESS_SNAPSHOT"
+}}
+snapshot_alive() {{
+  [ -f "$PROCESS_SNAPSHOT" ] || return 1
+  while IFS='|' read -r PID START; do
+    [ -n "$PID" ] || continue
+    CURRENT=$(/bin/ps -p "$PID" -o lstart= 2>/dev/null || true)
+    [ "$CURRENT" = "$START" ] && return 0
+  done < "$PROCESS_SNAPSHOT"
+  return 1
+}}
+wait_for_snapshot_exit() {{
+  LIMIT="$1"
+  N=0
+  while snapshot_alive && [ "$N" -lt "$LIMIT" ]; do
+    sleep 0.1
+    N=$((N + 1))
+  done
+  ! snapshot_alive
+}}
+stop_installed() {{
+  snapshot_installed
+  /usr/bin/osascript -e 'tell application "AgentDeck" to quit' >/dev/null 2>&1 || true
+  if wait_for_exit "$APP_PATTERN" 300 && wait_for_exit "$DAEMON_PATTERN" 300; then
+    signal_snapshot TERM
+    wait_for_snapshot_exit 50 || {{ signal_snapshot KILL; wait_for_snapshot_exit 20; }}
+    return
+  fi
+  /usr/bin/pkill -TERM -f "$APP_PATTERN" >/dev/null 2>&1 || true
+  /usr/bin/pkill -TERM -f "$DAEMON_PATTERN" >/dev/null 2>&1 || true
+  signal_snapshot TERM
+  if wait_for_exit "$APP_PATTERN" 50 && wait_for_exit "$DAEMON_PATTERN" 50 \
+      && wait_for_snapshot_exit 50; then return; fi
+  kill_matches_tree "$APP_PATTERN" KILL
+  kill_matches_tree "$DAEMON_PATTERN" KILL
+  signal_snapshot KILL
+  wait_for_exit "$APP_PATTERN" 20 && wait_for_exit "$DAEMON_PATTERN" 20 \
+    && wait_for_snapshot_exit 20
+}}
+cleanup() {{
+  /usr/bin/hdiutil detach "$MOUNT" >/dev/null 2>&1 || true
+  /bin/rm -rf "$TMP"
+}}
+restore() {{
+  trap - ERR INT TERM
+  set +e
+  stop_installed
+  if [ -d "$OLD" ]; then
+    /bin/rm -rf "$APP"
+    /bin/mv "$OLD" "$APP"
+  fi
+  cleanup
+  [ -d "$APP" ] && /usr/bin/open -n "$APP" >/dev/null 2>&1 || true
+  echo "AgentDeck update failed; restored previous version" >&2
+  exit 1
+}}
+replacement_ready() {{
+  [ "$(process_count "$APP_PATTERN")" -eq 1 ] || return 1
+  [ "$(process_count "$DAEMON_PATTERN")" -eq 1 ] || return 1
+  APP_PID=$(/usr/bin/pgrep -f "$APP_PATTERN") || return 1
+  DAEMON_PID=$(/usr/bin/pgrep -f "$DAEMON_PATTERN") || return 1
+  BODY=$(/usr/bin/curl --silent --show-error --fail --max-time 2 \
+    http://127.0.0.1:7777/api/health) || return 1
+  printf '%s' "$BODY" | "$PYTHON" -c '
+import json, os, re, sys
+data = json.load(sys.stdin)
+expected_version, transaction, app_pid, daemon_pid, script = sys.argv[1:]
+ok = (
+    data.get("ok") is True
+    and data.get("version") == expected_version
+    and data.get("update_transaction") == transaction
+    and re.fullmatch(r"[0-9a-f]{{32}}", str(data.get("owner_token", ""))) is not None
+    and int(data.get("parent_pid", -1)) == int(app_pid)
+    and int(data.get("pid", -1)) == int(daemon_pid)
+    and os.path.realpath(str(data.get("script_path", ""))) == os.path.realpath(script)
+)
+raise SystemExit(0 if ok else 1)
+' "$VERSION" "$TRANSACTION" "$APP_PID" "$DAEMON_PID" \
+    "$APP/Contents/Resources/agentdeckd.py"
+}}
+wait_for_replacement() {{
+  N=0
+  while [ "$N" -lt 600 ]; do
+    replacement_ready && return 0
+    sleep 0.1
+    N=$((N + 1))
+  done
+  return 1
+}}
+trap restore ERR INT TERM
+stop_installed
+if [ -d "$APP" ]; then /bin/mv "$APP" "$OLD"; fi
+/bin/cp -R "$NEW" "$APP"
+/usr/bin/codesign --verify --deep --strict "$APP"
+/usr/sbin/spctl --assess --type execute "$APP"
+/usr/bin/xattr -dr com.apple.quarantine "$APP" >/dev/null 2>&1 || true
+/usr/bin/open -n --env "AGENTDECK_UPDATE_TRANSACTION=$TRANSACTION" "$APP"
+wait_for_replacement
+echo "AgentDeck $VERSION update handoff verified"
+trap - ERR INT TERM
+/bin/rm -rf "$OLD"
+cleanup
+'''
+
+
 def _update_install_worker(job_id, dmg_url, version):
     tmp = Path(tempfile.mkdtemp(prefix="agentdeck-update-"))
     dmg_path = tmp / f"AgentDeck-{version or 'latest'}.dmg"
@@ -866,56 +1051,21 @@ def _update_install_worker(job_id, dmg_url, version):
         _run_checked(["cp", "-R", str(app), str(stage / "AgentDeck.app")], timeout=120)
 
         helper = tmp / "install-agentdeck.sh"
-        _atomic_write_text(helper, f'''#!/bin/sh
-set -eu
-APP="/Applications/AgentDeck.app"
-NEW={shlex.quote(str(stage / "AgentDeck.app"))}
-MOUNT={shlex.quote(str(mount))}
-TMP={shlex.quote(str(tmp))}
-OLD="$TMP/AgentDeck.old.app"
-APP_PATTERN='/Applications/AgentDeck[.]app/Contents/MacOS/AgentDeck$'
-DAEMON_PATTERN='/Applications/AgentDeck[.]app/Contents/Resources/agentdeckd[.]py$'
-wait_for_exit() {{
-  PATTERN="$1"
-  N=0
-  while /usr/bin/pgrep -f "$PATTERN" >/dev/null 2>&1 && [ "$N" -lt 300 ]; do
-    sleep 0.1
-    N=$((N + 1))
-  done
-  if /usr/bin/pgrep -f "$PATTERN" >/dev/null 2>&1; then
-    echo "AgentDeck processes did not exit safely" >&2
-    return 1
-  fi
-}}
-cleanup() {{
-  /usr/bin/hdiutil detach "$MOUNT" >/dev/null 2>&1 || true
-  /bin/rm -rf "$TMP"
-}}
-restore() {{
-  if [ -d "$OLD" ]; then
-    /bin/rm -rf "$APP"
-    /bin/mv "$OLD" "$APP"
-  fi
-  cleanup
-  [ -d "$APP" ] && /usr/bin/open "$APP" || true
-}}
-trap restore ERR INT TERM
-/usr/bin/osascript -e 'tell application "AgentDeck" to quit' >/dev/null 2>&1 || true
-wait_for_exit "$APP_PATTERN"
-wait_for_exit "$DAEMON_PATTERN"
-if [ -d "$APP" ]; then /bin/mv "$APP" "$OLD"; fi
-/bin/cp -R "$NEW" "$APP"
-/usr/bin/codesign --verify --deep --strict "$APP"
-/usr/sbin/spctl --assess --type execute "$APP"
-/bin/rm -rf "$OLD"
-/usr/bin/xattr -dr com.apple.quarantine "$APP" >/dev/null 2>&1 || true
-trap - ERR INT TERM
-cleanup
-/usr/bin/open "$APP"
-''', mode=0o755)
+        transaction = uuid.uuid4().hex
+        _atomic_write_text(
+            helper,
+            _update_install_script(tmp, stage, mount, version, transaction),
+            mode=0o755)
         _set_update_job(stage="installing", progress=0.95, message="installing")
-        subprocess.Popen(["/bin/sh", str(helper)], stdout=subprocess.DEVNULL,
-                         stderr=subprocess.DEVNULL, start_new_session=True)
+        update_log = Path.home() / "Library" / "Logs" / "AgentDeckUpdate.log"
+        update_log.parent.mkdir(parents=True, exist_ok=True)
+        with open(update_log, "a", encoding="utf-8") as log:
+            log.write(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] "
+                      f"installing AgentDeck {version}\n")
+            log.flush()
+            subprocess.Popen(
+                ["/bin/sh", str(helper)], stdout=log,
+                stderr=subprocess.STDOUT, start_new_session=True)
     except Exception as exc:
         if mounted:
             subprocess.run(["hdiutil", "detach", str(mount)], stdout=subprocess.DEVNULL,
@@ -1721,7 +1871,8 @@ class CodexQuotaManager:
 
     def _refresh_all_locked(self):
         """Refresh every active Codex source while the caller owns _refresh_gate."""
-        sources = self._sources() if get_settings().get("show_codex", True) else []
+        sources = self._sources() \
+            if _quota_surface_enabled(get_settings(), "codex") else []
         self._prune_inactive(sources)
         if not sources:
             return True
@@ -1880,7 +2031,7 @@ class CodexQuotaManager:
         _remember_last_good(self._cache_key(src), value)
         if changed:
             _bump_quota_revision()
-            if get_settings().get("show_codex", True):
+            if _quota_surface_enabled(get_settings(), "codex"):
                 accounts = self._sources()
                 _check_alerts("Codex", value.get("windows", []), src["id"],
                               src["label"], len(accounts) > 1,
@@ -1989,18 +2140,24 @@ def _resilient(key, ttl, fn):
 _last_force_claude_quota = 0.0
 
 
+def _quota_surface_enabled(settings, provider):
+    """Collect quota while either the panel or menu-bar surface needs it."""
+    return (settings.get(f"show_{provider}", True)
+            or settings.get(f"menubar_{provider}", False))
+
+
 def _force_quota_refreshes(settings, ttl, budget=QUOTA_FORCE_BUDGET_SECS):
     """Refresh visible providers concurrently within one end-to-end deadline."""
     pool = concurrent.futures.ThreadPoolExecutor(
         max_workers=3, thread_name_prefix="agentdeck-quota-force")
     futures = {}
     try:
-        if settings.get("show_claude", True):
+        if _quota_surface_enabled(settings, "claude"):
             futures["claude"] = pool.submit(_claude_quota_accounts, ttl)
-        if settings.get("show_codex", True):
+        if _quota_surface_enabled(settings, "codex"):
             futures["codex"] = pool.submit(
                 _codex_quota_manager.force_refresh, max(0.0, budget - 1))
-        if settings.get("show_qoder", False):
+        if _quota_surface_enabled(settings, "qoder"):
             futures["qoder"] = pool.submit(
                 _qoder_quota_accounts, ttl, False, max(1.0, budget - 1.0))
         done, pending = concurrent.futures.wait(
@@ -2625,15 +2782,15 @@ def _normal_quota_accounts(settings, ttl, fresh_codex=False,
         max_workers=3, thread_name_prefix="agentdeck-quota-normal")
     futures = {}
     try:
-        if settings.get("show_claude", True):
+        if _quota_surface_enabled(settings, "claude"):
             futures["claude"] = pool.submit(_claude_quota_accounts, ttl)
-        if settings.get("show_codex", True):
+        if _quota_surface_enabled(settings, "codex"):
             def codex_accounts():
                 _codex_quota_manager.ensure_fresh(
                     CODEX_OPEN_STALE_SECS if fresh_codex else CODEX_RECONCILE_SECS)
                 return _codex_quota_accounts()
             futures["codex"] = pool.submit(codex_accounts)
-        if settings.get("show_qoder", True):
+        if _quota_surface_enabled(settings, "qoder"):
             futures["qoder"] = pool.submit(
                 _qoder_quota_accounts, ttl, False, max(1.0, budget - 1.0))
         done, pending = concurrent.futures.wait(
@@ -2656,7 +2813,8 @@ def _normal_quota_accounts(settings, ttl, fresh_codex=False,
 
 def api_quota(force=False, cache_only=False, fresh_codex=False):
     s = get_settings()
-    # 面板隐藏的 agent 不再拉额度（省钥匙串读取 / Anthropic usage 调用 / 限流消耗）
+    # 面板和状态栏是独立表面：两处都关闭才停止采集，避免“面板关闭、状态栏开启”
+    # 时状态项拿不到账号窗口。agents.hidden 仍只反映面板开关。
     ttl = s.get("quota_interval", CLAUDE_QUOTA_TTL)
     # 手动刷新分别处理两端：Claude 清缓存并受 10s 防连点保护；Codex 交给自己的
     # app-server 客户端和 3s 去重，不再因刷新 Codex 顺带消耗 Anthropic 额度接口。
@@ -2676,11 +2834,11 @@ def api_quota(force=False, cache_only=False, fresh_codex=False):
     normal_accounts = None
     if not force and not cache_only:
         normal_accounts = _normal_quota_accounts(s, ttl, fresh_codex)
-    elif not force and s.get("show_codex", True):
+    elif not force and _quota_surface_enabled(s, "codex"):
         _codex_quota_manager.ensure_fresh(
             CODEX_OPEN_STALE_SECS if fresh_codex else CODEX_RECONCILE_SECS)
 
-    if s.get("show_claude", True):
+    if _quota_surface_enabled(s, "claude"):
         if forced_claude_accts is not None:
             claude_accts = forced_claude_accts
         elif normal_accounts is not None:
@@ -2692,10 +2850,10 @@ def api_quota(force=False, cache_only=False, fresh_codex=False):
         claude_accts = []
     codex_accts = (normal_accounts.get("codex", []) if normal_accounts is not None
                    else _codex_quota_accounts()) \
-        if s.get("show_codex", True) else []
+        if _quota_surface_enabled(s, "codex") else []
     qoder_accts = (normal_accounts.get("qoder", []) if normal_accounts is not None
                    else _qoder_quota_accounts(ttl, cache_only=cache_only)) \
-        if s.get("show_qoder", True) else []
+        if _quota_surface_enabled(s, "qoder") else []
     # 向后兼容：各顶层字段仍为「主账号」单对象；agents 是拍平 UI 的自包含契约。
     # 未发现账号时也把明确状态作为合成默认页放进 agents，避免启用的 Agent 静默消失。
     if claude_accts:
@@ -7313,6 +7471,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, {"ok": True, "pid": os.getpid(),
                                  "parent_pid": os.getppid(),
                                  "instance_id": _DAEMON_INSTANCE_ID,
+                                 "started_at": _DAEMON_STARTED_AT,
+                                 "update_transaction": _UPDATE_TRANSACTION,
+                                 "owner_token": _BACKEND_OWNER_TOKEN,
                                  "script_path": str(Path(__file__).resolve()),
                                  "version": VERSION})
             elif path == "/api/quota":
@@ -7473,6 +7634,12 @@ def _run_startup_task(name, task):
         print(f"agentdeckd {name} startup failed: {exc}", file=sys.stderr)
 
 
+def _run_delayed_loop(delay, shutdown_requested, task):
+    """Let the health server answer before expensive background scans begin."""
+    if not shutdown_requested.wait(delay):
+        task()
+
+
 def main():
     global _daemon_shutdown_requested
     _events_load()
@@ -7495,8 +7662,15 @@ def main():
     _codex_quota_manager.start()
     threading.Thread(target=_parent_watchdog,
                      args=(shutdown_requested,), daemon=True).start()
-    threading.Thread(target=_sampler_loop, daemon=True).start()
-    threading.Thread(target=_keepawake_loop, daemon=True).start()
+    # Both loops may inspect large rollout files while holding Python's GIL. On
+    # cold start that used to starve /api/health long enough for the App to
+    # terminate and respawn a healthy-but-busy daemon repeatedly.
+    threading.Thread(target=_run_delayed_loop,
+                     args=(3, shutdown_requested, _sampler_loop),
+                     daemon=True, name="agentdeck-sampler-startup").start()
+    threading.Thread(target=_run_delayed_loop,
+                     args=(3, shutdown_requested, _keepawake_loop),
+                     daemon=True, name="agentdeck-keepawake-startup").start()
     print(f"agentdeckd listening on http://127.0.0.1:{PORT}")
     try:
         server.serve_forever()

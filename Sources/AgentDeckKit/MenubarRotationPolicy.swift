@@ -35,4 +35,12 @@ public enum MenubarRotationPolicy {
         return items.indices.contains(currentIndex) ? items[currentIndex] : items[0]
     }
 
+    public static func selectionIsOutsideMenubar(
+        sharedID: String?, sharedToolEnabled: Bool,
+        itemIDs: [String], panelVisible: Bool
+    ) -> Bool {
+        guard panelVisible, let sharedID else { return false }
+        return !sharedToolEnabled && !itemIDs.contains(sharedID)
+    }
+
 }

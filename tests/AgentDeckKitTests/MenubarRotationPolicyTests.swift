@@ -19,6 +19,19 @@ final class MenubarRotationPolicyTests: XCTestCase {
             0)
     }
 
+    func testMissingAccountFallsBackButOverviewOnlyAgentPausesMenubar() {
+        let ids = ["claude::default", "codex::default"]
+        XCTAssertFalse(MenubarRotationPolicy.selectionIsOutsideMenubar(
+            sharedID: "codex::removed", sharedToolEnabled: true,
+            itemIDs: ids, panelVisible: true))
+        XCTAssertTrue(MenubarRotationPolicy.selectionIsOutsideMenubar(
+            sharedID: "qoder::default", sharedToolEnabled: false,
+            itemIDs: ids, panelVisible: true))
+        XCTAssertFalse(MenubarRotationPolicy.selectionIsOutsideMenubar(
+            sharedID: "qoder::default", sharedToolEnabled: false,
+            itemIDs: ids, panelVisible: false))
+    }
+
     func testNextIndexWrapsAndEmptyListIsSafe() {
         XCTAssertEqual(MenubarRotationPolicy.nextIndex(current: 0, itemCount: 3), 1)
         XCTAssertEqual(MenubarRotationPolicy.nextIndex(current: 2, itemCount: 3), 0)

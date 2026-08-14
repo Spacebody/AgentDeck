@@ -52,6 +52,10 @@ func hasUnattemptedSettingChanges(
     }
 }
 
+func shouldRetryForcedRefresh(forcePending: Bool, requestSucceeded: Bool) -> Bool {
+    forcePending && !requestSucceeded
+}
+
 /// Serializes quota snapshots arriving from ordinary requests and the daemon's push channel.
 /// Push snapshots cover failures from requests already in flight, but a matching-revision
 /// ordinary response may still be more complete (for example, freshly fetched Claude quota).
@@ -118,6 +122,10 @@ public final class AppStore: ObservableObject {
     public var onSettingsChanged: (() -> Void)?
     /// daemon 额度 revision 变化后回调；主壳据此即时重绘菜单栏，不等 20s 兜底轮询。
     public var onQuotaChanged: (() -> Void)?
+    /// 概览手动选择额度页后通知 AppKit 状态栏跟随。
+    public var onQuotaSelectionChanged: ((String) -> Void)?
+    /// 概览暂停、悬停或拖动时同步暂停状态栏轮播。
+    public var onQuotaRotationPauseChanged: ((Bool) -> Void)?
 
     @Published var quota: QuotaResponse?
     @Published var usage: UsageResponse?
@@ -137,8 +145,30 @@ public final class AppStore: ObservableObject {
     @Published var sessionsIndexing = false
     @Published var sessionsLoadFailed = false
     @Published var online = true                   // 后端健康（驱动顶栏 live 点）
+    @Published public private(set) var quotaSelectionID: String?
+    @Published public private(set) var menubarRotationActive = false
 
     @Published var terminals: [TerminalOption] = []   // /api/terminals 已安装终端（恢复方式选项）
+
+    /// 两个轮播面的共享选择。状态栏写入时不回调自身；概览手动选择时回调 AppKit。
+    public func selectQuotaPage(_ id: String?, notifyMenubar: Bool) {
+        guard quotaSelectionID != id else { return }
+        quotaSelectionID = id
+        if notifyMenubar, let id { onQuotaSelectionChanged?(id) }
+    }
+
+    public func setMenubarRotationActive(_ active: Bool) {
+        guard menubarRotationActive != active else { return }
+        menubarRotationActive = active
+    }
+
+    public func setQuotaRotationPaused(_ paused: Bool) {
+        onQuotaRotationPauseChanged?(paused)
+    }
+
+    public func menubarAgentEnabled(_ agentID: String) -> Bool {
+        settings["menubar_\(agentID)"]?.boolVal ?? true
+    }
 
     var today: TodaySummary? {
         guard let usage else { return nil }
@@ -175,17 +205,24 @@ public final class AppStore: ObservableObject {
     private var settingMutationVersions: [String: Int] = [:]
     private var acknowledgedSettingVersions: [String: Int] = [:]
     private var quotaGate = QuotaSnapshotGate()
+    private var backendGeneration = 0
 
     private var refreshInterval: Double { Double(max(5, settings["refresh_interval"]?.intVal ?? 30)) }
 
     // MARK: 轮询
-    public func start() {
+    public func start(forceInitialRefresh: Bool = false) {
         Task { await loadSettings() }
         Task { await loadTerminals() }
         pollTask?.cancel()
         pollTask = Task { [weak self] in
+            var forceNextRefresh = forceInitialRefresh
             while !Task.isCancelled {
-                await self?.refresh()
+                let succeeded = await self?.refresh(
+                    force: forceNextRefresh,
+                    freshCodex: forceNextRefresh) ?? false
+                forceNextRefresh = shouldRetryForcedRefresh(
+                    forcePending: forceNextRefresh,
+                    requestSucceeded: succeeded)
                 let secs = self?.refreshInterval ?? 30
                 try? await Task.sleep(nanoseconds: UInt64(secs * 1_000_000_000))
             }
@@ -193,6 +230,14 @@ public final class AppStore: ObservableObject {
         quotaWatchTask?.cancel()
         quotaWatchTask = Task { [weak self] in
             await self?.watchQuotaChanges()
+        }
+        if !sessionQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            sessionRequestGeneration += 1
+            let generation = sessionRequestGeneration
+            invalidateSessionNavigation()
+            searchTask = Task { [weak self] in
+                await self?.loadSessionPage(reset: true, generation: generation)
+            }
         }
     }
     public func stop() {
@@ -203,13 +248,35 @@ public final class AppStore: ObservableObject {
         agentVisibilityRefreshTask?.cancel(); agentVisibilityRefreshTask = nil
     }
 
+    public func markBackendUnavailable() {
+        backendGeneration += 1
+        sessionRequestGeneration += 1
+        quotaGate = QuotaSnapshotGate()
+        quota = nil
+        usage = nil
+        sessions = []
+        sessionsTotal = 0
+        sessionsHasMore = false
+        sessionPage = 1
+        sessionNextCursor = nil
+        sessionPageCursors = [nil]
+        sessionsLoading = false
+        sessionsIndexing = false
+        sessionsLoadFailed = false
+        active = []
+        done = []
+        online = false
+    }
+
     /// 开面板立即读取 daemon 快照；Codex 超过 30s 未经官方校准时只在后台发起校准，
     /// 返回路径不等待出站。Claude 仍走原缓存，避免开窗动作消耗其限流严格的 usage 接口。
     public func refreshOnOpen() async { await refresh(freshCodex: true) }
 
     /// force=true 时给 /api/quota 带 ?force=1 绕过后端额度缓存、强制重采（对应 v1 手动刷新 refreshAll(true)）；
     /// 周期轮询用 false 走缓存，避免每轮都出站打 Anthropic。
-    public func refresh(force: Bool = false, freshCodex: Bool = false) async {
+    @discardableResult
+    public func refresh(force: Bool = false, freshCodex: Bool = false) async -> Bool {
+        let generation = backendGeneration
         // 6 个接口并发拉取（旧实现串行 → 启动/手动刷新要等全部之和；quota 还出站打 Anthropic 最慢，
         // 串行时它把整屏都拖住）。APIClient 是 actor，并发 get 在各自 await 网络处挂起、互不阻塞。
         // 只在默认列表仍处于第一页时参与周期刷新；用户翻到后页时不把当前页
@@ -236,6 +303,7 @@ public final class AppStore: ObservableObject {
         // 本地快接口合成一批后同步落地，ObservableObjectPublisher 可在同一主线程周期
         // 合并视图失效；出站较慢的 quota/update 再作为第二批补上。
         let (u, a, e, s) = await (usageR, activeR, eventsR, sessionsR)
+        guard generation == backendGeneration, !Task.isCancelled else { return false }
         if let u { usage = u }
         if let a { active = a.active }
         if let e {
@@ -251,17 +319,20 @@ public final class AppStore: ObservableObject {
                 resetHistory: true, generation: sessionGeneration)
         }
         let (q, up) = await (quotaR, updateR)
+        guard generation == backendGeneration, !Task.isCancelled else { return false }
         if let q {
             applyQuota(q, request: quotaRequest)
         } else if quotaGate.canReportFailure(for: quotaRequest) {
             online = false
         }
         if let up { update = up }
+        return q != nil
     }
 
     /// 单一长轮询连接接收额度 revision。服务端 25s 心跳、客户端 35s 超时；
     /// 无变化时不发布 ObservableObject 更新，daemon 重启则用 bootId 立即重建游标。
     private func watchQuotaChanges() async {
+        let generation = backendGeneration
         var retryNanos: UInt64 = 500_000_000
         while !Task.isCancelled {
             do {
@@ -272,7 +343,7 @@ public final class AppStore: ObservableObject {
                         "boot": quotaGate.bootId,
                         "timeout": "25",
                     ])
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled, generation == backendGeneration else { return }
                 online = true
                 _ = applyQuota(
                     response.quota,
@@ -281,7 +352,7 @@ public final class AppStore: ObservableObject {
                     request: nil)
                 retryNanos = 500_000_000
             } catch {
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled, generation == backendGeneration else { return }
                 try? await Task.sleep(nanoseconds: retryNanos)
                 retryNanos = min(retryNanos * 2, 5_000_000_000)
             }
@@ -307,10 +378,12 @@ public final class AppStore: ObservableObject {
 
     // MARK: 设置
     func loadSettings() async {
+        let generation = backendGeneration
         let acknowledgementsAtRequest = acknowledgedSettingVersions
         // GET /api/settings 直接返回扁平设置字典（无 settings 包裹，与 v1 一致）；
         // POST 的应答才是 {ok, settings:{…}}。兼容两种形态，否则设置永远读不回 → 看似「开关不保存」。
         guard let raw = try? await api.getJSON("/api/settings") else { return }
+        guard generation == backendGeneration, !Task.isCancelled else { return }
         let dict = (raw["settings"] as? [String: Any]) ?? raw
         let kinds = SettingsSchema.valueKinds
         var out: [String: SettingValue] = [:]
@@ -347,7 +420,11 @@ public final class AppStore: ObservableObject {
     }
 
     func loadTerminals() async {
-        if let r: TerminalsResponse = try? await api.get("/api/terminals") { terminals = r.terminals }
+        let generation = backendGeneration
+        if let r: TerminalsResponse = try? await api.get("/api/terminals"),
+           generation == backendGeneration, !Task.isCancelled {
+            terminals = r.terminals
+        }
     }
 
     func setSetting(_ key: String, _ value: SettingValue) {

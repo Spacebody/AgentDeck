@@ -53,6 +53,9 @@ struct OverviewView: View {
     var quotaAutoRotate: Bool = true
     var quotaRotateSecs: Int = 6
     var carouselActive: Bool = true
+    var quotaSelectionID: String? = nil
+    var onSelectQuota: (String) -> Void = { _ in }
+    var onQuotaRotationPauseChange: (Bool) -> Void = { _ in }
     var onFocusActive: (ActiveSession) -> Void = { _ in }
     var onFocusDone: (DoneEvent) -> Void = { _ in }
 
@@ -94,7 +97,10 @@ struct OverviewView: View {
                 pages: quota.flatPages(visibleAgents: visible),
                 autoRotate: quotaAutoRotate,
                 interval: quotaRotateSecs,
-                isActive: carouselActive)
+                isActive: carouselActive,
+                selectionID: quotaSelectionID,
+                onSelectionChange: onSelectQuota,
+                onRotationPauseChange: onQuotaRotationPauseChange)
                 .frame(maxWidth: .infinity, alignment: .top)
         }
     }
@@ -143,14 +149,43 @@ enum PreviewSamples {
         ],
         error: nil, noQuota: nil, sampledAt: nil, stale: nil, credits: nil, raw: nil)
 
+    static let qoder = QuotaNode(
+        ok: true, hidden: false, accountId: nil, account: nil, isDefault: true,
+        kind: "personal_standard",
+        windows: [
+            QuotaWindow(id: "total", label: "综合额度", usedPercent: 36,
+                        resetsAt: nil, used: 360, total: 1000, remaining: 640,
+                        unit: "credits", bucketKind: "total"),
+            QuotaWindow(id: "plan", label: "套餐额度", usedPercent: 41,
+                        resetsAt: nil, used: 410, total: 1000, remaining: 590,
+                        unit: "credits", bucketKind: "plan"),
+        ],
+        error: nil, noQuota: nil, sampledAt: ISO8601DateFormatter().string(from: Date()),
+        stale: nil, credits: nil, raw: nil)
+
     static let hiddenClaude = QuotaNode(
         ok: false, hidden: true, accountId: nil, account: nil, isDefault: true, kind: nil,
         windows: nil, error: nil, noQuota: nil, sampledAt: nil, stale: nil,
         credits: nil, raw: nil)
 
     static let response = QuotaResponse(
-        claude: claude, codex: codex,
-        accounts: QuotaAccounts(claude: [claude], codex: [codex]),
+        claude: claude, codex: codex, qoder: qoder,
+        agents: [
+            AgentQuota(id: "claude", name: "Claude", hidden: false, accounts: [claude]),
+            AgentQuota(id: "codex", name: "Codex", hidden: false, accounts: [codex]),
+            AgentQuota(id: "qoder", name: "Qoder", hidden: false, accounts: [qoder]),
+        ],
+        accounts: QuotaAccounts(claude: [claude], codex: [codex], qoder: [qoder]),
+        menubar: nil, ts: nil)
+
+    static let readmeResponse = QuotaResponse(
+        claude: claude, codex: codex, qoder: qoder,
+        agents: [
+            AgentQuota(id: "qoder", name: "Qoder", hidden: false, accounts: [qoder]),
+            AgentQuota(id: "claude", name: "Claude", hidden: false, accounts: [claude]),
+            AgentQuota(id: "codex", name: "Codex", hidden: false, accounts: [codex]),
+        ],
+        accounts: QuotaAccounts(claude: [claude], codex: [codex], qoder: [qoder]),
         menubar: nil, ts: nil)
 
     static let codexOnlyResponse = QuotaResponse(
@@ -197,13 +232,31 @@ enum PreviewSamples {
                       host: "app", runtimeSecs: 4520, runtime: nil, status: "busy", id: "s1", pid: 123),
         ActiveSession(tool: "codex", cwd: "/Users/demo/Projects/api-service/backend", project: "api-service",
                       host: nil, runtimeSecs: 1200, runtime: nil, status: "idle", id: "s2", pid: 124),
+        ActiveSession(tool: "qoder", cwd: "/Users/demo/Projects/design-system", project: "design-system",
+                      host: "app", source: "qoder_app", runtimeSecs: 760, runtime: nil,
+                      status: "busy", id: "s3", pid: 125),
     ]
-    static let done: [DoneEvent] = [
-        DoneEvent(tool: "claude", title: "重构额度卡为 SwiftUI", project: "agentdeck",
+    static var done: [DoneEvent] {
+        let titles: (String, String, String)
+        switch I18N.locale {
+        case "en":
+            titles = ("Refactor quota cards in SwiftUI", "Fix login callback timeout",
+                      "Plan component library migration")
+        case "ja":
+            titles = ("クォータカードを SwiftUI 化", "ログインコールバックのタイムアウトを修正",
+                      "コンポーネントライブラリ移行計画")
+        default:
+            titles = ("重构额度卡为 SwiftUI", "修复登录回调超时", "整理组件库迁移计划")
+        }
+        return [
+        DoneEvent(tool: "claude", title: titles.0, project: "agentdeck",
                   ts: Date().timeIntervalSince1970 - 600, session: "x", cwd: "/Users/demo/Projects/agentdeck"),
-        DoneEvent(tool: "codex", title: "修复登录回调超时", project: "api-service",
+        DoneEvent(tool: "codex", title: titles.1, project: "api-service",
                   ts: Date().timeIntervalSince1970 - 5400, session: "y", cwd: "/Users/demo/Projects/api-service"),
-    ]
+        DoneEvent(tool: "qoder", title: titles.2, project: "design-system",
+                  ts: Date().timeIntervalSince1970 - 7200, session: "z", cwd: "/Users/demo/Projects/design-system"),
+        ]
+    }
 
     static let sessions: [SessionItem] = [
         SessionItem(tool: "claude", id: "a1", title: "重构额度卡为原生 SwiftUI", cwd: "/Users/demo/Projects/agentdeck",
@@ -215,6 +268,9 @@ enum PreviewSamples {
         SessionItem(tool: "claude", id: "c3", title: "撰写 v1.26 发布说明", cwd: "/Users/demo/Projects/agentdeck",
                     project: "agentdeck", branch: "HEAD", mtime: Date().timeIntervalSince1970 - 86400,
                     account: nil, accountId: nil, pinned: false),
+        SessionItem(tool: "qoder", id: "d4", title: "整理组件库迁移计划", cwd: "/Users/demo/Projects/design-system",
+                    project: "design-system", branch: "main", mtime: Date().timeIntervalSince1970 - 5400,
+                    account: nil, accountId: nil, source: "qoder_app", pinned: false),
     ]
     static let previewMsgs: [PreviewMsg] = [
         PreviewMsg(role: "user", text: "把额度卡的进度环改成原生 SwiftUI，要和网页版一模一样"),

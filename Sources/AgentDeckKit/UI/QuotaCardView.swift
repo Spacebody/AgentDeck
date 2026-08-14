@@ -1,7 +1,6 @@
 // AgentDeck v2 — 额度卡。忠实复刻 index.html quotaCardInner()（行 1189）：
 // 头部(徽章+名+账号+副信息) · 主体(进度环 + 窗口条) · 脚注 · 品牌辉光 · 玻璃卡。
 import SwiftUI
-import Combine
 import AppKit
 
 private extension View {
@@ -377,17 +376,19 @@ struct FlatQuotaCarousel: View {
     var autoRotate = true
     var interval = 6
     var isActive = true
+    var selectionID: String? = nil
+    var onSelectionChange: (String) -> Void = { _ in }
+    var onRotationPauseChange: (Bool) -> Void = { _ in }
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var selectedID: String?
     @State private var width: CGFloat = 0
     @State private var hovering = false
     @State private var paused = false
+    @State private var dragging = false
     @State private var movingForward = true
     @State private var lastAdvance = Date()
     @GestureState private var dragX: CGFloat = 0
-    private let ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
-
     private var page: Int {
         guard !pages.isEmpty else { return 0 }
         return pages.firstIndex(where: { $0.id == selectedID }) ?? 0
@@ -398,6 +399,9 @@ struct FlatQuotaCarousel: View {
     }
     private var normalizedInterval: TimeInterval {
         TimeInterval(normalizedQuotaRotationInterval(interval))
+    }
+    private var autoRotationTaskID: String {
+        "\(autoRotate)-\(isActive)-\(interval)-\(pages.map(\.id).joined(separator: "|"))"
     }
 
     var body: some View {
@@ -430,11 +434,18 @@ struct FlatQuotaCarousel: View {
                 .gesture(
                     DragGesture(minimumDistance: 12)
                         .updating($dragX) { value, state, _ in state = value.translation.width }
+                        .onChanged { _ in
+                            guard !dragging else { return }
+                            dragging = true
+                            publishPauseState()
+                        }
                         .onEnded { value in
                             let threshold = max(40, width * 0.18)
                             if value.translation.width <= -threshold { select(page + 1) }
                             else if value.translation.width >= threshold { select(page - 1) }
                             else { lastAdvance = Date() }
+                            dragging = false
+                            publishPauseState()
                         })
                 controls
             }
@@ -442,13 +453,40 @@ struct FlatQuotaCarousel: View {
                 Color.clear.preference(key: CarouselWidthKey.self, value: proxy.size.width)
             })
             .onPreferenceChange(CarouselWidthKey.self) { width = $0 }
-            .onHover { hovering = $0; if !$0 { lastAdvance = Date() } }
+            .onHover {
+                hovering = $0
+                publishPauseState()
+                if !$0 { lastAdvance = Date() }
+            }
             .onAppear { reconcileSelection(); lastAdvance = Date() }
+            .onDisappear {
+                hovering = false
+                dragging = false
+                publishPauseState()
+            }
             .onChange(of: pages.map(\.id)) { _ in reconcileSelection() }
+            .onChange(of: selectionID) { id in
+                guard let id, pages.contains(where: { $0.id == id }), selectedID != id else { return }
+                movingForward = direction(to: id)
+                selectedID = id
+                lastAdvance = Date()
+            }
             .onChange(of: isActive) { _ in lastAdvance = Date() }
-            .onReceive(ticker) { now in
-                guard canAutoRotate, now.timeIntervalSince(lastAdvance) >= normalizedInterval else { return }
-                select(page + 1)
+            .task(id: autoRotationTaskID) {
+                guard autoRotate && isActive && pages.count > 1 else { return }
+                while !Task.isCancelled {
+                    do {
+                        try await Task.sleep(nanoseconds: 1_000_000_000)
+                    } catch {
+                        return
+                    }
+                    let now = Date()
+                    guard canAutoRotate,
+                          now.timeIntervalSince(lastAdvance) >= normalizedInterval else { continue }
+                    // 状态栏轮播关闭时，概览仍可按自己的设置自动切换，但不能让已固定的
+                    // 状态栏跟着滚动；用户手动切换仍通过下面的默认参数双向同步。
+                    select(page + 1, notifySharedSelection: false)
+                }
             }
             .quotaCarouselKeyboardFocus()
             .onMoveCommand { direction in
@@ -481,7 +519,9 @@ struct FlatQuotaCarousel: View {
             Spacer(minLength: 0)
             carouselButton(paused ? "play.fill" : "pause.fill",
                            label: paused ? L("quota.play") : L("quota.pause")) {
-                paused.toggle(); lastAdvance = Date()
+                paused.toggle()
+                publishPauseState()
+                lastAdvance = Date()
             }
             carouselButton("chevron.right", label: L("quota.next")) { select(page + 1) }
         }
@@ -508,11 +548,25 @@ struct FlatQuotaCarousel: View {
     }
 
     private func reconcileSelection() {
-        selectedID = reconciledQuotaSelection(currentID: selectedID, pages: pages)
+        let preferred = selectedID.flatMap { id in
+            pages.contains(where: { $0.id == id }) ? id : nil
+        } ?? selectionID.flatMap { id in
+            pages.contains(where: { $0.id == id }) ? id : nil
+        }
+        selectedID = reconciledQuotaSelection(currentID: preferred, pages: pages)
         lastAdvance = Date()
     }
 
-    private func select(_ requested: Int) {
+    private func direction(to id: String) -> Bool {
+        guard let target = pages.firstIndex(where: { $0.id == id }) else { return true }
+        return target > page || (page == pages.count - 1 && target == 0)
+    }
+
+    private func publishPauseState() {
+        onRotationPauseChange(paused || hovering || dragging)
+    }
+
+    private func select(_ requested: Int, notifySharedSelection: Bool = true) {
         guard !pages.isEmpty else { return }
         let target = (requested % pages.count + pages.count) % pages.count
         movingForward = requested > page || (page == pages.count - 1 && target == 0)
@@ -523,6 +577,7 @@ struct FlatQuotaCarousel: View {
                 selectedID = pages[target].id
             }
         }
+        if notifySharedSelection { onSelectionChange(pages[target].id) }
         lastAdvance = Date()
     }
 }

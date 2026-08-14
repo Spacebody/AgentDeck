@@ -152,13 +152,27 @@ struct AgentManagerView: View {
             Text(title)
                 .font(.system(size: 9.5, weight: .medium))
                 .foregroundStyle(Theme.ink3)
-            Toggle("", isOn: bool(key))
-                .labelsHidden()
-                .toggleStyle(.switch)
-                .tint(agent.brand.accent)
-                .accessibilityLabel(Text("\(agent.name) \(title)"))
+            if GlassRender.useNativeEffect {
+                Toggle("", isOn: bool(key))
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .tint(agent.brand.accent)
+                    .accessibilityLabel(Text("\(agent.name) \(title)"))
+            } else {
+                previewToggle(isOn: values[key]?.boolVal ?? true, tint: agent.brand.accent)
+                    .accessibilityLabel(Text("\(agent.name) \(title)"))
+            }
         }
         .frame(width: 62)
+    }
+
+    private func previewToggle(isOn: Bool, tint: Color) -> some View {
+        Capsule()
+            .fill(isOn ? tint : Color.white.opacity(0.14))
+            .frame(width: 34, height: 20)
+            .overlay(alignment: isOn ? .trailing : .leading) {
+                Circle().fill(Color.white).frame(width: 16, height: 16).padding(2)
+            }
     }
 
     private func colorControl(_ agent: AgentSettingDescriptor) -> some View {

@@ -2,6 +2,54 @@ import XCTest
 @testable import AgentDeckKit
 
 final class AppStoreVisibilityTests: XCTestCase {
+    func testForcedRefreshRetriesOnlyItsOwnFailedRequest() {
+        XCTAssertTrue(shouldRetryForcedRefresh(
+            forcePending: true, requestSucceeded: false))
+        XCTAssertFalse(shouldRetryForcedRefresh(
+            forcePending: true, requestSucceeded: true))
+        XCTAssertFalse(shouldRetryForcedRefresh(
+            forcePending: false, requestSucceeded: false))
+    }
+    @MainActor
+    func testQuotaSelectionOnlyNotifiesMenubarForOverviewChanges() {
+        let store = AppStore()
+        var selected: [String] = []
+        store.onQuotaSelectionChanged = { selected.append($0) }
+
+        store.selectQuotaPage("qoder::default", notifyMenubar: false)
+        XCTAssertEqual(store.quotaSelectionID, "qoder::default")
+        XCTAssertTrue(selected.isEmpty)
+
+        store.selectQuotaPage("codex::default", notifyMenubar: true)
+        XCTAssertEqual(store.quotaSelectionID, "codex::default")
+        XCTAssertEqual(selected, ["codex::default"])
+
+        store.selectQuotaPage("codex::default", notifyMenubar: true)
+        XCTAssertEqual(selected, ["codex::default"])
+    }
+
+    @MainActor
+    func testQuotaPauseAndMenubarClockStateArePublished() {
+        let store = AppStore()
+        var pauses: [Bool] = []
+        store.onQuotaRotationPauseChanged = { pauses.append($0) }
+
+        store.setMenubarRotationActive(true)
+        store.setQuotaRotationPaused(true)
+        store.setQuotaRotationPaused(false)
+
+        XCTAssertTrue(store.menubarRotationActive)
+        XCTAssertEqual(pauses, [true, false])
+    }
+
+    @MainActor
+    func testMenubarAgentVisibilityDefaultsOnAndReadsSetting() {
+        let store = AppStore()
+        XCTAssertTrue(store.menubarAgentEnabled("codex"))
+        store.settings["menubar_codex"] = .bool(false)
+        XCTAssertFalse(store.menubarAgentEnabled("codex"))
+    }
+
     @MainActor
     func testConfiguredVisibilityOverridesQuotaHiddenFallback() {
         let store = AppStore()

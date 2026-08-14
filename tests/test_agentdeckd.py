@@ -2,6 +2,7 @@ import json
 import io
 import os
 import plistlib
+import subprocess
 import sys
 import tempfile
 import threading
@@ -33,6 +34,9 @@ class HTTPBoundaryTests(unittest.TestCase):
         self.assertEqual(sent[0][1]["pid"], 123)
         self.assertEqual(sent[0][1]["parent_pid"], 456)
         self.assertEqual(sent[0][1]["instance_id"], daemon._DAEMON_INSTANCE_ID)
+        self.assertEqual(sent[0][1]["started_at"], daemon._DAEMON_STARTED_AT)
+        self.assertEqual(sent[0][1]["update_transaction"], daemon._UPDATE_TRANSACTION)
+        self.assertEqual(sent[0][1]["owner_token"], daemon._BACKEND_OWNER_TOKEN)
         self.assertEqual(sent[0][1]["script_path"], str(Path(daemon.__file__).resolve()))
 
     def test_shutdown_requires_matching_daemon_instance(self):
@@ -66,6 +70,25 @@ class HTTPBoundaryTests(unittest.TestCase):
         self.assertTrue(daemon._local_http_host({"Host": "LOCALHOST:7777"}))
         self.assertFalse(daemon._local_http_host({"Host": "rebind.example"}))
         self.assertFalse(daemon._local_http_host({"Host": "127.0.0.1:7777.evil"}))
+
+    def test_delayed_background_loop_waits_for_health_startup_window(self):
+        shutdown = mock.Mock()
+        shutdown.wait.return_value = False
+        task = mock.Mock()
+
+        daemon._run_delayed_loop(3, shutdown, task)
+
+        shutdown.wait.assert_called_once_with(3)
+        task.assert_called_once_with()
+
+    def test_delayed_background_loop_does_not_start_during_shutdown(self):
+        shutdown = mock.Mock()
+        shutdown.wait.return_value = True
+        task = mock.Mock()
+
+        daemon._run_delayed_loop(3, shutdown, task)
+
+        task.assert_not_called()
 
     def test_quota_long_poll_requires_a_local_same_origin_request(self):
         local = {"Host": "127.0.0.1:7777"}
@@ -2091,7 +2114,9 @@ class CodexQuotaRealtimeTests(unittest.TestCase):
                 daemon._force_quota_refreshes(settings, ttl=600)
 
     def test_force_quota_refreshes_allows_expected_no_quota_account(self):
-        settings = {"show_claude": True, "show_codex": False}
+        settings = {"show_claude": True, "show_codex": False,
+                    "show_qoder": False, "menubar_claude": False,
+                    "menubar_codex": False, "menubar_qoder": False}
         unavailable = [{"ok": False, "no_quota": True, "kind": "gateway"}]
         with mock.patch.object(
                 daemon, "_claude_quota_accounts", return_value=unavailable):
@@ -2530,6 +2555,63 @@ class QuotaSamplingTests(unittest.TestCase):
 
 
 class PersistenceAndUpdateTests(unittest.TestCase):
+    def test_update_installer_keeps_backup_until_transaction_health_check(self):
+        script = daemon._update_install_script(
+            Path("/tmp/update"), Path("/tmp/update/stage"),
+            Path("/tmp/update/mount"), "2.8.0", "a" * 32)
+
+        launch = script.index("AGENTDECK_UPDATE_TRANSACTION=")
+        ready = script.index("wait_for_replacement", launch)
+        remove_old = script.index('/bin/rm -rf "$OLD"', ready)
+        self.assertLess(launch, ready)
+        self.assertLess(ready, remove_old)
+        self.assertIn('data.get("update_transaction") == transaction', script)
+        self.assertIn('data.get("owner_token", "")', script)
+        self.assertIn('int(data.get("parent_pid", -1)) == int(app_pid)', script)
+        self.assertIn('[ "$(process_count "$APP_PATTERN")" -eq 1 ]', script)
+        self.assertIn('[ "$(process_count "$DAEMON_PATTERN")" -eq 1 ]', script)
+        self.assertIn('kill_matches_tree "$APP_PATTERN" KILL', script)
+        self.assertLess(script.index("snapshot_installed"), script.index("osascript"))
+        self.assertIn('[ "$PID" = "$$" ] && return 0', script)
+        self.assertIn('CURRENT=$(/bin/ps -p "$PID" -o lstart=', script)
+        self.assertIn("signal_snapshot TERM", script)
+        syntax = subprocess.run(
+            ["/bin/sh", "-n"], input=script, text=True, capture_output=True)
+        self.assertEqual(syntax.returncode, 0, syntax.stderr)
+
+    def test_update_installer_rolls_back_before_reopening_previous_bundle(self):
+        script = daemon._update_install_script(
+            Path("/tmp/update"), Path("/tmp/update/stage"),
+            Path("/tmp/update/mount"), "2.8.0", "b" * 32)
+        restore = script[script.index("restore() {"):script.index("replacement_ready() {")]
+        self.assertIn("stop_installed", restore)
+        self.assertIn('/bin/mv "$OLD" "$APP"', restore)
+        self.assertIn('/usr/bin/open -n "$APP"', restore)
+
+    def test_update_installer_snapshot_excludes_detached_helper_subtree(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            script = daemon._update_install_script(
+                root, root / "stage", root / "mount", "2.8.0", "c" * 32)
+            function_prefix = script[:script.index("\ntrap restore ERR INT TERM\n")]
+            sleeper = subprocess.Popen(["/bin/sleep", "30"])
+            try:
+                probe = function_prefix + '''
+: > "$PROCESS_SNAPSHOT"
+snapshot_tree "$OLD_DAEMON_PID"
+! /usr/bin/grep -q "^$$|" "$PROCESS_SNAPSHOT"
+/usr/bin/grep -q "^$SIBLING_PID|" "$PROCESS_SNAPSHOT"
+'''
+                env = dict(os.environ, OLD_DAEMON_PID=str(os.getpid()),
+                           SIBLING_PID=str(sleeper.pid))
+                result = subprocess.run(
+                    ["/bin/sh"], input=probe, text=True, capture_output=True,
+                    env=env, timeout=5)
+                self.assertEqual(result.returncode, 0, result.stderr)
+            finally:
+                sleeper.terminate()
+                sleeper.wait(timeout=2)
+
     def test_update_url_requires_matching_semver_tag_and_asset(self):
         self.assertTrue(daemon._safe_update_url(
             "https://github.com/Spacebody/AgentDeck/releases/download/v2.2.0/AgentDeck-2.2.0.dmg"))
@@ -3086,6 +3168,24 @@ class QoderSupportTests(unittest.TestCase):
         self.assertEqual(len(qoder["accounts"]), 1)
         self.assertTrue(qoder["accounts"][0]["no_quota"])
         self.assertIn("not found", qoder["accounts"][0]["error"])
+
+    def test_menubar_only_agent_still_receives_quota_accounts(self):
+        settings = {**daemon.DEFAULT_SETTINGS,
+                    "show_claude": False, "menubar_claude": False,
+                    "show_codex": False, "menubar_codex": False,
+                    "show_qoder": False, "menubar_qoder": True}
+        account = {"account_id": "default", "account": "默认",
+                   "is_default": True, "ok": True,
+                   "windows": [{"id": "total", "used_percent": 42}]}
+        with mock.patch.object(daemon, "get_settings", return_value=settings), \
+                mock.patch.object(daemon, "_qoder_quota_accounts",
+                                  return_value=[account]) as qoder_accounts:
+            quota = daemon.api_quota(cache_only=True)
+
+        self.assertEqual(quota["accounts"]["qoder"], [account])
+        self.assertTrue(next(agent for agent in quota["agents"]
+                             if agent["id"] == "qoder")["hidden"])
+        qoder_accounts.assert_called_once()
 
     def test_usage_info_maps_supported_buckets_without_identity_fields(self):
         quota = daemon._qoder_quota_from_usage({
