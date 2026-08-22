@@ -79,24 +79,32 @@ extension QuotaWindow {
         let key = "win.\(id)"
         let fixed = L(key)
         if fixed != key { return fixed }
+        let rawLabel = label ?? id
+        let baseLabel: String = {
+            guard let separator = rawLabel.range(of: " · ", options: .backwards) else {
+                return rawLabel
+            }
+            let suffix = rawLabel[separator.upperBound...]
+            guard suffix.hasSuffix("m"), Int(suffix.dropLast()) != nil else {
+                return rawLabel
+            }
+            return String(rawLabel[..<separator.lowerBound])
+        }()
+        if id.hasPrefix("five_hour_") {
+            return L("quota.namedFiveHour", ["name": baseLabel])
+        }
+        if id.hasPrefix("seven_day_") {
+            return L("quota.namedWeekly", ["name": baseLabel])
+        }
         if id.hasPrefix("win_"), let mins = Int(id.dropFirst(4)) {
             return L("quota.winMins", ["n": "\(mins)"])
         }
-        return label ?? id
+        return baseLabel
     }
 
     /// 该窗口的窗口长度（秒），用于「重置进度微条」。对应 winLen 映射。
     var windowSeconds: Double? {
-        switch id {
-        case "five_hour": return 5 * 3600
-        case "seven_day", "seven_day_sonnet", "seven_day_opus", "seven_day_oauth_apps":
-            return 7 * 86400
-        default:
-            if id.hasPrefix("five_hour_") { return 5 * 3600 }
-            if id.hasPrefix("seven_day_") { return 7 * 86400 }
-            if id.hasPrefix("win_"), let mins = Int(id.dropFirst(4)) { return Double(mins) * 60 }
-            return nil
-        }
+        QuotaWindowPolicy.durationSeconds(for: id)
     }
 
     /// 重置进度（0~1，已流逝占比）。对应 resetBar 的 elapsed 计算。
@@ -104,5 +112,58 @@ extension QuotaWindow {
         guard let len = windowSeconds, let reset = resetsAt?.date else { return nil }
         let remain = reset.timeIntervalSince(now)
         return min(1, max(0, 1 - remain / len))
+    }
+}
+
+/// Shared quota-window ordering for cards and menu-bar summaries.
+public enum QuotaWindowPolicy {
+    public static func isGeneral(_ id: String) -> Bool {
+        if ["five_hour", "seven_day", "primary", "secondary", "total", "plan"].contains(id) {
+            return true
+        }
+        return id.hasPrefix("win_") && Int(id.dropFirst(4)) != nil
+    }
+
+    public static func durationSeconds(for id: String) -> Double? {
+        if id == "five_hour" || id.hasPrefix("five_hour_") { return 5 * 3600 }
+        if id == "seven_day" || id.hasPrefix("seven_day_") { return 7 * 86400 }
+        if id.hasPrefix("win_"), let mins = Int(id.dropFirst(4)) {
+            return Double(mins) * 60
+        }
+        return nil
+    }
+
+    /// Prefer general account limits; only fall back to model-specific limits when
+    /// no general window exists. Within the same tier, use the shortest period.
+    public static func preferredPrimaryIndex(ids: [String]) -> Int? {
+        guard !ids.isEmpty else { return nil }
+        let all = Array(ids.indices)
+        let general = all.filter { isGeneral(ids[$0]) }
+        let candidates = general.isEmpty ? all : general
+        return candidates.min { lhs, rhs in
+            let left = durationSeconds(for: ids[lhs]) ?? .greatestFiniteMagnitude
+            let right = durationSeconds(for: ids[rhs]) ?? .greatestFiniteMagnitude
+            return left == right ? lhs < rhs : left < right
+        }
+    }
+
+    public static func preferredIndex(ids: [String], usedPercents: [Double?],
+                                      dimension: String) -> Int? {
+        guard ids.count == usedPercents.count, !ids.isEmpty else { return nil }
+        switch dimension {
+        case "max":
+            return ids.indices.compactMap { index in
+                usedPercents[index].map { (index, $0) }
+            }.max { $0.1 < $1.1 }?.0
+        case "weekly":
+            let weekly = ids.indices.filter {
+                durationSeconds(for: ids[$0]) == 7 * 86400
+            }
+            return weekly.first(where: { isGeneral(ids[$0]) })
+                ?? weekly.first
+                ?? preferredPrimaryIndex(ids: ids)
+        default:
+            return preferredPrimaryIndex(ids: ids)
+        }
     }
 }

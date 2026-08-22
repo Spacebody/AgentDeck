@@ -2,6 +2,7 @@ import json
 import io
 import os
 import plistlib
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -1297,6 +1298,42 @@ class ActiveSessionTests(unittest.TestCase):
 
             self.assertEqual(daemon._codex_rollout_work_status(path), "busy")
 
+    def test_codex_rollout_status_bounds_initial_scan_to_recent_tail(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "rollout.jsonl"
+            _jsonl(path, [
+                {"type": "event_msg", "payload": {"type": "task_started"}},
+                {"type": "response_item", "payload": {
+                    "type": "custom_tool_call_output", "output": "x" * 4096}},
+            ])
+
+            with mock.patch.object(daemon, "CODEX_ROLLOUT_TAIL_BYTES", 1024):
+                self.assertIsNone(daemon._codex_rollout_work_status(path))
+
+    def test_codex_rollout_status_drops_stale_state_when_large_append_is_skipped(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "rollout.jsonl"
+            _jsonl(path, [
+                {"type": "event_msg", "payload": {"type": "task_complete"}},
+            ])
+            self.assertEqual(daemon._codex_rollout_work_status(path), "idle")
+            with path.open("a") as stream:
+                stream.write(json.dumps({
+                    "type": "event_msg", "payload": {"type": "task_started"}
+                }) + "\n")
+                stream.write(json.dumps({
+                    "type": "response_item", "payload": {
+                        "type": "custom_tool_call_output", "output": "x" * 4096}
+                }) + "\n")
+
+            with mock.patch.object(daemon, "CODEX_ROLLOUT_TAIL_BYTES", 1024):
+                self.assertIsNone(daemon._codex_rollout_work_status(path))
+                with path.open("a") as stream:
+                    stream.write(json.dumps({
+                        "type": "event_msg", "payload": {"type": "task_complete"}
+                    }) + "\n")
+                self.assertEqual(daemon._codex_rollout_work_status(path), "idle")
+
     def test_codex_rollout_status_cache_processes_appended_completion(self):
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "rollout.jsonl"
@@ -1722,6 +1759,11 @@ class CodexQuotaRealtimeTests(unittest.TestCase):
                     "limitName": "GPT-5.3-Codex-Spark",
                     "primary": {
                         "usedPercent": 0,
+                        "windowDurationMins": 300,
+                        "resetsAt": time.time() + 14400,
+                    },
+                    "secondary": {
+                        "usedPercent": 0,
                         "windowDurationMins": 10080,
                         "resetsAt": time.time() + 86400,
                     },
@@ -1733,9 +1775,64 @@ class CodexQuotaRealtimeTests(unittest.TestCase):
 
         self.assertTrue(quota["ok"])
         self.assertEqual([w["id"] for w in quota["windows"]],
-                         ["seven_day", "seven_day_codex-bengalfox"])
+                         ["seven_day", "five_hour_codex-bengalfox",
+                          "seven_day_codex-bengalfox"])
         self.assertEqual(quota["windows"][1]["label"], "GPT-5.3-Codex-Spark")
+        self.assertEqual(quota["windows"][2]["label"], "GPT-5.3-Codex-Spark")
+        self.assertNotIn("10080m", quota["windows"][2]["label"])
         self.assertEqual(quota["credits"]["balance"], "0")
+
+    def test_named_window_notification_includes_localized_period(self):
+        labels = daemon.WINDOW_LABELS["zh-CN"]
+        self.assertEqual(daemon._localized_window_label({
+            "id": "five_hour_codex-bengalfox",
+            "label": "GPT-5.3-Codex-Spark",
+        }, "zh-CN", labels), "GPT-5.3-Codex-Spark · 5 小时额度")
+        self.assertEqual(daemon._localized_window_label({
+            "id": "seven_day_codex-bengalfox",
+            "label": "GPT-5.3-Codex-Spark · 10080m",
+        }, "zh-CN", labels), "GPT-5.3-Codex-Spark · 周额度")
+
+    def test_web_quota_policy_matches_general_first_and_localizes_named_windows(self):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node.js is required for the Web fallback behavior test")
+        html = (Path(__file__).parents[1] / "static" / "index.html").read_text()
+        i18n_start = html.index("const I18N =")
+        i18n_end = html.index("const WEEKDAYS", i18n_start)
+        production_i18n = html[i18n_start:i18n_end]
+        start = html.index("const winLabel =")
+        end = html.index("// 秒 →", start)
+        policy = html[start:end]
+        harness = production_i18n + r"""
+let LOCALE = 'zh-CN';
+const t = (key, values) => {
+  let value = I18N[LOCALE]?.[key] ?? I18N.en?.[key] ?? key;
+  for (const name in values || {}) value = value.split(`{${name}}`).join(values[name]);
+  return value;
+};
+""" + policy + r"""
+const windows = [
+  {id: 'seven_day', label: '周限额'},
+  {id: 'five_hour_codex-bengalfox', label: 'GPT-5.3-Codex-Spark'},
+  {id: 'seven_day_codex-bengalfox', label: 'GPT-5.3-Codex-Spark · 10080m'},
+];
+if (primaryWindowIndex(windows) !== 0) throw new Error('general weekly must be primary');
+if (primaryWindowIndex(windows.slice(1)) !== 0) throw new Error('shortest named window must be primary fallback');
+for (const [locale, five, weekly] of [
+  ['zh-CN', 'GPT-5.3-Codex-Spark · 5 小时额度', 'GPT-5.3-Codex-Spark · 周额度'],
+  ['en', 'GPT-5.3-Codex-Spark · 5-hour quota', 'GPT-5.3-Codex-Spark · weekly quota'],
+  ['ja', 'GPT-5.3-Codex-Spark · 5時間枠', 'GPT-5.3-Codex-Spark · 週間上限'],
+]) {
+  LOCALE = locale;
+  if (winLabel(windows[1]) !== five) throw new Error(`${locale} five-hour label mismatch`);
+  if (winLabel(windows[2]) !== weekly) throw new Error(`${locale} weekly label mismatch`);
+  if (winLabel(windows[2]).includes('10080m')) throw new Error(`${locale} leaked raw minutes`);
+}
+"""
+        completed = subprocess.run(
+            [node, "-e", harness], capture_output=True, text=True)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
 
     def test_rollout_snapshot_preserves_named_limit_identity(self):
         quota = daemon._codex_quota_from_rollout_limits({

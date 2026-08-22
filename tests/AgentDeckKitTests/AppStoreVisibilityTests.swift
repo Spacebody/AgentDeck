@@ -254,6 +254,59 @@ final class AppStoreVisibilityTests: XCTestCase {
         XCTAssertEqual(fiveHour.windowSeconds, 5 * 3600)
     }
 
+    func testGeneralQuotaWinsPrimaryPositionOverShorterNamedLimit() {
+        let ids = [
+            "seven_day",
+            "five_hour_codex-bengalfox",
+            "seven_day_codex-bengalfox",
+        ]
+
+        XCTAssertEqual(QuotaWindowPolicy.preferredPrimaryIndex(ids: ids), 0)
+    }
+
+    func testShortestNamedLimitIsUsedWhenGeneralQuotaIsAbsent() {
+        let ids = ["seven_day_codex-bengalfox", "five_hour_codex-bengalfox"]
+
+        XCTAssertEqual(QuotaWindowPolicy.preferredPrimaryIndex(ids: ids), 1)
+    }
+
+    func testGeneralClaudeWindowsStillChooseFiveHourQuota() {
+        let ids = ["seven_day", "seven_day_opus", "five_hour"]
+
+        XCTAssertEqual(QuotaWindowPolicy.preferredPrimaryIndex(ids: ids), 2)
+    }
+
+    func testWeeklyDimensionUsesNamedWeeklyWhenOnlyGeneralWindowIsFiveHour() {
+        let ids = ["five_hour", "seven_day_codex-bengalfox"]
+        let percents: [Double?] = [19, 73]
+
+        XCTAssertEqual(QuotaWindowPolicy.preferredIndex(
+            ids: ids, usedPercents: percents, dimension: "weekly"), 1)
+    }
+
+    func testWeeklyDimensionPrefersGeneralWeeklyOverNamedWeekly() {
+        let ids = ["seven_day_codex-bengalfox", "seven_day", "five_hour"]
+        let percents: [Double?] = [73, 31, 19]
+
+        XCTAssertEqual(QuotaWindowPolicy.preferredIndex(
+            ids: ids, usedPercents: percents, dimension: "weekly"), 1)
+        XCTAssertEqual(QuotaWindowPolicy.preferredIndex(
+            ids: ids, usedPercents: percents, dimension: "shortest"), 2)
+        XCTAssertEqual(QuotaWindowPolicy.preferredIndex(
+            ids: ids, usedPercents: percents, dimension: "max"), 0)
+    }
+
+    func testNamedWindowDisplayRemovesRawMinuteSuffix() {
+        let window = QuotaWindow(
+            id: "seven_day_codex-bengalfox",
+            label: "GPT-5.3-Codex-Spark · 10080m",
+            usedPercent: 0,
+            resetsAt: nil)
+
+        XCTAssertFalse(window.displayLabel.contains("10080m"))
+        XCTAssertTrue(window.displayLabel.contains("GPT-5.3-Codex-Spark"))
+    }
+
     func testQuotaHeaderUsesSampleTimeInsteadOfCreditsBalance() throws {
         let data = Data("""
         {

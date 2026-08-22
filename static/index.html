@@ -908,7 +908,8 @@ const I18N = {
     'quota.noOther': '暂无其他窗口数据',
     'quota.noQuota': '网关 / 未登录账号，无官方额度（仅按会话用量统计）',
     'quota.burnSafe': '✓ 当前速率安全，可撑到重置', 'quota.burnWarn': '⚠ 按当前速率约 {dur}后用尽，建议放缓',
-    'quota.winMins': '{n} 分钟窗口',
+    'quota.winMins': '{n} 分钟窗口', 'quota.namedFiveHour': '{name} · 5 小时额度',
+    'quota.namedWeekly': '{name} · 周额度',
     'win.five_hour': '5 小时窗口', 'win.seven_day': '周限额', 'win.seven_day_sonnet': '周限额 · Sonnet',
     'win.seven_day_opus': '周限额 · Opus', 'win.seven_day_oauth_apps': '周限额 · OAuth Apps',
     'win.primary': '主窗口', 'win.secondary': '次窗口',
@@ -1000,7 +1001,8 @@ const I18N = {
     'quota.noOther': 'No other windows',
     'quota.noQuota': 'Gateway / signed-out account — no official quota (usage only)',
     'quota.burnSafe': '✓ Current rate is safe through reset', 'quota.burnWarn': '⚠ At this rate, ~{dur} until depleted — ease up',
-    'quota.winMins': '{n}-min window',
+    'quota.winMins': '{n}-min window', 'quota.namedFiveHour': '{name} · 5-hour quota',
+    'quota.namedWeekly': '{name} · weekly quota',
     'win.five_hour': '5-hour', 'win.seven_day': 'Weekly', 'win.seven_day_sonnet': 'Weekly · Sonnet',
     'win.seven_day_opus': 'Weekly · Opus', 'win.seven_day_oauth_apps': 'Weekly · OAuth Apps',
     'win.primary': 'Primary', 'win.secondary': 'Secondary',
@@ -1092,7 +1094,8 @@ const I18N = {
     'quota.noOther': '他の枠データなし',
     'quota.noQuota': 'ゲートウェイ / 未ログイン — 公式残量なし（使用量のみ）',
     'quota.burnSafe': '✓ 現在のペースならリセットまで安全', 'quota.burnWarn': '⚠ 現ペースで約{dur}で枯渇。ペースダウン推奨',
-    'quota.winMins': '{n}分枠',
+    'quota.winMins': '{n}分枠', 'quota.namedFiveHour': '{name} · 5時間枠',
+    'quota.namedWeekly': '{name} · 週間上限',
     'win.five_hour': '5時間枠', 'win.seven_day': '週間上限', 'win.seven_day_sonnet': '週間 · Sonnet',
     'win.seven_day_opus': '週間 · Opus', 'win.seven_day_oauth_apps': '週間 · OAuth Apps',
     'win.primary': '主枠', 'win.secondary': '副枠',
@@ -1189,9 +1192,32 @@ const winLabel = w => {
   const id = (w && w.id) || '';
   const fixed = t('win.' + id);
   if (fixed !== 'win.' + id) return fixed;
+  const raw = ((w && w.label) || '').replace(/\s*·\s*\d+m$/, '');
+  if (id.startsWith('five_hour_')) return t('quota.namedFiveHour', {name: raw});
+  if (id.startsWith('seven_day_')) return t('quota.namedWeekly', {name: raw});
   const mm = /^win_(\d+)$/.exec(id);
   if (mm) return t('quota.winMins', {n: mm[1]});
-  return (w && w.label) || '';
+  return raw;
+};
+const winSeconds = id => {
+  if (id === 'five_hour' || id.startsWith('five_hour_')) return 5 * 3600;
+  if (id === 'seven_day' || id.startsWith('seven_day_')) return 7 * 86400;
+  const mm = /^win_(\d+)$/.exec(id);
+  return mm ? Number(mm[1]) * 60 : null;
+};
+const isGeneralWindow = id =>
+  ['five_hour', 'seven_day', 'primary', 'secondary', 'total', 'plan'].includes(id)
+  || /^win_\d+$/.test(id);
+const primaryWindowIndex = windows => {
+  if (!windows.length) return -1;
+  const all = windows.map((_, i) => i);
+  const general = all.filter(i => isGeneralWindow(windows[i].id || ''));
+  const candidates = general.length ? general : all;
+  return candidates.reduce((best, i) => {
+    const left = winSeconds(windows[i].id || '') ?? Number.MAX_VALUE;
+    const right = winSeconds(windows[best].id || '') ?? Number.MAX_VALUE;
+    return left < right ? i : best;
+  }, candidates[0]);
 };
 // 秒 → 本地化时长（活跃会话运行时长 / 倒计时复用）
 const fmtDur = secs => {
@@ -1278,9 +1304,10 @@ function quotaCardInner(name, data, gradId, accountLabel) {
   }
   const ws = data.windows || [];
   const wgt = document.body.classList.contains('wgt');   // 小组件窄卡精简
-  const main = ws[0] || {used_percent: 0};
-  const rest = ws.slice(1).filter(w => wgt ? w.used_percent > 0
-                                           : (w.used_percent > 0 || w.resets_at));
+  const mainIndex = primaryWindowIndex(ws);
+  const main = mainIndex >= 0 ? ws[mainIndex] : {used_percent: 0};
+  const rest = ws.filter((w, i) => i !== mainIndex)
+    .filter(w => wgt ? w.used_percent > 0 : (w.used_percent > 0 || w.resets_at));
   const g = grade(main.used_percent);
   const mainGrad = g === 'danger' ? 'grad-danger' : g === 'warn' ? 'grad-warn' : gradId;
 
@@ -1298,7 +1325,7 @@ function quotaCardInner(name, data, gradId, accountLabel) {
   }
 
   // 重置时间进度：优先按结构化 id 取窗口长度，label 仅作兜底（避免文案耦合）
-  const winLen = {five_hour: 5 * 3600, seven_day: 7 * 86400}[main.id]
+  const winLen = winSeconds(main.id || '')
     || {'5 小时窗口': 5 * 3600, '周限额': 7 * 86400}[main.label];
   let resetBar = '';
   if (winLen && main.resets_at) {

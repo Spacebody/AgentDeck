@@ -626,7 +626,8 @@ struct QuotaCardView: View {
             head
             if windows.count == 1, let window = windows.first {
                 singleWindowBody(window)
-            } else if let mainIndex = primaryWindowIndex(in: windows) {
+            } else if let mainIndex = QuotaWindowPolicy.preferredPrimaryIndex(
+                ids: windows.map(\.id)) {
                 let main = windows[mainIndex]
                 let rest = windows.indices.filter { $0 != mainIndex }.map {
                     IndexedQuotaWindow(id: $0, window: windows[$0])
@@ -827,15 +828,6 @@ struct QuotaCardView: View {
         }
         .frame(width: columnWidth)
         .accessibilityElement(children: .combine)
-    }
-
-    /// 按窗口周期选择最短额度；未知周期排在已知周期之后，并保持上游原始顺序。
-    private func primaryWindowIndex(in windows: [QuotaWindow]) -> Int? {
-        windows.indices.min { lhs, rhs in
-            let left = windows[lhs].windowSeconds ?? .greatestFiniteMagnitude
-            let right = windows[rhs].windowSeconds ?? .greatestFiniteMagnitude
-            return left == right ? lhs < rhs : left < right
-        }
     }
 
     // .qhead：只承载品牌与账号；窗口语义放回对应的数据图形旁边。

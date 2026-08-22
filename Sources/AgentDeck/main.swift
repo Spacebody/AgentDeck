@@ -1731,20 +1731,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 !alertEnabled ? nil : pct >= 95 ? .systemRed
                               : pct >= 80 ? quotaWarnColor() : nil
             }
-            // 抽象维度 → 各 agent 自己的窗口（对 Claude/Codex 都成立）
-            //   shortest=首窗口(5h)  weekly=seven_day(缺则次窗口/末窗口)  max=所有窗口最大值
+            // 默认维度优先通用额度；仅当通用额度缺失时才回退模型专项额度。
+            // max 是用户显式选择的“用量最高”，仍覆盖全部独立窗口。
             func dimPct(_ windows: [[String: Any]], _ dim: String) -> Double? {
+                let ids = windows.map { $0["id"] as? String ?? "" }
                 let pcts = windows.map { $0["used_percent"] as? Double }
-                switch dim {
-                case "max":
-                    return pcts.compactMap { $0 }.max()
-                case "weekly":
-                    if let w = windows.first(where: { ($0["id"] as? String) == "seven_day" }),
-                       let p = w["used_percent"] as? Double { return p }
-                    return (windows.count > 1 ? windows.last : windows.first)?["used_percent"] as? Double
-                default:   // shortest
-                    return windows.first?["used_percent"] as? Double
-                }
+                guard let index = QuotaWindowPolicy.preferredIndex(
+                    ids: ids, usedPercents: pcts, dimension: dim) else { return nil }
+                return pcts[index]
             }
             var full: [MBItem] = []      // 全部 tool×账号，统一进入单槽位
             for tool in ["claude", "codex", "qoder"] {

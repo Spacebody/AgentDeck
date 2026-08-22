@@ -17,7 +17,6 @@ import concurrent.futures
 import hashlib
 import hmac
 import json
-import mmap
 import os
 import plistlib
 import re
@@ -681,6 +680,25 @@ WINDOW_LABELS = {
            "seven_day_sonnet": "週間 · Sonnet", "seven_day_opus": "週間 · Opus",
            "seven_day_oauth_apps": "週間 · OAuth Apps"},
 }
+
+NAMED_WINDOW_PERIODS = {
+    "zh-CN": {"five_hour": "5 小时额度", "seven_day": "周额度"},
+    "en": {"five_hour": "5-hour quota", "seven_day": "weekly quota"},
+    "ja": {"five_hour": "5時間枠", "seven_day": "週間上限"},
+}
+
+
+def _localized_window_label(window, locale, labels):
+    """Localize stable windows and add period context to named upstream limits."""
+    window_id = str(window.get("id") or "")
+    if window_id in labels:
+        return labels[window_id]
+    label = re.sub(r"\s*·\s*\d+m$", "", str(window.get("label") or "")).strip()
+    periods = NAMED_WINDOW_PERIODS.get(locale, NAMED_WINDOW_PERIODS["en"])
+    for prefix in ("five_hour", "seven_day"):
+        if window_id.startswith(prefix + "_"):
+            return f"{label} · {periods[prefix]}" if label else periods[prefix]
+    return label
 
 
 def _system_locale():
@@ -1347,8 +1365,6 @@ def _codex_window(node, limit_id="codex", limit_name="", secondary=False,
                  "次窗口" if secondary else "主窗口")
     else:
         label = str(limit_name or limit_id)[:100]
-        if secondary and mins:
-            label = f"{label} · {mins}m"
     return {
         "id": _codex_window_id(mins, limit_id),
         "label": label,
@@ -4109,39 +4125,45 @@ def _codex_rollout_work_status(path):
                 return previous["status"]
             appended = previous and previous["identity"] == identity \
                 and size > previous["size"] and mtime_ns >= previous["mtime_ns"]
-            start = max(0, previous.get("scan_offset", 0) - 1) if appended else 0
-            status = previous["status"] if appended else None
-            scan_offset = 0
+            tail_start = max(0, size - CODEX_ROLLOUT_TAIL_BYTES)
+            start = max(tail_start, previous.get("scan_offset", 0) - 1) \
+                if appended else tail_start
+            skipped_append = appended \
+                and tail_start > previous.get("scan_offset", previous["size"])
+            status = previous["status"] if appended and not skipped_append else None
+            scan_offset = start
             if size:
-                with mmap.mmap(stream.fileno(), length=0, access=mmap.ACCESS_READ) as data:
-                    cursor = size
-                    while cursor > start:
-                        positions = [data.rfind(marker, start, cursor)
-                                     for marker in _CODEX_WORK_BOUNDARY_MARKERS]
-                        position = max(positions)
-                        if position < 0:
-                            break
-                        line_start = data.rfind(b"\n", start, position) + 1
-                        line_end = data.find(b"\n", position, size)
-                        if line_end < 0:
-                            cursor = position
-                            continue
-                        try:
-                            event = json.loads(data[line_start:line_end])
-                        except (TypeError, ValueError):
-                            cursor = position
-                            continue
-                        payload = event.get("payload") \
-                            if isinstance(event, dict) and event.get("type") == "event_msg" \
-                            else None
-                        event_type = payload.get("type") \
-                            if isinstance(payload, dict) else None
-                        if event_type in boundary_status:
-                            status = boundary_status[event_type]
-                            break
+                stream.seek(start)
+                data = stream.read(size - start)
+                cursor = len(data)
+                while cursor > 0:
+                    positions = [data.rfind(marker, 0, cursor)
+                                 for marker in _CODEX_WORK_BOUNDARY_MARKERS]
+                    position = max(positions)
+                    if position < 0:
+                        break
+                    line_start = data.rfind(b"\n", 0, position) + 1
+                    line_end = data.find(b"\n", position)
+                    if line_end < 0:
                         cursor = position
-                    last_newline = data.rfind(b"\n", start, size)
-                    scan_offset = last_newline + 1 if last_newline >= 0 else start
+                        continue
+                    try:
+                        event = json.loads(data[line_start:line_end])
+                    except (TypeError, ValueError):
+                        cursor = position
+                        continue
+                    payload = event.get("payload") \
+                        if isinstance(event, dict) and event.get("type") == "event_msg" \
+                        else None
+                    event_type = payload.get("type") \
+                        if isinstance(payload, dict) else None
+                    if event_type in boundary_status:
+                        status = boundary_status[event_type]
+                        break
+                    cursor = position
+                last_newline = data.rfind(b"\n")
+                scan_offset = start + last_newline + 1 \
+                    if last_newline >= 0 else start
     except OSError:
         return None
     with _codex_work_status_lock:
@@ -6381,7 +6403,7 @@ def _check_alerts(tool_name, windows, account_id="default", account_label="",
             prev = _alert_state.get(key, "normal")
             cur = "crit" if pct >= crit_th else "warn" if pct >= warn_th else "normal"
             # 按 id 本地化窗口标签（通知用当前语言，不受采样时缓存影响）
-            label = labels.get(w.get("id") or "", w.get("label", ""))
+            label = _localized_window_label(w, loc, labels)
             if cur != prev:
                 severity = {"normal": 0, "warn": 1, "crit": 2}
                 # 非官方局部快照只能提升告警级别；任何下降都等待官方快照确认，
