@@ -442,7 +442,7 @@ public enum PreviewRender {
         s.settings["font_scale"] = .int(Int((previewFontScale * 100).rounded()))
         s.update = UpdateInfo(current: "2.8.2", latest: "2.9.0", available: true,
                               url: "https://github.com/Spacebody/AgentDeck/releases",
-                              dmg: nil, notesUrl: nil)
+                              dmg: nil, notesUrl: nil, error: nil, disabled: nil)
         return s
     }
 

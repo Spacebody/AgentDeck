@@ -124,6 +124,10 @@ _qoder_bundle_validation_lock = threading.Lock()
 # 更新检测：向自托管的 Cloudflare Pages 清单查最新版本号（不带任何凭据；可在设置中关闭）。
 # 部署后把域名改成你的 Pages 项目地址即可。
 UPDATE_MANIFEST_URL = "https://agentdeck.yilin.dev/version.json"
+UPDATE_MANIFEST_URLS = (
+    UPDATE_MANIFEST_URL,
+    "https://raw.githubusercontent.com/Spacebody/AgentDeck/main/site/version.json",
+)
 # GitHub Releases 基址：清单未显式给 dmg 直链时，按固定命名（tag=v{ver}、资产=AgentDeck-{ver}.dmg，
 # 由 build.sh 强制）从版本号推导最新 DMG 直链，发版无需额外维护字段。
 GITHUB_RELEASES = "https://github.com/Spacebody/AgentDeck/releases"
@@ -788,30 +792,36 @@ def _ver_key(v):
 def api_update(force=False):
     """查自托管清单的最新版本（6 小时缓存；设置关闭时不发任何请求）。
     force=True（设置页「立即检查」）时绕过缓存强制拉取，失败标记 error。"""
-    if not get_settings().get("update_check", True):
+    if not force and not get_settings().get("update_check", True):
         return {"current": VERSION, "available": False, "disabled": True}
 
     def fetch():
-        req = urllib.request.Request(UPDATE_MANIFEST_URL, headers={
-            "User-Agent": f"agentdeck/{VERSION}"})
-        with urllib.request.urlopen(req, timeout=8) as resp:
-            return json.loads(resp.read().decode())
+        last_error = None
+        for url in UPDATE_MANIFEST_URLS:
+            try:
+                req = urllib.request.Request(url, headers={
+                    "User-Agent": f"agentdeck/{VERSION}",
+                    "Accept": "application/json",
+                })
+                with urllib.request.urlopen(req, timeout=8) as resp:
+                    manifest = json.loads(resp.read().decode())
+                return _normalize_update_manifest(manifest)
+            except Exception as exc:
+                last_error = exc
+        raise RuntimeError("update manifest unavailable") from last_error
     try:
         if force:
             with _cache_lock:
                 _ttl_cache.pop("update_manifest", None)
         m = cached("update_manifest", 6 * 3600, fetch)
     except Exception:
-        return {"current": VERSION, "available": False, "error": True}
+        return {"current": VERSION, "available": False, "error": True,
+                "error_code": "manifest_unavailable"}
     latest = str(m.get("version") or "")
-    # dmg 直链：清单显式给则用之，否则按命名规律从版本号推导（面板「下载新版」直接下 DMG，不跳页）
-    dmg = str(m.get("dmg") or "")
-    if not dmg and latest:
-        dmg = f"{GITHUB_RELEASES}/download/v{latest}/AgentDeck-{latest}.dmg"
     return {"current": VERSION, "latest": latest,
             "available": bool(latest) and _ver_key(latest) > _ver_key(VERSION),
             "url": str(m.get("url") or ""),
-            "dmg": dmg,
+            "dmg": str(m.get("dmg") or ""),
             "notes_url": str(m.get("notes_url") or "")}
 
 
@@ -840,6 +850,26 @@ def _safe_update_url(url):
         rf"/Spacebody/AgentDeck/releases/download/v({_UPDATE_VERSION_RE})/"
         rf"AgentDeck-({_UPDATE_VERSION_RE})[.]dmg", p.path)
     return bool(m and m.group(1) == m.group(2))
+
+
+def _normalize_update_manifest(manifest):
+    """Validate both manifest sources before a version can reach the UI or installer."""
+    if not isinstance(manifest, dict):
+        raise ValueError("invalid update manifest")
+    version = str(manifest.get("version") or "").strip()
+    if not re.fullmatch(_UPDATE_VERSION_RE, version):
+        raise ValueError("invalid update version")
+    dmg = str(manifest.get("dmg") or "").strip()
+    if not dmg:
+        dmg = f"{GITHUB_RELEASES}/download/v{version}/AgentDeck-{version}.dmg"
+    if not _safe_update_url(dmg):
+        raise ValueError("invalid update url")
+    return {
+        "version": version,
+        "url": str(manifest.get("url") or ""),
+        "dmg": dmg,
+        "notes_url": str(manifest.get("notes_url") or ""),
+    }
 
 
 def _codesign_team(app_path):
@@ -873,6 +903,58 @@ def _run_checked(cmd, **kw):
     if r.returncode != 0:
         raise RuntimeError((r.stderr or r.stdout or "command failed").strip()[:500])
     return r
+
+
+def _append_update_log(message):
+    try:
+        path = Path.home() / "Library" / "Logs" / "AgentDeckUpdate.log"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as log:
+            log.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {message}\n")
+    except OSError:
+        pass
+
+
+def _download_update_dmg(dmg_url, dmg_path, attempts=3):
+    """Download with bounded retries; every attempt restarts from a clean file."""
+    last_error = None
+    attempts = max(1, attempts)
+    for attempt in range(1, attempts + 1):
+        try:
+            dmg_path.unlink(missing_ok=True)
+            _set_update_job(stage="downloading", progress=0.02,
+                            message="downloading", attempt=attempt)
+            req = urllib.request.Request(
+                dmg_url, headers={"User-Agent": f"agentdeck/{VERSION}"})
+            with urllib.request.urlopen(req, timeout=30) as resp, open(dmg_path, "wb") as f:
+                total = int(resp.headers.get("Content-Length") or 0)
+                if total > _MAX_UPDATE_DMG_BYTES:
+                    raise RuntimeError("update DMG is too large")
+                got = 0
+                while True:
+                    chunk = resp.read(1024 * 256)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    got += len(chunk)
+                    if got > _MAX_UPDATE_DMG_BYTES:
+                        raise RuntimeError("update DMG is too large")
+                    if total:
+                        _set_update_job(progress=min(0.72, 0.02 + 0.70 * got / total))
+                    else:
+                        progress = _update_status().get("progress") or 0.02
+                        _set_update_job(progress=min(0.70, progress + 0.01))
+            if dmg_path.stat().st_size < 1024 * 1024:
+                raise RuntimeError("downloaded DMG is too small")
+            return
+        except Exception as exc:
+            last_error = exc
+            _append_update_log(f"download attempt {attempt} failed: {exc}")
+            if str(exc) == "update DMG is too large" or attempt >= attempts:
+                break
+            time.sleep(min(2 ** (attempt - 1), 4))
+    dmg_path.unlink(missing_ok=True)
+    raise last_error or RuntimeError("update download failed")
 
 
 def _update_install_script(tmp, stage, mount, version, transaction):
@@ -1059,27 +1141,8 @@ def _update_install_worker(job_id, dmg_url, version):
     stage = tmp / "stage"
     mounted = False
     try:
-        _set_update_job(stage="downloading", progress=0.02, message="downloading")
-        req = urllib.request.Request(dmg_url, headers={"User-Agent": f"agentdeck/{VERSION}"})
-        with urllib.request.urlopen(req, timeout=30) as resp, open(dmg_path, "wb") as f:
-            total = int(resp.headers.get("Content-Length") or 0)
-            if total > _MAX_UPDATE_DMG_BYTES:
-                raise RuntimeError("update DMG is too large")
-            got = 0
-            while True:
-                chunk = resp.read(1024 * 256)
-                if not chunk:
-                    break
-                f.write(chunk)
-                got += len(chunk)
-                if got > _MAX_UPDATE_DMG_BYTES:
-                    raise RuntimeError("update DMG is too large")
-                if total:
-                    _set_update_job(progress=min(0.72, 0.02 + 0.70 * got / total))
-                else:
-                    _set_update_job(progress=min(0.70, (_update_status().get("progress") or 0.02) + 0.01))
-        if dmg_path.stat().st_size < 1024 * 1024:
-            raise RuntimeError("downloaded DMG is too small")
+        _append_update_log(f"starting AgentDeck {version} update job {job_id}")
+        _download_update_dmg(dmg_url, dmg_path)
 
         _set_update_job(stage="mounting", progress=0.76, message="mounting")
         mount.mkdir()
@@ -1125,32 +1188,49 @@ def _update_install_worker(job_id, dmg_url, version):
             pass
         _set_update_job(running=False, stage="error", progress=0.0,
                         error=str(exc)[:500], message="error")
+        _append_update_log(f"AgentDeck {version} update failed before handoff: {exc}")
 
 
 def api_update_install(body):
+    requested_version = str(body.get("version") or "")
+    job_id = str(uuid.uuid4())
     with _update_job_lock:
         if _update_job.get("running"):
             return {"ok": True, **_update_job}
-    version = str(body.get("version") or "")
+        _update_job.clear()
+        _update_job.update({"ok": True, "running": True, "id": job_id,
+                            "stage": "checking", "progress": 0.0,
+                            "version": requested_version, "error": ""})
+
     info = api_update(force=True)
     latest = str(info.get("latest") or "")
+    version = requested_version
     if not version:
         version = latest
     if (not re.fullmatch(_UPDATE_VERSION_RE, version)
             or version != latest or not info.get("available")):
-        return {"ok": False, "error": "no matching update available"}
+        _set_update_job(ok=False, running=False, stage="error", progress=0.0,
+                        version=version, error="no matching update available",
+                        message="error")
+        return _update_status()
     dmg = info.get("dmg") or ""
     if not dmg or not _safe_update_url(dmg):
-        return {"ok": False, "error": "invalid update url"}
-    job_id = str(uuid.uuid4())
-    with _update_job_lock:
-        _update_job.clear()
-        _update_job.update({"ok": True, "running": True, "id": job_id,
-                            "stage": "queued", "progress": 0.0,
-                            "version": version, "error": ""})
-    threading.Thread(target=_update_install_worker,
-                     args=(job_id, dmg, version), daemon=True).start()
+        _set_update_job(ok=False, running=False, stage="error", progress=0.0,
+                        version=version, error="invalid update url", message="error")
+        return _update_status()
+    _set_update_job(stage="queued", version=version)
+    try:
+        threading.Thread(target=_update_install_worker,
+                         args=(job_id, dmg, version), daemon=True).start()
+    except Exception as exc:
+        _set_update_job(ok=False, running=False, stage="error", progress=0.0,
+                        error=str(exc)[:500], message="error")
     return _update_status()
+
+
+def api_update_check(_body):
+    """Explicit checks use the JSON/Origin/Host protected POST boundary."""
+    return api_update(force=True)
 
 
 # ---------------------------------------------------------------- Claude 额度
@@ -7644,7 +7724,7 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/settings":
                 self._send(200, _settings_response())
             elif path == "/api/update":
-                self._send(200, api_update(force=query.get("force") == ["1"]))
+                self._send(200, api_update())
             elif path == "/api/update/install":
                 self._send(200, _update_status())
             elif path == "/api/terminals":
@@ -7704,6 +7784,7 @@ class Handler(BaseHTTPRequestHandler):
                     "/api/pin": api_pin,
                     "/api/settings": api_settings_save, "/api/event": api_event,
                     "/api/focus": api_focus, "/api/data": api_data,
+                    "/api/update/check": api_update_check,
                     "/api/update/install": api_update_install}
         if path != "/api/shutdown" and path not in handlers:
             return self._send(404, {"error": "not found"})

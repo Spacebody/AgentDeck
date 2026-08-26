@@ -273,6 +273,7 @@ public struct AgentDeckRootView: View {
                 } else if install?.stage == "error" {
                     Text(L("update.installFail"))
                         .font(.system(size: 10)).foregroundStyle(Color(hex: 0xff7a8a))
+                        .help(install?.error ?? L("update.installFail"))
                 }
             }
             Spacer(minLength: 6)
@@ -682,7 +683,8 @@ public struct AgentDeckRootView: View {
                     updateDismissed = false
                     showToast(L("update.available", ["v": "v\(store.update?.latest ?? "")"]))
                 } else {
-                    showToast(L(store.update?.available == nil ? "update.checkFail" : "update.latest"))
+                    showToast(L(store.update == nil || store.update?.error == true
+                                ? "update.checkFail" : "update.latest"))
                 }
             }
         case "feedback_github", "feedback_email":

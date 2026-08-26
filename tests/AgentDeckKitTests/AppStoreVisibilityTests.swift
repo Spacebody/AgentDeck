@@ -2,6 +2,26 @@ import XCTest
 @testable import AgentDeckKit
 
 final class AppStoreVisibilityTests: XCTestCase {
+    func testUpdateInfoPreservesManifestFailureState() throws {
+        let data = Data(#"{"current":"2.8.2","available":false,"error":true}"#.utf8)
+        let update = try JSONDecoder().decode(UpdateInfo.self, from: data)
+
+        XCTAssertEqual(update.available, false)
+        XCTAssertEqual(update.error, true)
+    }
+
+    @MainActor
+    func testRejectedUpdateInstallResponseBecomesVisibleError() {
+        let status = AppStore.updateInstallStatus([
+            "ok": false,
+            "running": false,
+            "error": "no matching update available",
+        ])
+
+        XCTAssertEqual(status.stage, "error")
+        XCTAssertEqual(status.error, "no matching update available")
+    }
+
     func testForcedRefreshRetriesOnlyItsOwnFailedRequest() {
         XCTAssertTrue(shouldRetryForcedRefresh(
             forcePending: true, requestSucceeded: false))

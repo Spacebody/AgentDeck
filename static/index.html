@@ -2463,7 +2463,8 @@ $('#setbody').addEventListener('click', e => {
   }
   if (act && act.dataset.act === 'check_update') {  // 主动检查更新（绕过 6h 缓存）
     act.disabled = true;
-    fetch('/api/update?force=1').then(r => r.json()).then(r => {
+    fetch('/api/update/check', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({manual: true})}).then(r => r.json()).then(r => {
       _update = r;
       if (r.available) {
         const bar = $('#updatebar'); if (bar) delete bar.dataset.dismissed;

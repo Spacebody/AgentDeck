@@ -21,6 +21,21 @@ def _jsonl(path, events):
 
 
 class HTTPBoundaryTests(unittest.TestCase):
+    def test_update_get_cannot_force_network_when_automatic_check_is_disabled(self):
+        handler = object.__new__(daemon.Handler)
+        handler.path = "/api/update?force=1"
+        handler.headers = {"Host": "127.0.0.1:7777"}
+        sent = []
+        handler._send = lambda code, payload, ctype="": sent.append((code, payload))
+        with mock.patch.object(daemon, "get_settings",
+                               return_value={"update_check": False}), \
+                mock.patch.object(daemon.urllib.request, "urlopen") as urlopen:
+            handler.do_GET()
+
+        self.assertEqual(sent[0][0], 200)
+        self.assertTrue(sent[0][1]["disabled"])
+        urlopen.assert_not_called()
+
     def test_health_exposes_daemon_and_parent_process_identity(self):
         handler = object.__new__(daemon.Handler)
         handler.path = "/api/health"
@@ -2652,6 +2667,199 @@ class QuotaSamplingTests(unittest.TestCase):
 
 
 class PersistenceAndUpdateTests(unittest.TestCase):
+    def setUp(self):
+        with daemon._update_job_lock:
+            self.previous_update_job = dict(daemon._update_job)
+            daemon._update_job.clear()
+
+    def tearDown(self):
+        with daemon._cache_lock:
+            daemon._ttl_cache.pop("update_manifest", None)
+        with daemon._update_job_lock:
+            daemon._update_job.clear()
+            daemon._update_job.update(self.previous_update_job)
+
+    def test_automatic_update_check_respects_disabled_setting(self):
+        with mock.patch.object(daemon, "get_settings",
+                               return_value={"update_check": False}), \
+                mock.patch.object(daemon.urllib.request, "urlopen") as urlopen:
+            result = daemon.api_update()
+
+        self.assertTrue(result["disabled"])
+        self.assertFalse(result["available"])
+        urlopen.assert_not_called()
+
+    def test_manual_update_check_bypasses_disabled_automatic_setting(self):
+        manifest = io.BytesIO(json.dumps({
+            "version": "2.8.3",
+            "dmg": "https://github.com/Spacebody/AgentDeck/releases/download/v2.8.3/AgentDeck-2.8.3.dmg",
+        }).encode())
+        with mock.patch.object(daemon, "get_settings",
+                               return_value={"update_check": False}), \
+                mock.patch.object(daemon, "VERSION", "2.8.2"), \
+                mock.patch.object(daemon, "UPDATE_MANIFEST_URLS",
+                                  ("https://primary.invalid/version.json",)), \
+                mock.patch.object(daemon.urllib.request, "urlopen",
+                                  return_value=manifest):
+            result = daemon.api_update(force=True)
+
+        self.assertTrue(result["available"])
+        self.assertEqual(result["latest"], "2.8.3")
+
+    def test_update_manifest_falls_back_to_official_github_copy(self):
+        fallback = io.BytesIO(json.dumps({
+            "version": "2.8.3",
+            "dmg": "https://github.com/Spacebody/AgentDeck/releases/download/v2.8.3/AgentDeck-2.8.3.dmg",
+        }).encode())
+        with mock.patch.object(daemon, "get_settings",
+                               return_value={"update_check": True}), \
+                mock.patch.object(daemon, "VERSION", "2.8.2"), \
+                mock.patch.object(daemon, "UPDATE_MANIFEST_URLS",
+                                  ("https://primary.invalid/version.json",
+                                   "https://fallback.invalid/version.json")), \
+                mock.patch.object(daemon.urllib.request, "urlopen",
+                                  side_effect=[OSError("offline"), fallback]) as urlopen:
+            result = daemon.api_update(force=True)
+
+        self.assertTrue(result["available"])
+        self.assertEqual(urlopen.call_count, 2)
+
+    def test_update_download_retries_from_a_clean_file(self):
+        class PartialFailure:
+            headers = {"Content-Length": str(1024 * 1024)}
+
+            def __init__(self):
+                self.reads = 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _size):
+                self.reads += 1
+                if self.reads == 1:
+                    return b"a" * (512 * 1024)
+                raise OSError("connection reset")
+
+        payload = b"x" * (1024 * 1024)
+        response = io.BytesIO(payload)
+        response.headers = {"Content-Length": str(len(payload))}
+        with tempfile.TemporaryDirectory() as td:
+            dmg = Path(td) / "update.dmg"
+            with mock.patch.object(daemon.urllib.request, "urlopen",
+                                   side_effect=[PartialFailure(), response]) as urlopen, \
+                    mock.patch.object(daemon, "_set_update_job"), \
+                    mock.patch.object(daemon, "_append_update_log"), \
+                    mock.patch.object(daemon.time, "sleep"):
+                daemon._download_update_dmg("https://example.invalid/update.dmg", dmg)
+
+            self.assertEqual(dmg.read_bytes(), payload)
+            self.assertEqual(urlopen.call_count, 2)
+
+    def test_update_download_exhausts_retries_and_removes_final_partial(self):
+        class PartialFailure:
+            headers = {"Content-Length": str(1024 * 1024)}
+
+            def __init__(self):
+                self.reads = 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _size):
+                self.reads += 1
+                if self.reads == 1:
+                    return b"a" * (512 * 1024)
+                raise OSError("offline")
+
+        with tempfile.TemporaryDirectory() as td:
+            dmg = Path(td) / "update.dmg"
+            failures = [PartialFailure() for _ in range(3)]
+            with mock.patch.object(daemon.urllib.request, "urlopen",
+                                   side_effect=failures) as urlopen, \
+                    mock.patch.object(daemon, "_set_update_job"), \
+                    mock.patch.object(daemon, "_append_update_log") as update_log, \
+                    mock.patch.object(daemon.time, "sleep") as sleep:
+                with self.assertRaisesRegex(OSError, "offline"):
+                    daemon._download_update_dmg(
+                        "https://example.invalid/update.dmg", dmg)
+
+            self.assertEqual(urlopen.call_count, 3)
+            self.assertEqual(update_log.call_count, 3)
+            self.assertEqual(sleep.call_count, 2)
+            self.assertFalse(dmg.exists())
+            for attempt, call in enumerate(update_log.call_args_list, start=1):
+                self.assertIn(f"download attempt {attempt} failed", call.args[0])
+
+    def test_update_worker_cleans_temp_and_logs_exhausted_download(self):
+        with tempfile.TemporaryDirectory() as parent:
+            job_dir = Path(parent) / "job"
+            job_dir.mkdir()
+            with mock.patch.object(daemon.tempfile, "mkdtemp",
+                                   return_value=str(job_dir)), \
+                    mock.patch.object(daemon, "_download_update_dmg",
+                                      side_effect=OSError("offline")), \
+                    mock.patch.object(daemon, "_append_update_log") as update_log:
+                daemon._update_install_worker(
+                    "job-1",
+                    "https://github.com/Spacebody/AgentDeck/releases/download/v2.8.3/AgentDeck-2.8.3.dmg",
+                    "2.8.3")
+
+            self.assertFalse(job_dir.exists())
+            self.assertEqual(daemon._update_status()["stage"], "error")
+            self.assertIn("offline", daemon._update_status()["error"])
+            self.assertEqual(update_log.call_count, 2)
+
+    def test_update_install_reserves_one_job_before_manifest_check(self):
+        entered = threading.Event()
+        release = threading.Event()
+        first = {}
+
+        def check_update(force=False):
+            self.assertTrue(force)
+            entered.set()
+            self.assertTrue(release.wait(2))
+            return {
+                "latest": "2.8.3", "available": True,
+                "dmg": "https://github.com/Spacebody/AgentDeck/releases/download/v2.8.3/AgentDeck-2.8.3.dmg",
+            }
+
+        def run_first():
+            first["result"] = daemon.api_update_install({"version": "2.8.3"})
+
+        with mock.patch.object(daemon, "api_update", side_effect=check_update), \
+                mock.patch.object(daemon, "_update_install_worker") as worker:
+            thread = threading.Thread(target=run_first)
+            thread.start()
+            self.assertTrue(entered.wait(2))
+            second = daemon.api_update_install({"version": "2.8.3"})
+            release.set()
+            thread.join(2)
+            self.assertFalse(thread.is_alive())
+            for _ in range(20):
+                if worker.call_count:
+                    break
+                time.sleep(0.01)
+
+        self.assertEqual(second["id"], first["result"]["id"])
+        self.assertEqual(second["stage"], "checking")
+        worker.assert_called_once()
+
+    def test_update_install_rejection_is_a_visible_error_status(self):
+        with mock.patch.object(daemon, "api_update", return_value={
+                "latest": "2.8.2", "available": False}):
+            result = daemon.api_update_install({"version": "2.8.3"})
+
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["running"])
+        self.assertEqual(result["stage"], "error")
+        self.assertEqual(result["error"], "no matching update available")
+
     def test_update_installer_keeps_backup_until_transaction_health_check(self):
         script = daemon._update_install_script(
             Path("/tmp/update"), Path("/tmp/update/stage"),
@@ -2716,6 +2924,11 @@ snapshot_tree "$OLD_DAEMON_PID"
             "https://github.com/Spacebody/AgentDeck/releases/download/v2.2.0/AgentDeck-2.1.0.dmg"))
         self.assertFalse(daemon._safe_update_url(
             "https://github.com/Spacebody/AgentDeck/releases/download/v../../AgentDeck-../../x.dmg"))
+        with self.assertRaisesRegex(ValueError, "update url"):
+            daemon._normalize_update_manifest({
+                "version": "2.8.3",
+                "dmg": "https://example.invalid/AgentDeck-2.8.3.dmg",
+            })
 
     def test_legacy_alert_state_migrates_to_default_account(self):
         with tempfile.TemporaryDirectory() as td:

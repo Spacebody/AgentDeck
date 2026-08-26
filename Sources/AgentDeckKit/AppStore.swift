@@ -8,6 +8,8 @@ struct UpdateInfo: Decodable {
     let url: String?
     let dmg: String?
     let notesUrl: String?
+    let error: Bool?
+    let disabled: Bool?
 }
 
 struct UpdateInstallStatus: Decodable {
@@ -813,11 +815,15 @@ public final class AppStore: ObservableObject {
     }
 
     func checkUpdate() async {
-        update = try? await api.get("/api/update", query: ["force": "1"])
+        update = try? await api.post("/api/update/check", body: ["manual": true])
+        if update?.available == true, updateInstall?.running != true { updateInstall = nil }
     }
 
     func startUpdateInstall() async {
         guard let up = update else { return }
+        updateInstall = UpdateInstallStatus(
+            ok: true, running: true, id: nil, stage: "queued",
+            progress: 0, version: up.latest, error: nil, message: "queued")
         let body: [String: Any] = [
             "version": up.latest ?? "",
         ]
@@ -830,6 +836,7 @@ public final class AppStore: ObservableObject {
                                                 message: "error")
             return
         }
+        guard updateInstall?.ok == true, updateInstall?.running == true else { return }
         await pollUpdateInstall()
     }
 
@@ -863,12 +870,15 @@ public final class AppStore: ObservableObject {
             error: "Update timed out", message: "error")
     }
 
-    private static func updateInstallStatus(_ raw: [String: Any]) -> UpdateInstallStatus {
-        UpdateInstallStatus(
-            ok: raw["ok"] as? Bool,
+    static func updateInstallStatus(_ raw: [String: Any]) -> UpdateInstallStatus {
+        let ok = raw["ok"] as? Bool
+        let rawStage = raw["stage"] as? String
+        let stage = ok == false && rawStage != "error" ? "error" : rawStage
+        return UpdateInstallStatus(
+            ok: ok,
             running: raw["running"] as? Bool,
             id: raw["id"] as? String,
-            stage: raw["stage"] as? String,
+            stage: stage,
             progress: (raw["progress"] as? NSNumber)?.doubleValue ?? raw["progress"] as? Double,
             version: raw["version"] as? String,
             error: raw["error"] as? String,
