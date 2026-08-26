@@ -7,6 +7,7 @@ struct QuotaResponse: Decodable {
     let claude: QuotaNode?
     let codex: QuotaNode?
     let qoder: QuotaNode?
+    let qoderCn: QuotaNode?
     let agents: [AgentQuota]?
     let accounts: QuotaAccounts?
     let menubar: MenubarConfig?
@@ -18,6 +19,7 @@ struct QuotaResponse: Decodable {
         claude: QuotaNode?,
         codex: QuotaNode?,
         qoder: QuotaNode? = nil,
+        qoderCn: QuotaNode? = nil,
         agents: [AgentQuota]? = nil,
         accounts: QuotaAccounts?,
         menubar: MenubarConfig?,
@@ -28,6 +30,7 @@ struct QuotaResponse: Decodable {
         self.claude = claude
         self.codex = codex
         self.qoder = qoder
+        self.qoderCn = qoderCn
         self.agents = agents
         self.accounts = accounts
         self.menubar = menubar
@@ -49,11 +52,14 @@ struct QuotaAccounts: Decodable {
     let claude: [QuotaNode]
     let codex: [QuotaNode]
     let qoder: [QuotaNode]?
+    let qoderCn: [QuotaNode]?
 
-    init(claude: [QuotaNode], codex: [QuotaNode], qoder: [QuotaNode]? = nil) {
+    init(claude: [QuotaNode], codex: [QuotaNode], qoder: [QuotaNode]? = nil,
+         qoderCn: [QuotaNode]? = nil) {
         self.claude = claude
         self.codex = codex
         self.qoder = qoder
+        self.qoderCn = qoderCn
     }
 }
 
@@ -101,6 +107,8 @@ extension QuotaResponse {
                            accounts: legacyAccounts(accounts?.codex, primary: codex)),
                 AgentQuota(id: "qoder", name: "Qoder", hidden: qoder?.hidden,
                            accounts: legacyAccounts(accounts?.qoder, primary: qoder)),
+                AgentQuota(id: "qoder_cn", name: "Qoder CN", hidden: qoderCn?.hidden,
+                           accounts: legacyAccounts(accounts?.qoderCn, primary: qoderCn)),
             ]
         }
         return groups.flatMap { group -> [QuotaPage] in
@@ -221,6 +229,7 @@ struct MenubarConfig: Decodable {
     let claude: Bool?
     let codex: Bool?
     let qoder: Bool?
+    let qoderCn: Bool?
     let alertColor: Bool?       // alert_color
     let valueDim: String?       // value_dim：shortest / weekly / max
     let colorDim: String?       // color_dim

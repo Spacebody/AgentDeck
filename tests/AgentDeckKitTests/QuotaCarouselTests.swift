@@ -41,6 +41,27 @@ final class QuotaCarouselTests: XCTestCase {
         ])
     }
 
+    func testQoderCNDecodesAsIndependentQuotaPage() throws {
+        let response = try decode("""
+        {
+          "qoder":{"ok":false,"hidden":true},
+          "qoder_cn":{"ok":true,"hidden":false,"windows":[]},
+          "agents":[
+            {"id":"qoder","name":"Qoder","hidden":true,"accounts":[]},
+            {"id":"qoder_cn","name":"Qoder CN","hidden":false,"accounts":[
+              {"ok":true,"account_id":"default","is_default":true,"windows":[]}
+            ]}
+          ],
+          "accounts":{"claude":[],"codex":[],"qoder":[],"qoder_cn":[]}
+        }
+        """)
+
+        let pages = response.flatPages()
+        XCTAssertEqual(pages.map(\.id), ["qoder_cn::default"])
+        XCTAssertEqual(pages.first?.brand, .qoderCn)
+        XCTAssertEqual(response.qoderCn?.hidden, false)
+    }
+
     func testLegacyQuotaResponseStillFlattens() throws {
         let response = try decode("""
         {

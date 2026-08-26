@@ -58,6 +58,7 @@ enum Theme {
 // 此处给默认值；接入 store 后由设置覆盖。deep 为渐变深端，tint 为卡片辉光底色。
 enum Brand: String, CaseIterable {
     case claude, codex, qoder
+    case qoderCn = "qoder_cn"
 
     // 默认主色（--claude #ff9d7a / --codex #8be9e2）
     /// 用户自定义主色覆盖（设置 color_claude/color_codex；AppStore.applyCustomColors 写入）。
@@ -68,6 +69,7 @@ enum Brand: String, CaseIterable {
         case .claude: return Color(hex: 0xff9d7a)
         case .codex: return Color(hex: 0x8be9e2)
         case .qoder: return Color(hex: 0xa78bfa)
+        case .qoderCn: return Color(hex: 0x818cf8)
         }
     }
     // 渐变深端（--claude-deep #e8744f / --codex-deep #4fd1c5）
@@ -76,6 +78,7 @@ enum Brand: String, CaseIterable {
         case .claude: return Color(hex: 0xe8744f)
         case .codex: return Color(hex: 0x4fd1c5)
         case .qoder: return Color(hex: 0x7c3aed)
+        case .qoderCn: return Color(hex: 0x4f46e5)
         }
     }
     // 卡片右上角辉光（qcard::before：claude .22 / codex .18 透明度）
@@ -84,6 +87,7 @@ enum Brand: String, CaseIterable {
         case .claude: return Color(hex: 0xe8744f).opacity(0.22)
         case .codex: return Color(hex: 0x4fd1c5).opacity(0.18)
         case .qoder: return Color(hex: 0x7c3aed).opacity(0.20)
+        case .qoderCn: return Color(hex: 0x4f46e5).opacity(0.20)
         }
     }
     // 进度环/进度条渐变（90deg/对角：deep → accent）

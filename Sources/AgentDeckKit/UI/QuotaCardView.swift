@@ -595,6 +595,7 @@ struct QuotaCardView: View {
         case .claude: return "Claude"
         case .codex: return "Codex"
         case .qoder: return "Qoder"
+        case .qoderCn: return "Qoder CN"
         }
     }
     private var compact: Bool { presentation.isWidget }

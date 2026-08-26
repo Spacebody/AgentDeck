@@ -46,6 +46,7 @@ final class AppStoreVisibilityTests: XCTestCase {
     func testMenubarAgentVisibilityDefaultsOnAndReadsSetting() {
         let store = AppStore()
         XCTAssertTrue(store.menubarAgentEnabled("codex"))
+        XCTAssertFalse(store.menubarAgentEnabled("qoder_cn"))
         store.settings["menubar_codex"] = .bool(false)
         XCTAssertFalse(store.menubarAgentEnabled("codex"))
     }

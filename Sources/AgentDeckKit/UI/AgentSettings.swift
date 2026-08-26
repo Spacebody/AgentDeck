@@ -22,19 +22,28 @@ struct AgentSettingDescriptor: Identifiable, Equatable {
     let menubarKey: String
     let colorKey: String
     let defaultColor: String
+    let defaultShow: Bool
+    let defaultMenubar: Bool
 }
 
 enum AgentSettingsCatalog {
     static let all: [AgentSettingDescriptor] = [
         .init(id: "claude", name: "Claude", brand: .claude,
               showKey: "show_claude", menubarKey: "menubar_claude",
-              colorKey: "color_claude", defaultColor: "#ff9d7a"),
+              colorKey: "color_claude", defaultColor: "#ff9d7a",
+              defaultShow: true, defaultMenubar: true),
         .init(id: "codex", name: "Codex", brand: .codex,
               showKey: "show_codex", menubarKey: "menubar_codex",
-              colorKey: "color_codex", defaultColor: "#8be9e2"),
+              colorKey: "color_codex", defaultColor: "#8be9e2",
+              defaultShow: true, defaultMenubar: true),
         .init(id: "qoder", name: "Qoder", brand: .qoder,
               showKey: "show_qoder", menubarKey: "menubar_qoder",
-              colorKey: "color_qoder", defaultColor: "#a78bfa"),
+              colorKey: "color_qoder", defaultColor: "#a78bfa",
+              defaultShow: true, defaultMenubar: true),
+        .init(id: "qoder_cn", name: "Qoder CN", brand: .qoderCn,
+              showKey: "show_qoder_cn", menubarKey: "menubar_qoder_cn",
+              colorKey: "color_qoder_cn", defaultColor: "#818cf8",
+              defaultShow: false, defaultMenubar: false),
     ]
 
     static let visibilityKeys = Set(all.map(\.showKey))
@@ -42,7 +51,9 @@ enum AgentSettingsCatalog {
     static let colorKeys = Set(all.map(\.colorKey))
 
     static func enabledCount(in values: [String: SettingValue]) -> Int {
-        all.reduce(0) { $0 + ((values[$1.showKey]?.boolVal ?? true) ? 1 : 0) }
+        all.reduce(0) {
+            $0 + ((values[$1.showKey]?.boolVal ?? $1.defaultShow) ? 1 : 0)
+        }
     }
 }
 
@@ -153,13 +164,16 @@ struct AgentManagerView: View {
                 .font(.system(size: 9.5, weight: .medium))
                 .foregroundStyle(Theme.ink3)
             if GlassRender.useNativeEffect {
-                Toggle("", isOn: bool(key))
+                Toggle("", isOn: bool(key, fallback: key == agent.showKey
+                                       ? agent.defaultShow : agent.defaultMenubar))
                     .labelsHidden()
                     .toggleStyle(.switch)
                     .tint(agent.brand.accent)
                     .accessibilityLabel(Text("\(agent.name) \(title)"))
             } else {
-                previewToggle(isOn: values[key]?.boolVal ?? true, tint: agent.brand.accent)
+                previewToggle(isOn: values[key]?.boolVal ?? (key == agent.showKey
+                                  ? agent.defaultShow : agent.defaultMenubar),
+                              tint: agent.brand.accent)
                     .accessibilityLabel(Text("\(agent.name) \(title)"))
             }
         }
@@ -204,8 +218,8 @@ struct AgentManagerView: View {
         .frame(width: 58)
     }
 
-    private func bool(_ key: String) -> Binding<Bool> {
-        Binding(get: { values[key]?.boolVal ?? true },
+    private func bool(_ key: String, fallback: Bool) -> Binding<Bool> {
+        Binding(get: { values[key]?.boolVal ?? fallback },
                 set: { onSet(key, .bool($0)) })
     }
 

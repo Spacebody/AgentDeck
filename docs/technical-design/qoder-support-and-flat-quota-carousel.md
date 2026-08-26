@@ -72,16 +72,17 @@ Qoder 首期将 `UsageInfo` 映射为综合、套餐、加油包和组织资源�
 
 ### 4.2 Qoder 本地数据
 
-- CLI：优先使用 `PATH` 中的 `qodercli`，并兼容 `~/.local/bin/qodercli`。
-- 配置目录：默认读取 `QODER_CONFIG_DIR` 或 `~/.qoder`，同时支持设置中的额外目录。
+- Agent 边界：Qoder 使用 `qoder`，Qoder CN 使用独立稳定 ID `qoder_cn`；两者分别拥有面板、菜单栏、主题色、配置目录、额度缓存与轮播页设置，不能折叠成同一 Agent 的账号变体。
+- CLI：Qoder 优先使用 `PATH` 中的 `qodercli`，并兼容 `~/.local/bin/qodercli`；Qoder CN 只使用 `qoderclicn`，兼容官方用户级安装目录及 `qodercn` 调度入口。
+- 配置目录：Qoder 读取 `QODER_CONFIG_DIR` 或 `~/.qoder`；Qoder CN 读取 `QODERCN_CONFIG_DIR` 或 `~/.qoder-cn`。两组来源独立发现，CN 目录不得被 `.qoder-*` 通配纳入国际版。
 - 会话：扫描 `<config>/projects/**/*.jsonl`，排除 `subagents`、日志和其他非主会话文件。
-- 恢复：使用 `qodercli --resume <sessionId>`，多账号时通过 `QODER_CONFIG_DIR` 绑定对应配置目录。
+- 恢复：国际版使用 `qodercli --resume <sessionId>`，多账号时通过 `QODER_CONFIG_DIR` 绑定对应配置目录；本次 Qoder CN 改动只覆盖额度采集，不扩大到 CN 会话恢复语义。
 - 活跃状态：识别 `qodercli` 及其会话工作目录，复用现有进程采样与防抖逻辑。
 - Qoder App：发现 `SharedClientCache/.info.json` 声明的用户私有 Unix Socket，并校验 Apple 锚定的官方 bundle/服务二进制签名、peer PID 与 socket inode；额度直接复用 App 登录态，会话列表只抽取 ID、标题、工程路径、分支与时间。扫描受全局期限、总响应字节数和总会话数约束，截断或协议异常只保留旧快照、不做删除。App 会话没有稳定的公开精确恢复接口，界面明确使用“打开 Qoder”，不伪造 CLI 恢复命令。
 
 ### 4.3 Qoder 额度采集
 
-Qoder App 运行且已登录时，优先通过 LSP 分帧的 JSON-RPC 调用只读 `credit/usage`；App 不可用、未登录或协议变化时回退 Qoder CLI SDK 的 `getUsageInfo()` 语义。CLI 路径通过流式控制协议请求 `get_usage_info`，只解析对应响应，不记录初始化响应中的账号和模型信息。
+Qoder App 运行且已登录时，`qoder` Agent 优先通过 LSP 分帧的 JSON-RPC 调用只读 `credit/usage`；App 不可用、未登录或协议变化时回退 `qodercli`。`qoder_cn` Agent 不尝试国际版 App IPC，只调用 `qoderclicn`。两种 CLI 共用 Qoder SDK 的 `getUsageInfo()` 语义，通过流式控制协议请求 `get_usage_info`，只解析对应响应，不记录初始化响应中的账号和模型信息。
 
 采集约束：
 
@@ -89,7 +90,7 @@ Qoder App 运行且已登录时，优先通过 LSP 分帧的 JSON-RPC 调用只�
 - 禁用工具并设置超时，失败后终止子进程。
 - 只保留额度数值、到期时间和套餐类型，不回传用户 ID、邮箱、头像或升级链接。
 - 采用短期缓存，避免概览轮询频繁拉起 CLI。
-- CLI 不存在、版本不兼容、未登录或超时时返回稳定错误状态，并由前端显示状态页。
+- CLI 不存在、版本不兼容、未登录或超时时返回稳定且区分国际版/CN 的错误状态；只识别固定错误码，不透传可能带身份信息的初始化响应、消息正文或 stderr。
 - App IPC 只允许 `credit/usage` 与 `chat/listAllSessions` 两个只读方法；Socket 必须位于标准缓存目录、归当前用户所有且非组/全局可写，并同时核对 PID、Qoder App 二进制路径、响应 ID、大小和超时。
 - App IPC 属于 Qoder 当前版本的本机内部协议，升级不兼容时必须无损回退 CLI / last-good，不得影响 Claude、Codex 或会话文件索引。
 
@@ -153,6 +154,8 @@ Qoder App 运行且已登录时，优先通过 LSP 分帧的 JSON-RPC 调用只�
 - Qoder 配置目录、会话发现、主会话排除规则。
 - Qoder 会话解析与恢复命令。
 - Qoder UsageInfo 到额度窗口的映射。
+- `qoder` / `qoder_cn` 的独立设置、数据源、缓存、API Agent、轮播页与菜单栏契约。
+- `QODER_CONFIG_DIR` / `QODERCN_CONFIG_DIR` 的目录隔离和 `qodercli` / `qoderclicn` 二进制选择。
 - CLI 缺失、未登录、超时、畸形响应和缓存行为。
 - `/api/quota` 新旧结构兼容、多 Agent 顺序与隐藏状态。
 

@@ -167,7 +167,8 @@ public final class AppStore: ObservableObject {
     }
 
     public func menubarAgentEnabled(_ agentID: String) -> Bool {
-        settings["menubar_\(agentID)"]?.boolVal ?? true
+        let fallback = AgentSettingsCatalog.all.first { $0.id == agentID }?.defaultMenubar ?? false
+        return settings["menubar_\(agentID)"]?.boolVal ?? fallback
     }
 
     var today: TodaySummary? {
@@ -181,7 +182,8 @@ public final class AppStore: ObservableObject {
     /// `/api/quota.hidden`，避免启动瞬间闪出用户已隐藏的 Agent。
     func agentOn(_ tool: String, fallbackHidden: Bool? = nil) -> Bool {
         if let configured = settings["show_\(tool.lowercased())"] { return configured.boolVal }
-        return !(fallbackHidden ?? false)
+        if let fallbackHidden { return !fallbackHidden }
+        return AgentSettingsCatalog.all.first { $0.id == tool.lowercased() }?.defaultShow ?? false
     }
     var showActive: Bool { settings["show_active"]?.boolVal ?? true }
 
@@ -567,6 +569,7 @@ public final class AppStore: ObservableObject {
         case "claude": hidden = quota?.claude?.hidden
         case "codex": hidden = quota?.codex?.hidden
         case "qoder": hidden = quota?.qoder?.hidden
+        case "qoder_cn": hidden = quota?.qoderCn?.hidden
         default: hidden = nil
         }
         return agentOn(tool, fallbackHidden: hidden)

@@ -20,6 +20,8 @@
   --codex-deep: #4fd1c5;
   --qoder: #a78bfa;
   --qoder-deep: #7c3aed;
+  --qoder_cn: #818cf8;
+  --qoder_cn-deep: #4f46e5;
   --ok: #7ee2a8;
   --warn: #ffc46b;
   --danger: #ff7a8a;
@@ -233,6 +235,7 @@ body.wgt #aurora { opacity: .14; }
 .qcard.claude { --tint: rgba(232,116,79,.22); --ac: var(--claude); --ac-deep: var(--claude-deep); }
 .qcard.codex  { --tint: rgba(79,209,197,.18); --ac: var(--codex);  --ac-deep: var(--codex-deep); }
 .qcard.qoder  { --tint: rgba(124,58,237,.20); --ac: var(--qoder);  --ac-deep: var(--qoder-deep); }
+.qcard.qoder_cn { --tint: rgba(79,70,229,.20); --ac: var(--qoder_cn); --ac-deep: var(--qoder_cn-deep); }
 /* 多账号 carousel：卡片外壳不变，内容横向滑动切换（scroll-snap 原生触控/触摸板） */
 .qcard.is-carousel { padding-bottom: 8px; }
 .qtrack { display: flex; overflow-x: auto; scroll-snap-type: x mandatory;
@@ -268,12 +271,17 @@ body.wgt #aurora { opacity: .14; }
   color: var(--qoder); background: rgba(124,58,237,.14);
   border-color: rgba(167,139,250,.28);
 }
+.qbadge.qoder_cn, .sbadge.qoder_cn, .abadge.qoder_cn {
+  color: var(--qoder_cn); background: rgba(79,70,229,.14);
+  border-color: rgba(129,140,248,.28);
+}
 /* 调色盘自定义主色时，徽章底色/描边、卡片辉光、品牌 chip 用 color-mix 跟随；
    旧 WebKit 无 color-mix 则保持上面的 rgba 定值，不破样式（@supports 门控对自定义属性也可靠） */
 @supports (color: color-mix(in srgb, red, blue)) {
   .qcard.claude { --tint: color-mix(in srgb, var(--claude) 22%, transparent); }
   .qcard.codex  { --tint: color-mix(in srgb, var(--codex) 18%, transparent); }
   .qcard.qoder  { --tint: color-mix(in srgb, var(--qoder) 20%, transparent); }
+  .qcard.qoder_cn { --tint: color-mix(in srgb, var(--qoder_cn) 20%, transparent); }
   .qbadge.claude, .sbadge.claude, .abadge.claude {
     background: color-mix(in srgb, var(--claude) 16%, transparent);
     border-color: color-mix(in srgb, var(--claude) 30%, transparent);
@@ -285,6 +293,10 @@ body.wgt #aurora { opacity: .14; }
   .qbadge.qoder, .sbadge.qoder, .abadge.qoder {
     background: color-mix(in srgb, var(--qoder) 16%, transparent);
     border-color: color-mix(in srgb, var(--qoder) 30%, transparent);
+  }
+  .qbadge.qoder_cn, .sbadge.qoder_cn, .abadge.qoder_cn {
+    background: color-mix(in srgb, var(--qoder_cn) 16%, transparent);
+    border-color: color-mix(in srgb, var(--qoder_cn) 30%, transparent);
   }
   .chip[data-multi="menubar_claude"].on {
     background: color-mix(in srgb, var(--claude) 22%, transparent);
@@ -300,6 +312,11 @@ body.wgt #aurora { opacity: .14; }
     background: color-mix(in srgb, var(--qoder) 18%, transparent);
     border-color: color-mix(in srgb, var(--qoder) 50%, transparent);
     color: color-mix(in srgb, var(--qoder) 60%, white);
+  }
+  .chip[data-multi="menubar_qoder_cn"].on {
+    background: color-mix(in srgb, var(--qoder_cn) 18%, transparent);
+    border-color: color-mix(in srgb, var(--qoder_cn) 50%, transparent);
+    color: color-mix(in srgb, var(--qoder_cn) 60%, white);
   }
 }
 .qbadge svg, .sbadge svg, .abadge svg { display: block; }
@@ -451,6 +468,7 @@ body.wgt #today, body.wgt #done { display: none !important; }
   transition: width .5s cubic-bezier(.2,.7,.2,1); }
 .prow.codex .pbar i { background: linear-gradient(90deg, var(--codex), var(--codex-deep)); }
 .prow.qoder .pbar i { background: linear-gradient(90deg, var(--qoder), var(--qoder-deep)); }
+.prow.qoder_cn .pbar i { background: linear-gradient(90deg, var(--qoder_cn), var(--qoder_cn-deep)); }
 #curvesvg { width: 100%; height: 144px; flex: 1; min-height: 44px; max-height: 300px; display: block; }
 .cv-line { fill: none; stroke-width: 1.8; stroke-linejoin: round; stroke-linecap: round; }
 .cv-grid { stroke: rgba(255,255,255,.12); stroke-width: 1; }
@@ -751,6 +769,10 @@ body.wgt #today, body.wgt #done { display: none !important; }
       <stop offset="0" stop-color="var(--qoder-deep)"/>
       <stop offset="1" stop-color="var(--qoder)"/>
     </linearGradient>
+    <linearGradient id="grad-qoder_cn" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="var(--qoder_cn-deep)"/>
+      <stop offset="1" stop-color="var(--qoder_cn)"/>
+    </linearGradient>
     <linearGradient id="grad-warn" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0%" stop-color="#ffd28a"/><stop offset="100%" stop-color="#e8a04f"/>
     </linearGradient>
@@ -964,7 +986,7 @@ const I18N = {
     'set.fontScale': '字体大小', 'set.fontScaleHint': '面板与小组件整体缩放',
     'set.sessionsLimit': '会话列表数量', 'set.sessionsLimitHint': '会话页每页展示的条数',
     'set.refreshInterval': '自动刷新间隔', 'set.refreshIntervalHint': '面板自动刷新显示的间隔', 'set.sampleInterval': '曲线采样间隔', 'set.sampleIntervalHint': '额度历史曲线的记点间隔，与接口频率无关', 'set.minUnit': '{n} 分钟',
-    'set.quotaInterval': '额度查询间隔', 'set.quotaIntervalHint': '控制 Claude 与 Qoder；Codex 自动实时同步',
+    'set.quotaInterval': '额度查询间隔', 'set.quotaIntervalHint': '控制 Claude、Qoder 与 Qoder CN；Codex 自动实时同步',
     'set.quotaAutoRotate': '额度自动轮播', 'set.quotaAutoRotateHint': '多个 Agent 或账号时自动切换同级额度卡',
     'set.quotaRotateSecs': '额度轮播间隔', 'set.quotaRotateSecsHint': '悬停、拖动或手动暂停时停止轮播',
     'set.keepAwake': '保持唤醒', 'set.keepAwakeHint': '有活跃会话时阻止系统休眠，避免会话断网中断',
@@ -1057,7 +1079,7 @@ const I18N = {
     'set.fontScale': 'Font size', 'set.fontScaleHint': 'Scales the panel and widget as a whole',
     'set.sessionsLimit': 'Sessions list size', 'set.sessionsLimitHint': 'Rows shown on each sessions page',
     'set.refreshInterval': 'Auto-refresh interval', 'set.refreshIntervalHint': 'How often the panel refreshes its display', 'set.sampleInterval': 'Chart sampling interval', 'set.sampleIntervalHint': 'How often the history chart records a point; unrelated to API frequency', 'set.minUnit': '{n} min',
-    'set.quotaInterval': 'Quota query interval', 'set.quotaIntervalHint': 'Controls Claude and Qoder; Codex syncs automatically in real time',
+    'set.quotaInterval': 'Quota query interval', 'set.quotaIntervalHint': 'Controls Claude, Qoder, and Qoder CN; Codex syncs automatically in real time',
     'set.quotaAutoRotate': 'Auto-rotate quota cards', 'set.quotaAutoRotateHint': 'Cycle peer cards for multiple agents or accounts',
     'set.quotaRotateSecs': 'Quota rotation interval', 'set.quotaRotateSecsHint': 'Pauses while hovering, dragging, or manually paused',
     'set.keepAwake': 'Keep awake', 'set.keepAwakeHint': 'Prevent system sleep while sessions are active, so they survive sleep/network drops',
@@ -1150,7 +1172,7 @@ const I18N = {
     'set.fontScale': '文字サイズ', 'set.fontScaleHint': 'パネルとウィジェット全体を拡大縮小',
     'set.sessionsLimit': 'セッション一覧の件数', 'set.sessionsLimitHint': 'セッションページごとの表示件数',
     'set.refreshInterval': '自動更新の間隔', 'set.refreshIntervalHint': 'パネルの表示を更新する間隔', 'set.sampleInterval': 'グラフ採取間隔', 'set.sampleIntervalHint': '履歴グラフの記録間隔。API頻度とは無関係', 'set.minUnit': '{n} 分',
-    'set.quotaInterval': '残量の取得間隔', 'set.quotaIntervalHint': 'Claude と Qoder を制御。Codex は自動でリアルタイム同期',
+    'set.quotaInterval': '残量の取得間隔', 'set.quotaIntervalHint': 'Claude、Qoder、Qoder CN を制御。Codex は自動でリアルタイム同期',
     'set.quotaAutoRotate': '残量カードを自動切替', 'set.quotaAutoRotateHint': '複数の Agent またはアカウントを同階層で順番に表示',
     'set.quotaRotateSecs': '残量カードの切替間隔', 'set.quotaRotateSecsHint': 'ホバー、ドラッグ、手動一時停止中は切り替えません',
     'set.keepAwake': 'スリープ防止', 'set.keepAwakeHint': 'アクティブなセッション中はスリープを防ぎ、切断による中断を回避',
@@ -1235,7 +1257,7 @@ function applyStaticI18n(root = document) {
 }
 /* 品牌字形徽章：官方菜单栏模板图（Claude TrayIconTemplate / Codex codexTemplate）
    以 CSS mask 取形、currentColor 上色 —— 形状严格官方，配色跟随玻璃语言 */
-const badge = (tool, sz = 13) => tool === 'qoder'
+const badge = (tool, sz = 13) => ['qoder', 'qoder_cn'].includes(tool)
   ? `<span style="font:700 ${Math.max(9, sz - 1)}px 'SF Pro Rounded',sans-serif">Q</span>`
   : `<span class="bglyph" style="width:${sz}px;height:${sz}px;
      -webkit-mask-size:${tool === 'claude' ? '141%' : 'contain'};
@@ -1419,7 +1441,7 @@ async function loadQuota(force) {
 
 let _quotaFlatID = '', _quotaFlatTimer = null, _quotaFlatPaused = false;
 function renderQuotaFlat(el, data) {
-  const legacy = ['claude', 'codex', 'qoder'].map(id => ({
+  const legacy = ['claude', 'codex', 'qoder', 'qoder_cn'].map(id => ({
     id, name: id[0].toUpperCase() + id.slice(1), hidden: data[id] && data[id].hidden,
     accounts: ((data.accounts || {})[id]) || (data[id] ? [data[id]] : []),
   }));
@@ -1463,7 +1485,7 @@ function renderQuotaFlat(el, data) {
   };
   const paint = () => {
     _quotaFlatID = pages[index].id;
-    el.classList.remove('claude', 'codex', 'qoder'); el.classList.add(pages[index].tool);
+    el.classList.remove('claude', 'codex', 'qoder', 'qoder_cn'); el.classList.add(pages[index].tool);
     el.querySelectorAll('.qdot').forEach((dot, i) => dot.classList.toggle('on', i === index));
     const count = el.querySelector('.qcount span'); if (count) count.textContent = index + 1;
   };
@@ -2080,6 +2102,7 @@ const AGENT_SETTINGS = [
   {id: 'claude', name: 'Claude', show: 'show_claude', menubar: 'menubar_claude', color: 'color_claude', def: '#ff9d7a'},
   {id: 'codex', name: 'Codex', show: 'show_codex', menubar: 'menubar_codex', color: 'color_codex', def: '#8be9e2'},
   {id: 'qoder', name: 'Qoder', show: 'show_qoder', menubar: 'menubar_qoder', color: 'color_qoder', def: '#a78bfa'},
+  {id: 'qoder_cn', name: 'Qoder CN', show: 'show_qoder_cn', menubar: 'menubar_qoder_cn', color: 'color_qoder_cn', def: '#818cf8'},
 ];
 // label/hint/sec/btns.name 存 i18n key，渲染时经 t() 解析（语言切换即时生效）
 const SET_SCHEMA = [
@@ -2338,7 +2361,7 @@ function applySettings(key) {
     document.body.classList.toggle('minimal', !!settings.minimal_mode);
   if (!all && (key === 'quota_auto_rotate' || key === 'quota_rotate_secs')) loadQuota();
   // 仅壳层关心的设置才喊 Swift（菜单栏 / 小组件外观 / 语言 / 灵动岛）
-  if (bridge && (all || ['menubar_claude', 'menubar_codex', 'menubar_qoder', 'menubar_alert_color', 'menubar_rotate_secs',
+  if (bridge && (all || ['menubar_claude', 'menubar_codex', 'menubar_qoder', 'menubar_qoder_cn', 'menubar_alert_color', 'menubar_rotate_secs',
                          'menubar_value_dim', 'menubar_color_dim', 'language',
                          'font_scale', 'glass_dim', 'minimal_mode', 'island_dwell_secs'].includes(key)))
     bridge.postMessage('sync');

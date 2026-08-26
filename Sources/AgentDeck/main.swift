@@ -358,7 +358,7 @@ final class IslandController {
     }
 
     private func brandIcon(for tool: String) -> NSImage {
-        let key = ["claude", "codex", "qoder"].contains(tool.lowercased())
+        let key = ["claude", "codex", "qoder", "qoder_cn"].contains(tool.lowercased())
             ? tool.lowercased() : "claude"
         let bundleName = "AgentDeck_AgentDeckKit.bundle"
         let bases = [Bundle.main.resourceURL,
@@ -387,6 +387,7 @@ final class IslandController {
         switch tool.lowercased() {
         case "codex": return NSColor(calibratedRed: 0.55, green: 0.91, blue: 0.89, alpha: 1)
         case "qoder": return NSColor(calibratedRed: 0.65, green: 0.55, blue: 0.98, alpha: 1)
+        case "qoder_cn": return NSColor(calibratedRed: 0.51, green: 0.55, blue: 0.97, alpha: 1)
         default: return NSColor(calibratedRed: 1.00, green: 0.62, blue: 0.48, alpha: 1)
         }
     }
@@ -946,7 +947,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         // 兜底：品牌资源缺失时退回 SF Symbol
         let conf = NSImage.SymbolConfiguration(pointSize: 14.5, weight: .medium)
-        let symbol = tool == "codex" ? "apple.terminal" : tool == "qoder" ? "q.square" : "sparkle"
+        let symbol = tool == "codex" ? "apple.terminal"
+            : ["qoder", "qoder_cn"].contains(tool) ? "q.square" : "sparkle"
         let img = NSImage(systemSymbolName: symbol,
                           accessibilityDescription: tool)?
             .withSymbolConfiguration(conf)
@@ -1741,7 +1743,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 return pcts[index]
             }
             var full: [MBItem] = []      // 全部 tool×账号，统一进入单槽位
-            for tool in ["claude", "codex", "qoder"] {
+            for tool in ["claude", "codex", "qoder", "qoder_cn"] {
                 guard mb?[tool] as? Bool ?? false else { continue }
                 // accounts 列表（新后端）；缺失则回退到顶层单账号对象
                 let list = (accounts?[tool] as? [[String: Any]])
@@ -1858,7 +1860,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func menubarAgentEnabled(_ tool: String) -> Bool {
         switch tool {
-        case "claude", "codex", "qoder": return store.menubarAgentEnabled(tool)
+        case "claude", "codex", "qoder", "qoder_cn": return store.menubarAgentEnabled(tool)
         default: return false
         }
     }

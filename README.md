@@ -34,7 +34,7 @@ AgentDeck 将 Claude Code、Codex 与 Qoder 的额度监控、会话管理和用
 ## 设计原则
 
 - **零第三方依赖** — 标准库 Python + SwiftPM 原生 AppKit / SwiftUI；不引入 Node、Electron 或任何打包器
-- **本地优先** — 数据全程本机处理，零遥测；自动后台联网仅查询 Claude 额度与版本清单，Qoder 额度优先读取已登录 Qoder App 的本机 IPC，失败时回退 `qodercli`；只有用户确认更新后才从固定 GitHub Release 地址下载 DMG
+- **本地优先** — 数据全程本机处理，零遥测；自动后台联网仅查询 Claude 额度与版本清单；Qoder 与 Qoder CN 是独立 Agent，国际版优先读取已登录 Qoder App 的本机 IPC 并回退 `qodercli`，CN 版只使用匹配的 `qoderclicn`；只有用户确认更新后才从固定 GitHub Release 地址下载 DMG
 - **原生体验** — 连续曲率圆角、玻璃材质、桌面小组件，对齐系统组件的视觉标准
 - **多语言** — 简体中文 / English / 日本語三层（面板 / 通知 / 菜单）统一，默认跟随系统
 
@@ -42,7 +42,7 @@ AgentDeck 将 Claude Code、Codex 与 Qoder 的额度监控、会话管理和用
 
 **额度监控**
 - 实时聚合 Claude 官方额度（5 小时 / 7 天窗口）、Codex rate limits 与 Qoder UsageInfo
-- 多账号并行：自动发现 Claude / Codex / Qoder 配置目录；概览将“不同 Agent × 多个账号”拍平成同级全宽卡片，默认 6 秒自动轮播，可暂停并支持鼠标、触控板与键盘切换
+- 多账号并行：自动发现 Claude / Codex / Qoder / Qoder CN 的独立配置目录；概览将“不同 Agent × 多个账号”拍平成同级全宽卡片，默认 6 秒自动轮播，可暂停并支持鼠标、触控板与键盘切换
 - 状态栏用一个固定宽度槽位逐项滚动“Agent/账号图标＋对应额度”，默认 6 秒；对同时参与两处展示的 Agent/账号，与概览卡同步自动轮播、手动切换及暂停状态；可关闭后固定当前项，数字与变色各自可选 5h / 周 / 最吃紧窗口
 - Claude / Qoder 额度查询间隔可调（默认 10 分钟，可至 6 小时）；Codex 由完成事件实时更新，并由 CLI 自带 app-server 周期校准
 - 窗口重置进度条；额度临界与回满的系统通知（阈值可配置）
@@ -84,7 +84,7 @@ git clone https://github.com/Spacebody/AgentDeck.git && cd AgentDeck
 
 编译、安装至 `/Applications` 并启动，首次启动注册登录项实现自启。
 
-**环境要求**：macOS 13+（Apple Silicon + Intel 通用二进制）；至少安装一个需要监控的 Agent：[Claude Code](https://claude.com/claude-code)、[Codex](https://openai.com/codex)、Qoder App 或 [Qoder CLI](https://docs.qoder.com/en/cli/quick-start)。仅从源码构建时需要 Xcode Command Line Tools（可经 `xcode-select --install` 安装）。
+**环境要求**：macOS 13+（Apple Silicon + Intel 通用二进制）；至少安装一个需要监控的 Agent：[Claude Code](https://claude.com/claude-code)、[Codex](https://openai.com/codex)、Qoder App、[Qoder CLI](https://docs.qoder.com/en/cli/quick-start) 或 [Qoder CN CLI](https://docs.qoder.cn/cli/quickstart)。仅从源码构建时需要 Xcode Command Line Tools（可经 `xcode-select --install` 安装）。
 
 其余构建目标：
 
@@ -147,7 +147,8 @@ scripts/             图标与 DMG 背景生成、Codex notify 包装、CSRF 回
 | Claude 用量 / 会话 | 解析已发现的各 Claude 配置目录下 `projects/**/*.jsonl` | token 统计、成本估算；会话标题、路径等头部元数据增量写入本地 SQLite 索引 |
 | Codex 额度 | Codex CLI `app-server` 的 `account/rateLimits/read`，完成事件时辅以对应 rollout 的最新快照 | 不读取或转发登录 token；app-server 不可用时自动降级到有界本地解析 |
 | Codex 用量 / 会话 | 解析本地 `~/.codex/sessions` rollout 文件 | token 统计；搜索和分页只读元数据索引，不逐次扫描原始会话 |
-| Qoder 额度 | 已登录 Qoder App 的用户私有 Unix Socket；不可用时回退本机 `qodercli` UsageInfo | IPC 仅允许只读 `credit/usage`，校验进程、路径、所有权和权限；不保存用户 ID、邮箱、头像或升级链接 |
+| Qoder 额度 | 已登录 Qoder App 的用户私有 Unix Socket；不可用时回退 `qodercli` UsageInfo | IPC 仅允许只读 `credit/usage`，CLI 仅请求 `get_usage_info`；不保存用户 ID、邮箱、头像或升级链接 |
+| Qoder CN 额度 | 独立读取 `QODERCN_CONFIG_DIR` / `~/.qoder-cn`，并调用 `qoderclicn` UsageInfo | 与 Qoder 使用不同 Agent ID、设置开关、缓存和卡片；不读取国际版 App IPC，不透传初始化消息或 stderr |
 | Qoder 用量 / 会话 | 配置目录下的 `projects/**/*.jsonl`；Qoder App 运行时补充其只读会话列表 | App 响应在适配器入口丢弃消息正文和身份字段；索引只保存 ID、标题、路径、分支和时间 |
 | 完成事件 | AgentDeck 自动安装的 Claude / Qoder Stop hook 与 Codex notify wrapper 回调 | 完成提醒与事件流 |
 

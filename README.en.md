@@ -34,7 +34,7 @@ AgentDeck integrates quota monitoring, session management, and usage analytics f
 ## Design principles
 
 - **Zero third-party dependencies** — stdlib Python + native SwiftPM AppKit / SwiftUI; no Node, Electron, or bundlers
-- **Local-first** — all data is processed on your machine with zero telemetry; automatic background networking is limited to Claude quota and the update manifest, while Qoder quota prefers the signed local Qoder App IPC and falls back to `qodercli`; a DMG is fetched from the fixed GitHub Release path only after the user confirms an update
+- **Local-first** — all data is processed on your machine with zero telemetry; automatic background networking is limited to Claude quota and the update manifest; Qoder and Qoder CN are independent agents: international Qoder prefers the signed local App IPC and falls back to `qodercli`, while Qoder CN only uses its matching `qoderclicn`; a DMG is fetched from the fixed GitHub Release path only after the user confirms an update
 - **Native experience** — continuous-curvature corners, glass materials, and a desktop widget held to system-widget visual standards
 - **Multilingual** — Simplified Chinese / English / Japanese unified across all three layers (panel / notifications / menus), following the system by default
 
@@ -42,7 +42,7 @@ AgentDeck integrates quota monitoring, session management, and usage analytics f
 
 **Quota monitoring**
 - Live aggregation of Claude's official quota, Codex rate limits, and Qoder UsageInfo
-- Flattens every agent/account pair into one full-width peer carousel: no nested account dropdown, optional 4/6/8/10-second auto-rotation, pause, mouse, trackpad, and keyboard controls
+- Discovers independent Claude, Codex, Qoder, and Qoder CN config roots and flattens every agent/account pair into one full-width peer carousel: no nested account dropdown, optional 4/6/8/10-second auto-rotation, pause, mouse, trackpad, and keyboard controls
 - A fixed-width menu-bar slot rolls each agent/account icon together with its quota every 6 seconds by default; for agents/accounts enabled in both surfaces, automatic rotation, manual selection, and pause state stay synchronized with the overview card; rotation can still be disabled, while number and alert-color windows remain independently configurable
 - Adjustable Claude/Qoder quota interval (10 minutes by default, up to 6 hours); Codex updates on completed turns and periodically reconciles through the CLI's app-server
 - Window-reset progress bars; system notifications for nearing or refilled quota (configurable thresholds)
@@ -84,7 +84,7 @@ git clone https://github.com/Spacebody/AgentDeck.git && cd AgentDeck
 
 Compiles, installs to `/Applications`, and launches; the first launch registers a login item.
 
-**Requirements**: macOS 13+ (universal Apple Silicon + Intel build), plus at least one agent to monitor: [Claude Code](https://claude.com/claude-code), [Codex](https://openai.com/codex), Qoder App, or [Qoder CLI](https://docs.qoder.com/en/cli/quick-start). Xcode Command Line Tools are only required when building from source.
+**Requirements**: macOS 13+ (universal Apple Silicon + Intel build), plus at least one agent to monitor: [Claude Code](https://claude.com/claude-code), [Codex](https://openai.com/codex), Qoder App, [Qoder CLI](https://docs.qoder.com/en/cli/quick-start), or [Qoder CN CLI](https://docs.qoder.cn/en/cli/quickstart). Xcode Command Line Tools are only required when building from source.
 
 Other build targets:
 
@@ -147,7 +147,8 @@ All data is **processed locally** — no telemetry, no reporting:
 | Claude usage / sessions | parses `projects/**/*.jsonl` under each discovered Claude config directory | token stats and cost estimates; session header metadata is incrementally indexed in local SQLite |
 | Codex quota | Codex CLI app-server `account/rateLimits/read`, augmented by the matching rollout snapshot when a turn completes | never reads or forwards the login token; falls back to bounded local parsing when app-server is unavailable |
 | Codex usage / sessions | parses local `~/.codex/sessions` rollout files | token stats; search and pagination read the metadata index rather than rescanning raw sessions |
-| Qoder quota | the signed-in Qoder App's private per-user Unix socket, with local `qodercli` UsageInfo as fallback | IPC is restricted to read-only credit/usage calls; user ID, email, avatar, and upgrade URL are discarded |
+| Qoder quota | the signed-in App's private per-user Unix socket, with `qodercli` UsageInfo as fallback | IPC is restricted to read-only `credit/usage`, while CLI probes only request `get_usage_info`; identity and upgrade fields are discarded |
+| Qoder CN quota | independently reads `QODERCN_CONFIG_DIR` / `~/.qoder-cn` and invokes `qoderclicn` UsageInfo | uses a separate agent ID, settings, cache, and card; never reads international App IPC or forwards initialization messages or stderr |
 | Qoder usage / sessions | `projects/**/*.jsonl` under discovered Qoder config directories, augmented by Qoder App's read-only session list | message bodies and identity fields are discarded at the adapter boundary; the index stores only ID, title, path, branch, and timestamps |
 | Done events | AgentDeck-installed Claude/Qoder Stop hooks and Codex notify wrapper | done alerts and the event stream |
 

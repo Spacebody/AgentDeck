@@ -359,11 +359,13 @@ public struct AgentDeckRootView: View {
             let showClaude = store.agentOn("claude", fallbackHidden: store.quota?.claude?.hidden)
             let showCodex = store.agentOn("codex", fallbackHidden: store.quota?.codex?.hidden)
             let showQoder = store.agentOn("qoder", fallbackHidden: store.quota?.qoder?.hidden)
+            let showQoderCN = store.agentOn(
+                "qoder_cn", fallbackHidden: store.quota?.qoderCn?.hidden)
             OverviewView(
                 quota: store.quota, usage: store.usage, today: store.today,
                 active: store.activeShown, done: store.doneShown, showActive: store.showActive,
                 showClaudeAgent: showClaude, showCodexAgent: showCodex,
-                showQoderAgent: showQoder,
+                showQoderAgent: showQoder, showQoderCNAgent: showQoderCN,
                 quotaAutoRotate: (store.settings["quota_auto_rotate"]?.boolVal ?? true)
                     && !store.menubarRotationActive,
                 quotaRotateSecs: store.settings["quota_rotate_secs"]?.intVal ?? 6,
@@ -730,6 +732,8 @@ public struct AgentDeckWidgetRootView: View {
                     showClaudeAgent: store.agentOn("claude", fallbackHidden: store.quota?.claude?.hidden),
                     showCodexAgent: store.agentOn("codex", fallbackHidden: store.quota?.codex?.hidden),
                     showQoderAgent: store.agentOn("qoder", fallbackHidden: store.quota?.qoder?.hidden),
+                    showQoderCNAgent: store.agentOn(
+                        "qoder_cn", fallbackHidden: store.quota?.qoderCn?.hidden),
                     onTapPanel: onTapPanel,
                     onFocusActive: { a in
                         // 小组件常驻桌面：跳转成功不收起自身

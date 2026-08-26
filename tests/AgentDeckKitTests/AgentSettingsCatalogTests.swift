@@ -23,10 +23,22 @@ final class AgentSettingsCatalogTests: XCTestCase {
             "show_claude": .bool(true),
             "show_codex": .bool(false),
             "show_qoder": .bool(true),
+            "show_qoder_cn": .bool(false),
             "menubar_codex": .bool(true),
         ]
 
         XCTAssertEqual(AgentSettingsCatalog.enabledCount(in: values), 2)
+    }
+
+    func testQoderCNIsRegisteredAsIndependentAgent() {
+        let qoderCN = AgentSettingsCatalog.all.first { $0.id == "qoder_cn" }
+        XCTAssertEqual(qoderCN?.name, "Qoder CN")
+        XCTAssertEqual(qoderCN?.showKey, "show_qoder_cn")
+        XCTAssertEqual(qoderCN?.menubarKey, "menubar_qoder_cn")
+        XCTAssertEqual(qoderCN?.colorKey, "color_qoder_cn")
+        XCTAssertEqual(qoderCN?.brand, .qoderCn)
+        XCTAssertEqual(qoderCN?.defaultShow, false)
+        XCTAssertEqual(qoderCN?.defaultMenubar, false)
     }
 
     private func assertKind(_ expected: SettingValueKind, for key: String,

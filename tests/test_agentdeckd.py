@@ -2270,7 +2270,7 @@ for (const [locale, five, weekly] of [
             gate.set()
         self.assertLess(time.monotonic() - started, 0.5)
         self.assertEqual([agent["id"] for agent in result["agents"]],
-                         ["claude", "codex", "qoder"])
+                         ["claude", "codex", "qoder", "qoder_cn"])
 
     def test_quota_timeout_preserves_known_multi_account_shape(self):
         settings = {**daemon.DEFAULT_SETTINGS,
@@ -2783,13 +2783,24 @@ class QoderSupportTests(unittest.TestCase):
         with daemon._cache_lock:
             self.cached_app_sessions = daemon._ttl_cache.pop(
                 "qoder_app_session_entries", None)
+            self.cached_qoder_sources = daemon._ttl_cache.pop(
+                "sources_qoder", None)
+            self.cached_qoder_cn_sources = daemon._ttl_cache.pop(
+                "sources_qoder_cn", None)
 
     def tearDown(self):
         with daemon._cache_lock:
             daemon._ttl_cache.pop("qoder_app_session_entries", None)
+            daemon._ttl_cache.pop("sources_qoder", None)
+            daemon._ttl_cache.pop("sources_qoder_cn", None)
             if self.cached_app_sessions is not None:
                 daemon._ttl_cache["qoder_app_session_entries"] = \
                     self.cached_app_sessions
+            if self.cached_qoder_sources is not None:
+                daemon._ttl_cache["sources_qoder"] = self.cached_qoder_sources
+            if self.cached_qoder_cn_sources is not None:
+                daemon._ttl_cache["sources_qoder_cn"] = \
+                    self.cached_qoder_cn_sources
 
     def test_qoder_ipc_client_rejects_unlisted_method(self):
         with self.assertRaises(ValueError):
@@ -2949,17 +2960,153 @@ class QoderSupportTests(unittest.TestCase):
                 daemon._qoder_verify_app_bundle(str(app), str(binary))
 
     def test_qoder_sources_keeps_cli_process_environment_discovery(self):
-        with daemon._cache_lock:
-            previous = daemon._ttl_cache.pop("sources_qoder", None)
-        try:
-            with mock.patch.object(daemon, "_discover", return_value=[]) as discover:
-                daemon.qoder_sources()
-            self.assertEqual(discover.call_args.kwargs["proc_tools"], ("qodercli",))
-        finally:
-            with daemon._cache_lock:
-                daemon._ttl_cache.pop("sources_qoder", None)
-                if previous is not None:
-                    daemon._ttl_cache["sources_qoder"] = previous
+        with mock.patch.object(daemon, "_discover", return_value=[]) as discover:
+            daemon.qoder_sources()
+        qoder_call = next(call for call in discover.call_args_list
+                          if call.args[0] == "QODER_CONFIG_DIR")
+        self.assertEqual(qoder_call.kwargs["proc_tools"], ("qodercli",))
+
+    def test_qoder_cn_sources_use_independent_environment_and_runtime(self):
+        with mock.patch.object(daemon, "_discover", return_value=[]) as discover:
+            daemon.qoder_cn_sources()
+        self.assertEqual(discover.call_args.args[:4], (
+            "QODERCN_CONFIG_DIR", daemon.HOME / ".qoder-cn", ".qoder-cn-*",
+            "qoder_cn_dirs"))
+        self.assertEqual(discover.call_args.kwargs["proc_tools"],
+                         ("qoderclicn", "qodercn", "qoder-cn"))
+
+    def test_qoder_and_qoder_cn_sources_are_independent_agents(self):
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            global_dir = home / ".qoder"
+            cn_dir = home / ".qoder-cn"
+            custom_cn = home / "team-cn"
+            for path in (global_dir, cn_dir, custom_cn):
+                path.mkdir()
+                (path / "settings.json").write_text("{}")
+            with mock.patch.object(daemon, "HOME", home), \
+                    mock.patch.dict(daemon.os.environ, {
+                        "QODER_CONFIG_DIR": "",
+                        "QODERCN_CONFIG_DIR": str(custom_cn),
+                    }), \
+                    mock.patch.object(daemon, "get_settings",
+                                      return_value={"qoder_dirs": [],
+                                                    "qoder_cn_dirs": []}), \
+                    mock.patch.object(daemon, "_shell_rc_dirs", return_value=[]), \
+                    mock.patch.object(daemon, "_proc_env_dirs", return_value=[]):
+                global_sources = daemon.qoder_sources()
+                cn_sources = daemon.qoder_cn_sources()
+
+        self.assertEqual([source["path"] for source in global_sources], [global_dir])
+        self.assertTrue(global_sources[0]["is_default"])
+        self.assertTrue(all(source["agent_id"] == "qoder"
+                            for source in global_sources))
+        self.assertEqual({source["path"] for source in cn_sources},
+                         {cn_dir, custom_cn})
+        self.assertTrue(all(source["agent_id"] == "qoder_cn"
+                            for source in cn_sources))
+
+    def test_qoder_cli_resolver_selects_matching_runtime(self):
+        def which(name):
+            return f"/opt/bin/{name}" if name in ("qodercli", "qoderclicn") else None
+
+        with mock.patch.object(daemon.shutil, "which", side_effect=which):
+            self.assertEqual(daemon._qoder_cli_path({"agent_id": "qoder"}),
+                             "/opt/bin/qodercli")
+            self.assertEqual(daemon._qoder_cli_path({"agent_id": "qoder_cn"}),
+                             "/opt/bin/qoderclicn")
+
+    def test_qoder_cn_cli_quota_uses_cn_binary_and_preserves_usage_contract(self):
+        stream = json.dumps({"type": "control_response", "response": {
+            "request_id": "usage", "response": {"usage": {
+                "userType": "pro", "totalUsagePercentage": 25,
+                "userQuota": {"total": 100, "used": 25, "remaining": 75,
+                              "percentage": 25, "unit": "credits"},
+            }}}})
+        completed = daemon.subprocess.CompletedProcess([], 0, stdout=stream, stderr="")
+        source = {"path": Path("/tmp/qoder-cn"), "agent_id": "qoder_cn"}
+        with mock.patch.object(daemon, "_qoder_cli_path",
+                               return_value="/opt/bin/qoderclicn") as resolver, \
+                mock.patch.object(daemon.subprocess, "run",
+                                  return_value=completed) as run:
+            quota = daemon._qoder_cli_quota_for(source)
+
+        resolver.assert_called_once_with(source)
+        self.assertEqual(run.call_args.args[0][0], "/opt/bin/qoderclicn")
+        self.assertEqual(run.call_args.args[0][2], "/tmp/qoder-cn")
+        self.assertTrue(quota["ok"])
+        self.assertEqual(quota["source"], "qoder_cn_cli")
+        self.assertEqual([window["id"] for window in quota["windows"]],
+                         ["total", "plan"])
+
+    def test_qoder_cn_cli_auth_failure_is_explicit_and_sanitized(self):
+        stream = json.dumps({"type": "assistant", "error": "authentication_failed",
+                             "message": {"content": "private upstream detail"}})
+        completed = daemon.subprocess.CompletedProcess([], 1, stdout=stream, stderr="secret")
+        source = {"path": Path("/tmp/qoder-cn"), "agent_id": "qoder_cn"}
+        with mock.patch.object(daemon, "_qoder_cli_path",
+                               return_value="/opt/bin/qoderclicn"), \
+                mock.patch.object(daemon.subprocess, "run", return_value=completed):
+            quota = daemon._qoder_cli_quota_for(source)
+
+        self.assertFalse(quota["ok"])
+        self.assertTrue(quota["no_quota"])
+        self.assertEqual(quota["source"], "qoder_cn_cli")
+        self.assertEqual(quota["error"], "Qoder CN CLI account is not logged in")
+        self.assertNotIn("private", json.dumps(quota))
+        self.assertNotIn("secret", json.dumps(quota))
+
+    def test_qoder_cn_cli_missing_runtime_has_actionable_error(self):
+        source = {"path": Path("/tmp/qoder-cn"), "agent_id": "qoder_cn"}
+        with mock.patch.object(daemon, "_qoder_cli_path", return_value=None):
+            quota = daemon._qoder_cli_quota_for(source)
+
+        self.assertFalse(quota["ok"])
+        self.assertTrue(quota["no_quota"])
+        self.assertEqual(quota["source"], "qoder_cn_cli")
+        self.assertEqual(quota["error"], "Qoder CN CLI is not installed")
+
+    def test_qoder_cn_cli_timeout_names_the_cn_runtime(self):
+        source = {"path": Path("/tmp/qoder-cn"), "agent_id": "qoder_cn"}
+        with mock.patch.object(daemon, "_qoder_cli_path",
+                               return_value="/opt/bin/qoderclicn"), \
+                mock.patch.object(daemon.subprocess, "run",
+                                  side_effect=subprocess.TimeoutExpired("qoderclicn", 9)), \
+                self.assertRaisesRegex(RuntimeError,
+                                       "Qoder CN CLI usage request timed out"):
+            daemon._qoder_cli_quota_for(source)
+
+    def test_qoder_quota_cache_key_isolated_by_provider_and_config_path(self):
+        old = {"id": "work", "path": Path("/old/work")}
+        new = {"id": "work", "path": Path("/new/work")}
+
+        self.assertNotEqual(daemon._qoder_quota_cache_key("qoder_cn", old),
+                            daemon._qoder_quota_cache_key("qoder_cn", new))
+        self.assertNotEqual(daemon._qoder_quota_cache_key("qoder", old),
+                            daemon._qoder_quota_cache_key("qoder_cn", old))
+
+    def test_qoder_cn_quota_refresh_honors_configured_interval(self):
+        source = {"id": "default", "label": "Default", "is_default": True,
+                  "path": Path("/tmp/qoder-cn"), "agent_id": "qoder_cn"}
+        quota = {"ok": True, "source": "qoder_cn_cli", "windows": []}
+        with mock.patch.object(daemon, "qoder_cn_sources", return_value=[source]), \
+                mock.patch.object(daemon, "_qoder_resilient",
+                                  return_value=quota) as resilient:
+            account = daemon._qoder_quota_accounts(
+                ttl=300, provider="qoder_cn")[0]
+
+        self.assertEqual(resilient.call_args.args[0],
+                         daemon._qoder_quota_cache_key("qoder_cn", source))
+        self.assertEqual(resilient.call_args.args[1], 300)
+        self.assertTrue(account["ok"])
+
+    def test_qoder_cn_alert_uses_stable_agent_id(self):
+        with mock.patch.object(daemon, "_events", []), \
+                mock.patch.object(daemon, "_event_seq", 0), \
+                mock.patch.object(daemon, "_events_persist"):
+            daemon._push_alert("Qoder CN", "quota warning", "warn")
+
+            self.assertEqual(daemon._events[-1]["tool"], "qoder_cn")
 
     def test_qoder_app_quota_uses_allowlisted_ipc_and_drops_identity(self):
         usage = {
@@ -2994,7 +3141,8 @@ class QoderSupportTests(unittest.TestCase):
                   "path": Path("/tmp/qoder-test")}
         snapshots = {
             "qoder_app_quota": {"ok": False, "error": "app unavailable"},
-            "qoder_quota": {"ok": True, "source": "qoder_cli", "windows": []},
+            daemon._qoder_quota_cache_key("qoder", source): {
+                "ok": True, "source": "qoder_cli", "windows": []},
         }
         with mock.patch.object(daemon, "qoder_sources", return_value=[source]), \
                 mock.patch.object(daemon, "_qoder_cached_snapshot",
@@ -3283,6 +3431,28 @@ class QoderSupportTests(unittest.TestCase):
         self.assertTrue(next(agent for agent in quota["agents"]
                              if agent["id"] == "qoder")["hidden"])
         qoder_accounts.assert_called_once()
+
+    def test_qoder_cn_has_independent_agent_settings_and_accounts(self):
+        settings = {**daemon.DEFAULT_SETTINGS,
+                    "show_qoder": False, "menubar_qoder": False,
+                    "show_qoder_cn": True, "menubar_qoder_cn": True}
+        cn_account = {"account_id": "default", "account": "默认",
+                      "is_default": True, "ok": True,
+                      "source": "qoder_cn_cli", "windows": []}
+        with mock.patch.object(daemon, "get_settings", return_value=settings), \
+                mock.patch.object(daemon, "_qoder_cn_quota_accounts",
+                                  return_value=[cn_account]) as cn_accounts:
+            quota = daemon.api_quota(cache_only=True)
+
+        qoder = next(agent for agent in quota["agents"] if agent["id"] == "qoder")
+        qoder_cn = next(agent for agent in quota["agents"]
+                        if agent["id"] == "qoder_cn")
+        self.assertTrue(qoder["hidden"])
+        self.assertFalse(qoder_cn["hidden"])
+        self.assertEqual(qoder_cn["accounts"], [cn_account])
+        self.assertEqual(quota["accounts"]["qoder_cn"], [cn_account])
+        self.assertTrue(quota["menubar"]["qoder_cn"])
+        cn_accounts.assert_called_once()
 
     def test_usage_info_maps_supported_buckets_without_identity_fields(self):
         quota = daemon._qoder_quota_from_usage({

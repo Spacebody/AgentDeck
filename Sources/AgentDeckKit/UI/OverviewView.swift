@@ -50,6 +50,7 @@ struct OverviewView: View {
     var showClaudeAgent: Bool? = nil
     var showCodexAgent: Bool? = nil
     var showQoderAgent: Bool? = nil
+    var showQoderCNAgent: Bool? = nil
     var quotaAutoRotate: Bool = true
     var quotaRotateSecs: Int = 6
     var carouselActive: Bool = true
@@ -72,6 +73,7 @@ struct OverviewView: View {
         .animation(.easeInOut(duration: 0.18), value: showClaude)
         .animation(.easeInOut(duration: 0.18), value: showCodex)
         .animation(.easeInOut(duration: 0.18), value: showQoder)
+        .animation(.easeInOut(duration: 0.18), value: showQoderCN)
     }
 
     private var showClaude: Bool {
@@ -86,12 +88,17 @@ struct OverviewView: View {
         showQoderAgent ?? !(quota?.qoder?.hidden ?? false)
     }
 
+    private var showQoderCN: Bool {
+        showQoderCNAgent ?? !(quota?.qoderCn?.hidden ?? true)
+    }
+
     @ViewBuilder private var quotaSection: some View {
         if let quota {
             let visible = Set([
                 showClaude ? "claude" : nil,
                 showCodex ? "codex" : nil,
                 showQoder ? "qoder" : nil,
+                showQoderCN ? "qoder_cn" : nil,
             ].compactMap { $0 })
             FlatQuotaCarousel(
                 pages: quota.flatPages(visibleAgents: visible),

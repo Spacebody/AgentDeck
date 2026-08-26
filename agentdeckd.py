@@ -196,6 +196,7 @@ DEFAULT_SETTINGS = {
     "menubar_claude": True,    # 菜单栏常显 Claude 图标+百分比
     "menubar_codex": True,     # 菜单栏常显 Codex 图标+百分比（可多选/全不选）
     "menubar_qoder": True,     # 菜单栏常显 Qoder 图标+百分比
+    "menubar_qoder_cn": False, # 菜单栏常显 Qoder CN 图标+百分比
     "menubar_alert_color": True,   # 菜单栏图标按额度变色（≥80% 橙 / ≥95% 红，分段独立）
     "menubar_value_dim": "shortest",  # 菜单栏显示哪个窗口的百分比：shortest/weekly/max
     "menubar_color_dim": "shortest",  # 菜单栏颜色由哪个窗口驱动：shortest/weekly/max
@@ -203,10 +204,12 @@ DEFAULT_SETTINGS = {
     "claude_dirs": [],         # 手动添加的额外 Claude 配置目录（多账号并行）
     "codex_dirs": [],          # 手动添加的额外 Codex 配置目录
     "qoder_dirs": [],          # 手动添加的额外 Qoder 配置目录
+    "qoder_cn_dirs": [],       # 手动添加的额外 Qoder CN 配置目录
     "show_active": True,       # 活跃会话卡片
     "show_claude": True,       # 面板展示 Claude 板块（只用 Codex 的用户可关）
     "show_codex": True,        # 面板展示 Codex 板块（只用 Claude 的用户可关）
     "show_qoder": True,        # 面板展示 Qoder 板块
+    "show_qoder_cn": False,    # 面板展示 Qoder CN 板块（独立 Agent）
     "quota_auto_rotate": True, # 多 Agent/账号额度卡自动轮播
     "quota_rotate_secs": 6,    # 概览额度轮播间隔
     "sessions_limit": 20,      # 会话列表每页数量
@@ -219,6 +222,7 @@ DEFAULT_SETTINGS = {
     "color_claude": "",        # 自定义 Claude 主色（#rrggbb）；空=内置橙
     "color_codex": "",         # 自定义 Codex 主色（#rrggbb）；空=内置青
     "color_qoder": "",         # 自定义 Qoder 主色（#rrggbb）；空=内置紫
+    "color_qoder_cn": "",      # 自定义 Qoder CN 主色（#rrggbb）；空=内置蓝紫
     "language": "auto",        # 界面语言：auto（跟随系统）| zh-CN | en | ja
     "keep_awake": True,        # 有活跃会话时阻止系统休眠（避免会话因休眠/断网中断）
     "update_check": True,      # 检查新版本（向自托管 Pages 清单查版本号，不带凭据）
@@ -288,6 +292,7 @@ def api_settings_save(body):
                 _ttl_cache.pop("sources_claude", None)
                 _ttl_cache.pop("sources_codex", None)
                 _ttl_cache.pop("sources_qoder", None)
+                _ttl_cache.pop("sources_qoder_cn", None)
             continue
         elif isinstance(default, int):
             if isinstance(v, bool) or not isinstance(v, (int, float)):
@@ -302,7 +307,8 @@ def api_settings_save(body):
             continue
         elif k == "language" and v != "auto" and v not in LOCALES:
             continue
-        elif k in ("color_claude", "color_codex", "color_qoder"):
+        elif k in ("color_claude", "color_codex", "color_qoder",
+                  "color_qoder_cn"):
             # 仅接受 #rrggbb 或空串（清除）——防 CSS 注入
             if v != "" and not re.fullmatch(r"#[0-9a-fA-F]{6}", v):
                 continue
@@ -345,7 +351,8 @@ def api_settings_save(body):
             # 否则缩短到期会在限流中提前重试又被打。
             now = time.time()
             for key, (_exp, val) in list(_ttl_cache.items()):
-                if ((key.startswith("claude_quota") or key.startswith("qoder_quota"))
+                if ((key.startswith("claude_quota") or key.startswith("qoder_quota")
+                     or key.startswith("qoder_cn_quota"))
                         and isinstance(val, dict) and val.get("ok") and not val.get("stale")):
                     interval = QODER_APP_QUOTA_TTL \
                         if key == "qoder_quota" and val.get("source") == "qoder_app" \
@@ -353,16 +360,18 @@ def api_settings_save(body):
                     _ttl_cache[key] = (now + interval, val)
     if "keep_awake" in clean:   # 立即生效，不阻塞响应
         threading.Thread(target=_update_keepawake, daemon=True).start()
-    if "claude_dirs" in clean or "codex_dirs" in clean or "qoder_dirs" in clean:
+    if ("claude_dirs" in clean or "codex_dirs" in clean
+            or "qoder_dirs" in clean or "qoder_cn_dirs" in clean):
         _request_session_index_scan()
-    if "codex_dirs" in clean or "qoder_dirs" in clean:
+    if "codex_dirs" in clean or "qoder_dirs" in clean or "qoder_cn_dirs" in clean:
         # 新增/移除配置目录后立即同步各自完成事件 hook；文件 I/O 放后台，不拖慢响应。
         threading.Thread(target=install_integration, daemon=True,
                          name="agentdeck-integration-sync").start()
     quota_keys = {
-        "show_claude", "show_codex", "show_qoder",
-        "claude_dirs", "codex_dirs", "qoder_dirs",
+        "show_claude", "show_codex", "show_qoder", "show_qoder_cn",
+        "claude_dirs", "codex_dirs", "qoder_dirs", "qoder_cn_dirs",
         "quota_interval", "menubar_claude", "menubar_codex", "menubar_qoder",
+        "menubar_qoder_cn",
         "menubar_alert_color", "menubar_value_dim", "menubar_color_dim",
         "menubar_rotate_secs",
     }
@@ -511,9 +520,9 @@ def _proc_env_dirs(var, tools):
 
 def _label_for_dir(p, default_label):
     name = p.name
-    if name in (".claude", ".codex", ".qoder"):
+    if name in (".claude", ".codex", ".qoder", ".qoder-cn"):
         return default_label
-    for pre in (".claude-", ".codex-", ".qoder-"):
+    for pre in (".qoder-cn-", ".claude-", ".codex-", ".qoder-"):
         if name.startswith(pre):
             return name[len(pre):] or default_label
     return name.lstrip(".") or default_label
@@ -590,6 +599,12 @@ def qoder_sources():
         sources = _discover(
             "QODER_CONFIG_DIR", HOME / ".qoder", ".qoder-*",
             "qoder_dirs", _is_qoder_dir, "默认", proc_tools=("qodercli",))
+        cn_roots = {os.path.realpath(src["path"])
+                    for src in qoder_cn_sources()}
+        sources = [src for src in sources
+                   if os.path.realpath(src["path"]) not in cn_roots
+                   and src["path"].name != ".qoder-cn"
+                   and not src["path"].name.startswith(".qoder-cn-")]
         app_installed = Path("/Applications/Qoder.app").is_dir() \
             or (HOME / "Applications" / "Qoder.app").is_dir()
         if app_installed and not any(src.get("is_default") for src in sources):
@@ -597,8 +612,23 @@ def qoder_sources():
                 "id": "default", "label": "默认", "path": HOME / ".qoder",
                 "is_default": True, "session_only": False,
             })
+        for src in sources:
+            src["agent_id"] = "qoder"
         return sources
     return cached("sources_qoder", 30, discover)
+
+
+def qoder_cn_sources():
+    """Discover Qoder CN as an independent Agent and configuration namespace."""
+    def discover():
+        sources = _discover(
+            "QODERCN_CONFIG_DIR", HOME / ".qoder-cn", ".qoder-cn-*",
+            "qoder_cn_dirs", _is_qoder_dir, "默认",
+            proc_tools=("qoderclicn", "qodercn", "qoder-cn"))
+        for src in sources:
+            src["agent_id"] = "qoder_cn"
+        return sources
+    return cached("sources_qoder_cn", 30, discover)
 
 
 def _qoder_app_workspace_paths(deadline=None, include_status=False):
@@ -2158,14 +2188,15 @@ _last_force_claude_quota = 0.0
 
 def _quota_surface_enabled(settings, provider):
     """Collect quota while either the panel or menu-bar surface needs it."""
-    return (settings.get(f"show_{provider}", True)
+    default_show = provider != "qoder_cn"
+    return (settings.get(f"show_{provider}", default_show)
             or settings.get(f"menubar_{provider}", False))
 
 
 def _force_quota_refreshes(settings, ttl, budget=QUOTA_FORCE_BUDGET_SECS):
     """Refresh visible providers concurrently within one end-to-end deadline."""
     pool = concurrent.futures.ThreadPoolExecutor(
-        max_workers=3, thread_name_prefix="agentdeck-quota-force")
+        max_workers=4, thread_name_prefix="agentdeck-quota-force")
     futures = {}
     try:
         if _quota_surface_enabled(settings, "claude"):
@@ -2176,6 +2207,9 @@ def _force_quota_refreshes(settings, ttl, budget=QUOTA_FORCE_BUDGET_SECS):
         if _quota_surface_enabled(settings, "qoder"):
             futures["qoder"] = pool.submit(
                 _qoder_quota_accounts, ttl, False, max(1.0, budget - 1.0))
+        if _quota_surface_enabled(settings, "qoder_cn"):
+            futures["qoder_cn"] = pool.submit(
+                _qoder_cn_quota_accounts, ttl, False, max(1.0, budget - 1.0))
         done, pending = concurrent.futures.wait(
             futures.values(), timeout=max(0.0, budget))
         if pending:
@@ -2199,6 +2233,14 @@ def _force_quota_refreshes(settings, ttl, budget=QUOTA_FORCE_BUDGET_SECS):
             for account in qoder_accounts)
         if qoder_failed:
             raise RuntimeError("Qoder quota refresh failed")
+        qoder_cn_accounts = futures["qoder_cn"].result() \
+            if "qoder_cn" in futures else []
+        qoder_cn_failed = any(
+            account.get("stale")
+            or (not account.get("ok") and not account.get("no_quota"))
+            for account in qoder_cn_accounts)
+        if qoder_cn_failed:
+            raise RuntimeError("Qoder CN quota refresh failed")
         return claude_accounts
     finally:
         # Running provider calls own bounded I/O timeouts. Do not make an already
@@ -2441,13 +2483,28 @@ def _qoder_app_request(method, params=None, timeout=5, include_size=False,
     result = response.get("result")
     return (result, len(body)) if include_size else result
 
-def _qoder_cli_path():
-    """Resolve qodercli without assuming a login shell PATH in the app daemon."""
-    found = shutil.which("qodercli")
-    if found:
-        return found
-    fallback = HOME / ".local" / "bin" / "qodercli"
-    return str(fallback) if fallback.is_file() else None
+def _qoder_cli_path(src=None):
+    """Resolve the matching Qoder CLI without assuming a login-shell PATH."""
+    agent_id = (src or {}).get("agent_id", "qoder")
+    if agent_id == "qoder_cn":
+        names = ("qoderclicn", "qodercn", "qoder-cn")
+        fallbacks = (
+            HOME / ".local" / "bin" / "qoderclicn",
+            HOME / ".qoder-cn" / "bin" / "qoderclicn" / "qoderclicn",
+            HOME / ".qoder-cn" / "entry" / "qodercn",
+            HOME / ".qoder-cn" / "entry" / "qoder-cn",
+        )
+    else:
+        names = ("qodercli",)
+        fallbacks = (HOME / ".local" / "bin" / "qodercli",)
+    for name in names:
+        found = shutil.which(name)
+        if found:
+            return found
+    for fallback in fallbacks:
+        if fallback.is_file() and os.access(fallback, os.X_OK):
+            return str(fallback)
+    return None
 
 
 def _qoder_expiry(value):
@@ -2539,10 +2596,13 @@ def _qoder_app_quota(timeout=8):
 
 
 def _qoder_cli_quota_for(src, timeout=10):
-    binary = _qoder_cli_path()
+    is_cn = src.get("agent_id") == "qoder_cn"
+    binary = _qoder_cli_path(src)
+    source_name = "qoder_cn_cli" if is_cn else "qoder_cli"
+    cli_name = "Qoder CN CLI" if is_cn else "qodercli"
     if not binary:
-        return {"ok": False, "no_quota": True,
-                "error": "qodercli is not installed"}
+        return {"ok": False, "no_quota": True, "source": source_name,
+                "error": f"{cli_name} is not installed"}
     requests = (
         {"type": "control_request", "request_id": "init",
          "request": {"subtype": "initialize"}},
@@ -2563,8 +2623,9 @@ def _qoder_cli_quota_for(src, timeout=10):
             command, input=payload, capture_output=True, text=True,
             timeout=timeout, cwd=str(HOME))
     except subprocess.TimeoutExpired as exc:
-        raise RuntimeError("Qoder usage request timed out") from exc
+        raise RuntimeError(f"{cli_name} usage request timed out") from exc
     usage = None
+    error_code = None
     # Initialization can contain account and model metadata. Inspect only the
     # named usage response and never persist/log the remaining stream.
     for line in proc.stdout.splitlines():
@@ -2572,6 +2633,8 @@ def _qoder_cli_quota_for(src, timeout=10):
             event = json.loads(line)
         except (TypeError, ValueError):
             continue
+        if isinstance(event, dict) and isinstance(event.get("error"), str):
+            error_code = event["error"][:80]
         response = event.get("response") if isinstance(event, dict) else None
         if not isinstance(response, dict) or response.get("request_id") != "usage":
             continue
@@ -2580,19 +2643,25 @@ def _qoder_cli_quota_for(src, timeout=10):
             usage = result["usage"]
             break
     if usage is None:
+        if error_code == "authentication_failed":
+            return {"ok": False, "no_quota": True, "source": source_name,
+                    "error": f"{cli_name} account is not logged in"}
+        if proc.returncode == 127:
+            return {"ok": False, "no_quota": True, "source": source_name,
+                    "error": f"{cli_name} is not installed"}
         if proc.returncode != 0:
-            raise RuntimeError("Qoder usage request failed")
-        return {"ok": False, "no_quota": True,
-                "error": "Qoder usage is unavailable or the account is not logged in"}
+            raise RuntimeError(f"{cli_name} usage request failed")
+        return {"ok": False, "no_quota": True, "source": source_name,
+                "error": f"{cli_name} usage is unavailable or the account is not logged in"}
     quota = _qoder_quota_from_usage(usage)
-    quota["source"] = "qoder_cli"
+    quota["source"] = source_name
     return quota
 
 
 def _qoder_quota_for(src):
     """Prefer the signed-in desktop app; retain CLI as a compatible fallback."""
     app_error = None
-    if src.get("is_default"):
+    if src.get("is_default") and src.get("agent_id", "qoder") == "qoder":
         try:
             quota = _qoder_app_quota(timeout=8)
             if quota.get("ok"):
@@ -2626,6 +2695,13 @@ def _qoder_cached_snapshot(key):
             return None
         return dict(copy.deepcopy(value), stale=True,
                     error="Qoder quota cache is stale")
+
+
+def _qoder_quota_cache_key(provider, source):
+    """Bind CLI quota caches to the provider and canonical config directory."""
+    path = os.path.realpath(os.path.expanduser(str(source.get("path") or "")))
+    digest = hashlib.sha256(os.fsencode(path)).hexdigest()[:12]
+    return f"{provider}_quota_{_slug(source.get('id') or 'default')}_{digest}"
 
 
 def _qoder_select_quota(app_quota, cli_quota):
@@ -2689,16 +2765,17 @@ def _qoder_resilient(key, ttl, fn, deadline):
 
 
 def _qoder_quota_accounts(ttl=QODER_QUOTA_TTL, cache_only=False,
-                          budget=QODER_NORMAL_BUDGET_SECS):
+                          budget=QODER_NORMAL_BUDGET_SECS, provider="qoder"):
     out = []
     deadline = time.monotonic() + max(1.0, float(budget))
-    for src in qoder_sources():
+    sources = qoder_cn_sources() if provider == "qoder_cn" else qoder_sources()
+    for src in sources:
         if src.get("session_only"):
             continue
-        key = "qoder_quota" if src["is_default"] else f"qoder_quota_{src['id']}"
+        key = _qoder_quota_cache_key(provider, src)
         if cache_only:
             app_quota = (_qoder_cached_snapshot("qoder_app_quota")
-                         if src.get("is_default") else None)
+                         if provider == "qoder" and src.get("is_default") else None)
             cli_quota = _qoder_cached_snapshot(key)
             quota = _qoder_select_quota(app_quota, cli_quota) or {
                 "ok": False, "error": "Qoder quota cache is warming",
@@ -2707,7 +2784,7 @@ def _qoder_quota_accounts(ttl=QODER_QUOTA_TTL, cache_only=False,
             app_quota = None
             remaining_budget = max(0.1, deadline - time.monotonic())
             app_timeout = min(12.0, max(0.1, remaining_budget * 0.4))
-            if src.get("is_default"):
+            if provider == "qoder" and src.get("is_default"):
                 app_quota = _qoder_resilient(
                     "qoder_app_quota", QODER_APP_QUOTA_TTL,
                     lambda remaining, cap=app_timeout:
@@ -2716,7 +2793,7 @@ def _qoder_quota_accounts(ttl=QODER_QUOTA_TTL, cache_only=False,
             if not (app_quota and app_quota.get("ok")
                     and not app_quota.get("stale")):
                 cli_quota = _qoder_resilient(
-                    key, max(QODER_QUOTA_TTL, int(ttl)),
+                    key, max(1, int(ttl)),
                     lambda remaining, source=src:
                         _qoder_cli_quota_for(
                             source, timeout=min(30.0, max(0.1, remaining))),
@@ -2727,6 +2804,11 @@ def _qoder_quota_accounts(ttl=QODER_QUOTA_TTL, cache_only=False,
     return out
 
 
+def _qoder_cn_quota_accounts(ttl=QODER_QUOTA_TTL, cache_only=False,
+                             budget=QODER_NORMAL_BUDGET_SECS):
+    return _qoder_quota_accounts(ttl, cache_only, budget, provider="qoder_cn")
+
+
 def _known_source_snapshots(provider, settings):
     cache_key = f"sources_{provider}"
     with _cache_lock:
@@ -2735,7 +2817,7 @@ def _known_source_snapshots(provider, settings):
     if cached_sources:
         return [source for source in cached_sources if not source.get("session_only")]
     default_dir = HOME / {"claude": ".claude", "codex": ".codex",
-                          "qoder": ".qoder"}[provider]
+                          "qoder": ".qoder", "qoder_cn": ".qoder-cn"}[provider]
     sources = [{"id": "default", "label": "默认", "is_default": True,
                 "path": default_dir}]
     seen = {"default"}
@@ -2776,13 +2858,15 @@ def _quota_timeout_accounts(provider, settings):
             key = "claude_quota" if source["is_default"] \
                 else f"claude_quota_{source['id']}"
             value = _cached_or_last_good(key)
-        elif source["is_default"]:
+        elif provider == "qoder" and source["is_default"]:
             value = _qoder_select_quota(
                 _qoder_cached_snapshot("qoder_app_quota"),
-                _qoder_cached_snapshot("qoder_quota"))
+                _qoder_cached_snapshot(_qoder_quota_cache_key(provider, source)))
         else:
-            value = _qoder_cached_snapshot(f"qoder_quota_{source['id']}")
-        error = f"{provider.title()} quota refresh timed out"
+            key = _qoder_quota_cache_key(provider, source)
+            value = _qoder_cached_snapshot(key)
+        display_provider = "Qoder CN" if provider == "qoder_cn" else provider.title()
+        error = f"{display_provider} quota refresh timed out"
         quota = dict(value, stale=True, error=error) \
             if isinstance(value, dict) else {"ok": False, "error": error}
         out.append({"account_id": source["id"], "account": source["label"],
@@ -2795,7 +2879,7 @@ def _normal_quota_accounts(settings, ttl, fresh_codex=False,
     """Run all visible providers concurrently under the native client's budget."""
     budget = QUOTA_NORMAL_BUDGET_SECS if budget is None else budget
     pool = concurrent.futures.ThreadPoolExecutor(
-        max_workers=3, thread_name_prefix="agentdeck-quota-normal")
+        max_workers=4, thread_name_prefix="agentdeck-quota-normal")
     futures = {}
     try:
         if _quota_surface_enabled(settings, "claude"):
@@ -2809,6 +2893,9 @@ def _normal_quota_accounts(settings, ttl, fresh_codex=False,
         if _quota_surface_enabled(settings, "qoder"):
             futures["qoder"] = pool.submit(
                 _qoder_quota_accounts, ttl, False, max(1.0, budget - 1.0))
+        if _quota_surface_enabled(settings, "qoder_cn"):
+            futures["qoder_cn"] = pool.submit(
+                _qoder_cn_quota_accounts, ttl, False, max(1.0, budget - 1.0))
         done, pending = concurrent.futures.wait(
             futures.values(), timeout=max(0.0, budget))
         for future in pending:
@@ -2844,6 +2931,7 @@ def api_quota(force=False, cache_only=False, fresh_codex=False):
                 for k in [k for k in _ttl_cache
                           if k.startswith("claude_quota")
                           or k.startswith("qoder_quota")
+                          or k.startswith("qoder_cn_quota")
                           or k == "qoder_app_quota"]:
                     _ttl_cache.pop(k, None)
         forced_claude_accts = _force_quota_refreshes(s, ttl)
@@ -2870,6 +2958,10 @@ def api_quota(force=False, cache_only=False, fresh_codex=False):
     qoder_accts = (normal_accounts.get("qoder", []) if normal_accounts is not None
                    else _qoder_quota_accounts(ttl, cache_only=cache_only)) \
         if _quota_surface_enabled(s, "qoder") else []
+    qoder_cn_accts = (normal_accounts.get("qoder_cn", [])
+                      if normal_accounts is not None
+                      else _qoder_cn_quota_accounts(ttl, cache_only=cache_only)) \
+        if _quota_surface_enabled(s, "qoder_cn") else []
     # 向后兼容：各顶层字段仍为「主账号」单对象；agents 是拍平 UI 的自包含契约。
     # 未发现账号时也把明确状态作为合成默认页放进 agents，避免启用的 Agent 静默消失。
     if claude_accts:
@@ -2894,6 +2986,13 @@ def api_quota(force=False, cache_only=False, fresh_codex=False):
     else:
         primary_qoder = {"ok": False, "no_quota": True,
                          "error": "Qoder account not found"}
+    if qoder_cn_accts:
+        primary_qoder_cn = qoder_cn_accts[0]
+    elif not s.get("show_qoder_cn", False):
+        primary_qoder_cn = {"ok": False, "hidden": True}
+    else:
+        primary_qoder_cn = {"ok": False, "no_quota": True,
+                            "error": "Qoder CN account not found"}
     def status_account(primary):
         return {"account_id": "default", "account": "默认", "is_default": True,
                 **primary}
@@ -2902,6 +3001,7 @@ def api_quota(force=False, cache_only=False, fresh_codex=False):
     return {"claude": primary_claude,
             "codex": primary_codex,
             "qoder": primary_qoder,
+            "qoder_cn": primary_qoder_cn,
             "agents": [
                 {"id": "claude", "name": "Claude",
                  "hidden": not s.get("show_claude", True),
@@ -2912,12 +3012,16 @@ def api_quota(force=False, cache_only=False, fresh_codex=False):
                 {"id": "qoder", "name": "Qoder",
                  "hidden": not s.get("show_qoder", True),
                  "accounts": qoder_accts or [status_account(primary_qoder)]},
+                {"id": "qoder_cn", "name": "Qoder CN",
+                 "hidden": not s.get("show_qoder_cn", False),
+                 "accounts": qoder_cn_accts or [status_account(primary_qoder_cn)]},
             ],
             "accounts": {"claude": claude_accts, "codex": codex_accts,
-                         "qoder": qoder_accts},
+                         "qoder": qoder_accts, "qoder_cn": qoder_cn_accts},
             "menubar": {"claude": s["menubar_claude"],
                         "codex": s["menubar_codex"],
                         "qoder": s["menubar_qoder"],
+                        "qoder_cn": s["menubar_qoder_cn"],
                         "alert_color": s.get("menubar_alert_color", True),
                         "value_dim": s.get("menubar_value_dim", "shortest"),
                         "color_dim": s.get("menubar_color_dim", "shortest"),
@@ -6373,8 +6477,10 @@ def _push_alert(tool, msg, level, sound=False, dedupe_key=""):
     """额度告警走事件流（壳层用灵动岛弹丸统一渲染），不再用 osascript 系统通知。
     kind=alert 标记：「最近完成」卡过滤掉，灵动岛通道照常推送。"""
     global _event_seq
-    # tool 存小写（与会话完成事件一致）→ 壳层 appIcon 选对 Claude/Codex 图标；msg 里仍是显示名
-    evt = {"tool": (tool or "").lower(), "kind": "alert", "level": level, "title": msg,
+    # 事件存稳定 agent id；显示名仍只放在 msg，避免 Qoder CN 等名称
+    # 因空格无法匹配 Swift 壳层的图标和主题。
+    tool_id = re.sub(r"[^a-z0-9_]+", "_", str(tool or "").strip().lower()).strip("_")
+    evt = {"tool": tool_id, "kind": "alert", "level": level, "title": msg,
            "dedupe_key": str(dedupe_key or ""),
            "session": "", "cwd": "", "project": "", "sound": bool(sound), "ts": time.time()}
     with _events_change:
@@ -6431,7 +6537,8 @@ def _check_alerts(tool_name, windows, account_id="default", account_label="",
 def _sample_once():
     q = api_quota()
     sample = {"ts": round(time.time())}
-    cl, cx, qo = (q.get("claude") or {}, q.get("codex") or {}, q.get("qoder") or {})
+    cl, cx, qo, qn = (q.get("claude") or {}, q.get("codex") or {},
+                      q.get("qoder") or {}, q.get("qoder_cn") or {})
     if cl.get("ok"):
         for w in cl.get("windows", []):
             if w.get("id") == "five_hour":
@@ -6449,7 +6556,8 @@ def _sample_once():
     account_groups = q.get("accounts") or {}
     for key, tool_name, primary in (("claude", "Claude", cl),
                                     ("codex", "Codex", cx),
-                                    ("qoder", "Qoder", qo)):
+                                    ("qoder", "Qoder", qo),
+                                    ("qoder_cn", "Qoder CN", qn)):
         accounts = account_groups.get(key) or ([primary] if primary.get("ok") else [])
         show_account = len(accounts) > 1
         for account in accounts:

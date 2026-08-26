@@ -11,6 +11,7 @@ struct WidgetView: View {
     var showClaudeAgent: Bool? = nil
     var showCodexAgent: Bool? = nil
     var showQoderAgent: Bool? = nil
+    var showQoderCNAgent: Bool? = nil
     var onTapPanel: () -> Void = {}
     var onFocusActive: (ActiveSession) -> Void = { _ in }
 
@@ -18,8 +19,10 @@ struct WidgetView: View {
         let showClaude = showClaudeAgent ?? !(quota?.claude?.hidden ?? false)
         let showCodex = showCodexAgent ?? !(quota?.codex?.hidden ?? false)
         let showQoder = showQoderAgent ?? !(quota?.qoder?.hidden ?? false)
+        let showQoderCN = showQoderCNAgent ?? !(quota?.qoderCn?.hidden ?? true)
         let visible = Set([showClaude ? "claude" : nil, showCodex ? "codex" : nil,
-                           showQoder ? "qoder" : nil].compactMap { $0 })
+                           showQoder ? "qoder" : nil,
+                           showQoderCN ? "qoder_cn" : nil].compactMap { $0 })
         let pages = quota?.flatPages(visibleAgents: visible) ?? []
         let widgetPages = Array(pages.prefix(2))
         let maxWindows = widgetPages.map { $0.account.displayWindows.count }.max() ?? 0
@@ -47,6 +50,7 @@ struct WidgetView: View {
         .animation(.easeInOut(duration: 0.18), value: showClaude)
         .animation(.easeInOut(duration: 0.18), value: showCodex)
         .animation(.easeInOut(duration: 0.18), value: showQoder)
+        .animation(.easeInOut(duration: 0.18), value: showQoderCN)
     }
 }
 
