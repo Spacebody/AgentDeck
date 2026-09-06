@@ -6,6 +6,18 @@ enum APIError: Error {
     case badURL
     case http(Int)
     case noData
+    case invalidJSONObject
+}
+
+// Daemon endpoints never redirect. Do not forward action bodies or accept snapshots
+// from a destination selected by a loopback response.
+final class APIRequestDelegate: NSObject, URLSessionTaskDelegate {
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest,
+                    completionHandler: @escaping (URLRequest?) -> Void) {
+        completionHandler(nil)
+    }
 }
 
 actor APIClient {
@@ -15,7 +27,14 @@ actor APIClient {
     static let base = "http://127.0.0.1:\(port)"
 
     // 禁代理直连回环（镜像 main.swift 的 kDirectSession 配置）。
-    private let session: URLSession = {
+    private let session: URLSession
+    private let requestDelegate = APIRequestDelegate()
+
+    init(session: URLSession? = nil) {
+        self.session = session ?? Self.makeSession()
+    }
+
+    private static func makeSession() -> URLSession {
         let cfg = URLSessionConfiguration.ephemeral
         cfg.connectionProxyDictionary = [
             kCFNetworkProxiesHTTPEnable as String: false,
@@ -26,7 +45,7 @@ actor APIClient {
         cfg.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
         cfg.timeoutIntervalForRequest = 20
         return URLSession(configuration: cfg)
-    }()
+    }
 
     // 自定义 snake_case → camelCase：Foundation 自带的 .convertFromSnakeCase 对「下划线后接数字」
     // 的键（cost_7d / cost_30d / claude_cost_7d / projects_7d）转换错误 → 解不出、字段静默为 nil
@@ -56,11 +75,7 @@ actor APIClient {
 
     // MARK: GET
     func get<T: Decodable>(_ path: String, query: [String: String] = [:]) async throws -> T {
-        var comps = URLComponents(string: APIClient.base + path)
-        if !query.isEmpty {
-            comps?.queryItems = query.map { URLQueryItem(name: $0.key, value: $0.value) }
-        }
-        guard let url = comps?.url else { throw APIError.badURL }
+        let url = try Self.makeURL(path, query: query)
         var request = URLRequest(url: url)
         // A cache-version upgrade may require one full 30-day JSONL rebuild.
         // Keep the stricter default for every other loopback endpoint.
@@ -73,7 +88,7 @@ actor APIClient {
         // 额度变化端点由 daemon 最多挂起 30s；客户端超时须略长于服务端，
         // 否则正常心跳会被误判为断线并形成重连循环。
         if path == "/api/quota/changes" { request.timeoutInterval = 35 }
-        let (data, resp) = try await session.data(for: request)
+        let (data, resp) = try await session.data(for: request, delegate: requestDelegate)
         try Self.check(resp)
         return try decoder.decode(T.self, from: data)
     }
@@ -82,41 +97,58 @@ actor APIClient {
     // URLSession 自动设 Host=127.0.0.1，且不发 Origin → 通过本机同源校验）。
     @discardableResult
     func post<Body: Encodable, T: Decodable>(_ path: String, body: Body) async throws -> T {
-        guard let url = URL(string: APIClient.base + path) else { throw APIError.badURL }
+        let url = try Self.makeURL(path)
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try encoder.encode(body)
-        let (data, resp) = try await session.data(for: req)
+        let (data, resp) = try await session.data(for: req, delegate: requestDelegate)
         try Self.check(resp)
         return try decoder.decode(T.self, from: data)
     }
 
     /// 原始 JSON 取数（设置值混合类型，绕 Codable）。
     func getJSON(_ path: String, query: [String: String] = [:]) async throws -> [String: Any] {
-        var comps = URLComponents(string: APIClient.base + path)
-        if !query.isEmpty { comps?.queryItems = query.map { URLQueryItem(name: $0.key, value: $0.value) } }
-        guard let url = comps?.url else { throw APIError.badURL }
-        let (data, resp) = try await session.data(for: URLRequest(url: url))
+        let url = try Self.makeURL(path, query: query)
+        let (data, resp) = try await session.data(for: URLRequest(url: url), delegate: requestDelegate)
         try Self.check(resp)
-        return (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+        return try Self.decodeJSONObject(data)
     }
 
     /// POST 原始字典 body，返回原始 JSON（设置保存等）。
     @discardableResult
     func postJSON(_ path: String, body: [String: Any]) async throws -> [String: Any] {
-        guard let url = URL(string: APIClient.base + path) else { throw APIError.badURL }
+        let url = try Self.makeURL(path)
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
-        let (data, resp) = try await session.data(for: req)
+        let (data, resp) = try await session.data(for: req, delegate: requestDelegate)
         try Self.check(resp)
-        return (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+        return try Self.decodeJSONObject(data)
+    }
+
+    private static func makeURL(_ path: String, query: [String: String] = [:]) throws -> URL {
+        guard path.hasPrefix("/"), !path.hasPrefix("//"),
+              !path.contains("?"), !path.contains("#"),
+              var components = URLComponents(string: base) else { throw APIError.badURL }
+        components.path = path
+        if !query.isEmpty {
+            components.queryItems = query.map { URLQueryItem(name: $0.key, value: $0.value) }
+        }
+        guard let url = components.url else { throw APIError.badURL }
+        return url
+    }
+
+    private static func decodeJSONObject(_ data: Data) throws -> [String: Any] {
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw APIError.invalidJSONObject
+        }
+        return object
     }
 
     private static func check(_ resp: URLResponse) throws {
-        guard let http = resp as? HTTPURLResponse else { return }
+        guard let http = resp as? HTTPURLResponse else { throw APIError.noData }
         guard (200..<300).contains(http.statusCode) else { throw APIError.http(http.statusCode) }
     }
 }

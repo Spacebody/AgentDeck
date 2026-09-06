@@ -16,7 +16,7 @@ MIN_MACOS="13.0"   # 部署目标：不显式指定时 swiftc 会按构建机系
                    # 在更低系统上直接拒绝启动（实测 macOS 26 上构建会要求 26）。
 
 # ── 签名 / 公证（本地 install 可回退 ad-hoc；dmg 分发必须完整通过）──────────
-# SIGN_ID：Developer ID Application 证书名；不设则自动探测本机第一张。缺证书时
+# SIGN_ID：Developer ID Application 证书指纹或名称；自动探测使用指纹避免同名证书歧义。缺证书时
 #   回退 ad-hoc 签名（本机可跑，但他人下载会被 Gatekeeper 拦）。
 # NOTARY_PROFILE：notarytool 钥匙串凭证 profile 名，一次性配好后 dmg 目标自动公证：
 #   xcrun notarytool store-credentials AgentDeck \
@@ -24,7 +24,7 @@ MIN_MACOS="13.0"   # 部署目标：不显式指定时 swiftc 会按构建机系
 # 末尾 || true：无证书时 grep 不匹配会以 1 退出，叠加 set -euo pipefail 会让整脚本
 # 在此处静默夭折（实测 exit 1、零输出）。兜底为空串即可正常回退 ad-hoc。
 SIGN_ID="${SIGN_ID:-$(security find-identity -v -p codesigning 2>/dev/null \
-  | grep 'Developer ID Application' | head -1 | sed -E 's/.*"(.*)".*/\1/' || true)}"
+  | awk '/Developer ID Application/ && !found {print $2; found=1}' || true)}"
 NOTARY_PROFILE="${NOTARY_PROFILE:-AgentDeck}"
 
 # 签名 .app：有 Developer ID 则带「硬化运行时 + 安全时间戳」（公证前置条件），

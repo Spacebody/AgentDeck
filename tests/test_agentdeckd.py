@@ -944,6 +944,11 @@ class UsageProjectTests(unittest.TestCase):
             self.assertEqual(usage["projects_7d"][0]["tokens"], 170)
             self.assertEqual(usage["projects_7d"][0]["agents"], {
                 "codex": 110, "qoder": 60})
+            self.assertEqual(usage["projects_all_7d"], usage["projects_7d"])
+            costs = usage["projects_7d"][0]["costs_by_agent"]
+            self.assertEqual(costs["qoder"], 0)
+            self.assertGreater(costs["codex"], 0)
+            self.assertEqual(round(sum(costs.values()), 2), usage["projects_7d"][0]["cost"])
 
 
 class SessionIndexTests(unittest.TestCase):
@@ -1028,6 +1033,26 @@ class SessionIndexTests(unittest.TestCase):
             self.assertEqual(parse.call_count, 3)
             self.assertGreater(
                 daemon._query_session_index(limit=10)["revision"], revision)
+
+    def test_unchanged_scan_does_not_rebuild_session_table(self):
+        base = self.source()
+        self.write_codex(base, 0, "unchanged")
+        daemon._session_index_scan()
+        with mock.patch.object(daemon, "_rebuild_session_rows") as rebuild:
+            daemon._session_index_scan()
+        rebuild.assert_not_called()
+        self.assertEqual(daemon._query_session_index(limit=10)["total"], 1)
+
+    def test_same_size_rewrite_updates_indexed_title(self):
+        base = self.source()
+        path = self.write_codex(base, 0, "before")
+        daemon._session_index_scan()
+        stamp = path.stat().st_mtime
+        path.write_text(path.read_text().replace("before", "after!"))
+        os.utime(path, (stamp + 1, stamp + 1))
+        daemon._session_index_scan()
+        result = daemon._query_session_index("after!", limit=10)
+        self.assertEqual(result["total"], 1)
 
     def test_keyset_pagination_returns_every_session_once(self):
         base = self.source()

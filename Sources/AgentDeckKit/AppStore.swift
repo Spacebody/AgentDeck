@@ -67,6 +67,7 @@ struct QuotaSnapshotGate {
     private var nextRequest = 0
     private var pushCoveredThroughRequest = 0
     private var lastAppliedRequest = 0
+    private var retiredBootIds: Set<String> = []
 
     mutating func beginRequest() -> Int {
         nextRequest += 1
@@ -87,7 +88,13 @@ struct QuotaSnapshotGate {
         let incomingBoot = incomingBoot ?? ""
         let incomingRevision = incomingRevision ?? 0
 
+        guard !retiredBootIds.contains(incomingBoot) else { return false }
+
         let sameBoot = !incomingBoot.isEmpty && incomingBoot == bootId
+        // A push can be the first observation of a new boot. Requests already
+        // in flight may still return an unknown old boot; they cannot switch it.
+        if let request, request <= pushCoveredThroughRequest,
+           !bootId.isEmpty, !sameBoot { return false }
         if sameBoot {
             if incomingRevision < revision { return false }
             if request == nil, incomingRevision == revision { return false }
@@ -105,6 +112,7 @@ struct QuotaSnapshotGate {
         }
         if !incomingBoot.isEmpty {
             if incomingBoot != bootId {
+                if !bootId.isEmpty { retiredBootIds.insert(bootId) }
                 bootId = incomingBoot
                 revision = incomingRevision
             } else {
@@ -118,7 +126,9 @@ struct QuotaSnapshotGate {
 @MainActor
 public final class AppStore: ObservableObject {
     // 仅初始化默认值，无需主线程隔离 → nonisolated，便于主壳在属性声明处直接构造。
-    public nonisolated init() {}
+    public nonisolated init() { api = .shared }
+
+    nonisolated init(api: APIClient) { self.api = api }
 
     /// 设置变更后回调（主壳据此即时重绘菜单栏图标，等价 v1 的 "sync" 桥消息）。
     public var onSettingsChanged: (() -> Void)?
@@ -194,9 +204,11 @@ public final class AppStore: ObservableObject {
     var activeShown: [ActiveSession] { active.filter { agentOnWithQuotaFallback($0.tool) } }
     var doneShown: [DoneEvent] { done.filter { agentOnWithQuotaFallback($0.tool) } }
 
-    private let api = APIClient.shared
+    private let api: APIClient
     private var pollTask: Task<Void, Never>?
     private var quotaWatchTask: Task<Void, Never>?
+    private var settingsLoadTask: Task<Void, Never>?
+    private var terminalsLoadTask: Task<Void, Never>?
     private var searchTask: Task<Void, Never>?
     private var sessionIndexRetryTask: Task<Void, Never>?
     private var sessionNextCursor: String?
@@ -210,13 +222,19 @@ public final class AppStore: ObservableObject {
     private var acknowledgedSettingVersions: [String: Int] = [:]
     private var quotaGate = QuotaSnapshotGate()
     private var backendGeneration = 0
+    private var refreshRequestSequence = 0
+    private var lastAppliedRefreshRequest = 0
+    private var updateRequestSequence = 0
+    private var manualUpdateRequestsInFlight = 0
 
     private var refreshInterval: Double { Double(max(5, settings["refresh_interval"]?.intVal ?? 30)) }
 
     // MARK: 轮询
     public func start(forceInitialRefresh: Bool = false) {
-        Task { await loadSettings() }
-        Task { await loadTerminals() }
+        settingsLoadTask?.cancel()
+        terminalsLoadTask?.cancel()
+        settingsLoadTask = Task { [weak self] in await self?.loadSettings() }
+        terminalsLoadTask = Task { [weak self] in await self?.loadTerminals() }
         pollTask?.cancel()
         pollTask = Task { [weak self] in
             var forceNextRefresh = forceInitialRefresh
@@ -245,8 +263,14 @@ public final class AppStore: ObservableObject {
         }
     }
     public func stop() {
+        // Invalidate unstructured page/startup requests as well as owned tasks.
+        backendGeneration += 1
+        sessionRequestGeneration += 1
+        sessionsLoading = false
         pollTask?.cancel(); pollTask = nil
         quotaWatchTask?.cancel(); quotaWatchTask = nil
+        settingsLoadTask?.cancel(); settingsLoadTask = nil
+        terminalsLoadTask?.cancel(); terminalsLoadTask = nil
         searchTask?.cancel(); searchTask = nil
         sessionIndexRetryTask?.cancel(); sessionIndexRetryTask = nil
         agentVisibilityRefreshTask?.cancel(); agentVisibilityRefreshTask = nil
@@ -281,6 +305,11 @@ public final class AppStore: ObservableObject {
     @discardableResult
     public func refresh(force: Bool = false, freshCodex: Bool = false) async -> Bool {
         let generation = backendGeneration
+        refreshRequestSequence += 1
+        let refreshRequest = refreshRequestSequence
+        let needUpdate = manualUpdateRequestsInFlight == 0
+        if needUpdate { updateRequestSequence += 1 }
+        let updateRequest = updateRequestSequence
         // 6 个接口并发拉取（旧实现串行 → 启动/手动刷新要等全部之和；quota 还出站打 Anthropic 最慢，
         // 串行时它把整屏都拖住）。APIClient 是 actor，并发 get 在各自 await 网络处挂起、互不阻塞。
         // 只在默认列表仍处于第一页时参与周期刷新；用户翻到后页时不把当前页
@@ -302,25 +331,29 @@ public final class AppStore: ObservableObject {
         async let eventsR:   EventsResponse?   = try? await api.get("/api/events", query: ["recent": "4"])
         async let sessionsR: SessionsResponse? = needSessions
             ? (try? await api.get("/api/sessions", query: sessionParams)) : nil
-        async let updateR:   UpdateInfo?       = try? await api.get("/api/update")
+        async let updateR:   UpdateInfo?       = needUpdate
+            ? (try? await api.get("/api/update")) : nil
 
         // 本地快接口合成一批后同步落地，ObservableObjectPublisher 可在同一主线程周期
         // 合并视图失效；出站较慢的 quota/update 再作为第二批补上。
         let (u, a, e, s) = await (usageR, activeR, eventsR, sessionsR)
         guard generation == backendGeneration, !Task.isCancelled else { return false }
-        if let u { usage = u }
-        if let a { active = a.active }
-        if let e {
-            let cutoff = Date().timeIntervalSince1970 - 86400
-            done = e.events.filter { $0.ts > cutoff }
-        }
-        if needSessions, let s,
-           sessionGeneration == sessionRequestGeneration,
-           sessionQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-           sessionPage == 1, !sessionsLoading {
-            applySessionPage(
-                s, targetPage: 1, requestedCursor: nil,
-                resetHistory: true, generation: sessionGeneration)
+        if refreshRequest >= lastAppliedRefreshRequest {
+            lastAppliedRefreshRequest = refreshRequest
+            if let u { usage = u }
+            if let a { active = a.active }
+            if let e {
+                let cutoff = Date().timeIntervalSince1970 - 86400
+                done = e.events.filter { $0.ts > cutoff }
+            }
+            if needSessions, let s,
+               sessionGeneration == sessionRequestGeneration,
+               sessionQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+               sessionPage == 1, !sessionsLoading {
+                applySessionPage(
+                    s, targetPage: 1, requestedCursor: nil,
+                    resetHistory: true, generation: sessionGeneration)
+            }
         }
         let (q, up) = await (quotaR, updateR)
         guard generation == backendGeneration, !Task.isCancelled else { return false }
@@ -329,7 +362,7 @@ public final class AppStore: ObservableObject {
         } else if quotaGate.canReportFailure(for: quotaRequest) {
             online = false
         }
-        if let up { update = up }
+        if let up, updateRequest == updateRequestSequence { update = up }
         return q != nil
     }
 
@@ -382,6 +415,7 @@ public final class AppStore: ObservableObject {
 
     // MARK: 设置
     func loadSettings() async {
+        guard !Task.isCancelled else { return }
         let generation = backendGeneration
         let acknowledgementsAtRequest = acknowledgedSettingVersions
         // GET /api/settings 直接返回扁平设置字典（无 settings 包裹，与 v1 一致）；
@@ -424,6 +458,7 @@ public final class AppStore: ObservableObject {
     }
 
     func loadTerminals() async {
+        guard !Task.isCancelled else { return }
         let generation = backendGeneration
         if let r: TerminalsResponse = try? await api.get("/api/terminals"),
            generation == backendGeneration, !Task.isCancelled {
@@ -555,9 +590,10 @@ public final class AppStore: ObservableObject {
         guard AgentSettingsCatalog.all.contains(where: { agentOn($0.id) }) else { return }
         agentVisibilityRefreshTask = Task { [weak self] in
             guard let self else { return }
+            let generation = self.backendGeneration
             let quotaRequest = self.quotaGate.beginRequest()
             let refreshed: QuotaResponse? = try? await self.api.get("/api/quota")
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, generation == self.backendGeneration else { return }
             if let refreshed {
                 self.applyQuota(refreshed, request: quotaRequest)
             }
@@ -690,7 +726,9 @@ public final class AppStore: ObservableObject {
         sessionRequestGeneration += 1
         let generation = sessionRequestGeneration
         let targetPage = sessionPage + 1
-        Task { [weak self] in
+        sessionIndexRetryTask?.cancel()
+        sessionsLoading = true
+        searchTask = Task { [weak self] in
             await self?.loadSessionPage(
                 cursor: cursor, targetPage: targetPage,
                 resetHistory: false, generation: generation)
@@ -704,7 +742,9 @@ public final class AppStore: ObservableObject {
         let generation = sessionRequestGeneration
         let targetPage = sessionPage - 1
         let cursor = sessionPageCursors[targetPage - 1]
-        Task { [weak self] in
+        sessionIndexRetryTask?.cancel()
+        sessionsLoading = true
+        searchTask = Task { [weak self] in
             await self?.loadSessionPage(
                 cursor: cursor, targetPage: targetPage,
                 resetHistory: false, generation: generation)
@@ -756,7 +796,7 @@ public final class AppStore: ObservableObject {
         cursor: String?, targetPage: Int,
         resetHistory: Bool, generation: Int
     ) async {
-        guard generation == sessionRequestGeneration else { return }
+        guard generation == sessionRequestGeneration, !Task.isCancelled else { return }
         if sessionFilter == "all" && !agentOn("claude") && !agentOn("codex") && !agentOn("qoder") {
             sessions = []; sessionsTotal = 0; sessionsHasMore = false
             sessionsLoading = false; sessionsIndexing = false; sessionsLoadFailed = false
@@ -806,21 +846,35 @@ public final class AppStore: ObservableObject {
     private func scheduleSessionIndexRetry(generation: Int) {
         sessionIndexRetryTask?.cancel()
         guard sessionsIndexing else { sessionIndexRetryTask = nil; return }
+        let targetPage = sessionPage
+        let cursor = sessionPageCursors[targetPage - 1]
         sessionIndexRetryTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 800_000_000)
             guard !Task.isCancelled, let self,
                   generation == self.sessionRequestGeneration else { return }
-            await self.loadSessionPage(reset: true, generation: generation)
+            await self.loadSessionPage(
+                cursor: cursor, targetPage: targetPage,
+                resetHistory: targetPage == 1, generation: generation)
         }
     }
 
     func checkUpdate() async {
-        update = try? await api.post("/api/update/check", body: ["manual": true])
+        guard !Task.isCancelled else { return }
+        manualUpdateRequestsInFlight += 1
+        defer { manualUpdateRequestsInFlight -= 1 }
+        updateRequestSequence += 1
+        let request = updateRequestSequence
+        let generation = backendGeneration
+        let response: UpdateInfo? = try? await api.post("/api/update/check", body: ["manual": true])
+        guard !Task.isCancelled, generation == backendGeneration,
+              request == updateRequestSequence else { return }
+        update = response
         if update?.available == true, updateInstall?.running != true { updateInstall = nil }
     }
 
     func startUpdateInstall() async {
-        guard let up = update else { return }
+        guard !Task.isCancelled, let up = update else { return }
+        let generation = backendGeneration
         updateInstall = UpdateInstallStatus(
             ok: true, running: true, id: nil, stage: "queued",
             progress: 0, version: up.latest, error: nil, message: "queued")
@@ -829,8 +883,10 @@ public final class AppStore: ObservableObject {
         ]
         do {
             let raw = try await api.postJSON("/api/update/install", body: body)
+            guard !Task.isCancelled, generation == backendGeneration else { return }
             updateInstall = Self.updateInstallStatus(raw)
         } catch {
+            guard !Task.isCancelled, generation == backendGeneration else { return }
             updateInstall = UpdateInstallStatus(ok: false, running: false, id: nil, stage: "error",
                                                 progress: 0, version: up.latest, error: "\(error)",
                                                 message: "error")
@@ -841,9 +897,12 @@ public final class AppStore: ObservableObject {
     }
 
     func pollUpdateInstall() async {
+        let generation = backendGeneration
         var transientFailures = 0
         for _ in 0..<1200 {
+            guard !Task.isCancelled, generation == backendGeneration else { return }
             guard let raw = try? await api.getJSON("/api/update/install") else {
+                guard !Task.isCancelled, generation == backendGeneration else { return }
                 transientFailures += 1
                 if transientFailures >= 10 {
                     let current = updateInstall
@@ -856,6 +915,7 @@ public final class AppStore: ObservableObject {
                 try? await Task.sleep(nanoseconds: 500_000_000)
                 continue
             }
+            guard !Task.isCancelled, generation == backendGeneration else { return }
             transientFailures = 0
             let st = Self.updateInstallStatus(raw)
             updateInstall = st

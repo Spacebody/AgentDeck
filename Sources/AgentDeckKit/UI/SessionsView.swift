@@ -2,6 +2,16 @@
 // 搜索 + 筛选 chips(all/claude/codex) + 行(徽章/标题+livedot/元信息) + 悬浮操作(置顶/恢复/复制) + 点开预览。
 import SwiftUI
 
+struct SessionPreviewRequest: Equatable {
+    let key: String
+    let mtime: Double
+
+    static func expanded(_ key: String?, in sessions: [SessionItem]) -> Self? {
+        guard let session = sessions.first(where: { $0.rowKey == key }) else { return nil }
+        return Self(key: session.rowKey, mtime: session.mtime)
+    }
+}
+
 struct SessionsView: View {
     let sessions: [SessionItem]
     var scrollable: Bool = true
@@ -36,7 +46,6 @@ struct SessionsView: View {
     @State private var previews: [String: [PreviewMsg]] = [:]
     @State private var previewOrder: [String] = []
     @State private var previewMtimes: [String: Double] = [:]
-    @State private var latestMtimes: [String: Double] = [:]
     @State private var showingCustomPageSize = false
     @State private var customPageSizeText = ""
     @FocusState private var searchFocused: Bool
@@ -76,7 +85,6 @@ struct SessionsView: View {
         _previewOrder = State(initialValue: Array(seededPreviews.keys))
         let mtimes = Dictionary(uniqueKeysWithValues: sessions.map { ($0.rowKey, $0.mtime) })
         _previewMtimes = State(initialValue: mtimes.filter { seededPreviews[$0.key] != nil })
-        _latestMtimes = State(initialValue: mtimes)
     }
 
     var body: some View {
@@ -92,11 +100,28 @@ struct SessionsView: View {
         }
         .onChange(of: sessions.map { "\($0.rowKey)|\($0.mtime)" }) { _ in
             let current = Dictionary(uniqueKeysWithValues: sessions.map { ($0.rowKey, $0.mtime) })
-            latestMtimes = current
             previews = previews.filter { previewMtimes[$0.key] == current[$0.key] }
             previewMtimes = previewMtimes.filter { current[$0.key] == $0.value }
             previewOrder.removeAll { previews[$0] == nil }
             if let expandedKey, current[expandedKey] == nil { self.expandedKey = nil }
+        }
+        .task(id: SessionPreviewRequest.expanded(expandedKey, in: sessions)) {
+            guard let request = SessionPreviewRequest.expanded(expandedKey, in: sessions),
+                  let session = sessions.first(where: { $0.rowKey == request.key }),
+                  previews[request.key] == nil || previewMtimes[request.key] != request.mtime
+            else { return }
+            let messages = await loadPreview(session)
+            // A loader may finish despite cancellation after collapse, paging, or a file update.
+            guard !Task.isCancelled else { return }
+            previewOrder.removeAll { $0 == request.key }
+            while previewOrder.count >= 20, let oldest = previewOrder.first {
+                previewOrder.removeFirst()
+                previews.removeValue(forKey: oldest)
+                previewMtimes.removeValue(forKey: oldest)
+            }
+            previews[request.key] = messages
+            previewMtimes[request.key] = request.mtime
+            previewOrder.append(request.key)
         }
     }
 
@@ -106,7 +131,7 @@ struct SessionsView: View {
                 SessionRow(
                     session: s,
                     expanded: expandedKey == s.rowKey,
-                    preview: previews[s.rowKey],
+                    preview: previewMtimes[s.rowKey] == s.mtime ? previews[s.rowKey] : nil,
                     onToggle: { toggle(s) },
                     onResume: { onResume(s) }, onCopy: { onCopy(s) }, onPin: { onPin(s) },
                     onRelocate: { onRelocate(s) }, onForgetPath: { onForgetPath(s) })
@@ -269,21 +294,6 @@ struct SessionsView: View {
     private func toggle(_ s: SessionItem) {
         if expandedKey == s.rowKey { expandedKey = nil; return }
         expandedKey = s.rowKey
-        if previews[s.rowKey] == nil {
-            Task {
-                let messages = await loadPreview(s)
-                if previews[s.rowKey] == nil, latestMtimes[s.rowKey] == s.mtime {
-                    while previewOrder.count >= 20, let oldest = previewOrder.first {
-                        previewOrder.removeFirst()
-                        previews.removeValue(forKey: oldest)
-                        previewMtimes.removeValue(forKey: oldest)
-                    }
-                    previews[s.rowKey] = messages
-                    previewMtimes[s.rowKey] = s.mtime
-                    previewOrder.append(s.rowKey)
-                }
-            }
-        }
     }
 
     private var header: some View {

@@ -17,6 +17,7 @@ import concurrent.futures
 import hashlib
 import hmac
 import json
+import math
 import os
 import plistlib
 import re
@@ -260,14 +261,19 @@ def get_settings():
                 saved = _settings_cache[1]
             else:
                 saved = json.loads(SETTINGS_FILE.read_text())
+                if not isinstance(saved, dict):
+                    saved = {}
                 _settings_cache = (mt, saved)
-            s.update({k: v for k, v in saved.items() if k in DEFAULT_SETTINGS})
+            s.update(_clean_settings(saved))
         except (OSError, ValueError):
             pass
     return s
 
 
-def api_settings_save(body):
+def _clean_settings(body):
+    """One schema for on-disk settings and incoming patches."""
+    if not isinstance(body, dict):
+        return {}
     clean = {}
     for k, default in DEFAULT_SETTINGS.items():
         if k not in body:
@@ -292,14 +298,11 @@ def api_settings_save(body):
                     break
             v = clean_list
             clean[k] = v
-            with _cache_lock:        # 目录变更立即重扫数据源
-                _ttl_cache.pop("sources_claude", None)
-                _ttl_cache.pop("sources_codex", None)
-                _ttl_cache.pop("sources_qoder", None)
-                _ttl_cache.pop("sources_qoder_cn", None)
             continue
         elif isinstance(default, int):
             if isinstance(v, bool) or not isinstance(v, (int, float)):
+                continue
+            if isinstance(v, float) and not math.isfinite(v):
                 continue
             v = int(v)
             if k in SETTING_RANGES:
@@ -320,22 +323,29 @@ def api_settings_save(body):
             if v not in ("shortest", "weekly", "max"):
                 continue
         clean[k] = v
+    return clean
+
+
+def api_settings_save(body):
+    clean = _clean_settings(body)
     global _settings_cache
     with _settings_lock:
         try:
             cur = json.loads(SETTINGS_FILE.read_text())
         except (OSError, ValueError):
             cur = {}
+        if not isinstance(cur, dict):
+            cur = {}
         cur.update(clean)
         # 即使旧文件被手工写入越界值，也先恢复各自范围，再保持严格有序；
         # 否则 warn=100/crit=100 这类损坏状态无法靠 min/max 分支自愈。
         try:
             warn = int(cur.get("notify_warn", DEFAULT_SETTINGS["notify_warn"]))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             warn = DEFAULT_SETTINGS["notify_warn"]
         try:
             crit = int(cur.get("notify_crit", DEFAULT_SETTINGS["notify_crit"]))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             crit = DEFAULT_SETTINGS["notify_crit"]
         warn = max(50, min(99, warn))
         crit = max(60, min(100, crit))
@@ -349,6 +359,10 @@ def api_settings_save(body):
                            json.dumps(cur, ensure_ascii=False, indent=1))
         _settings_cache = None   # 失效设置缓存，下次 get_settings 重读
     with _cache_lock:
+        if any(key.endswith("_dirs") for key in clean):
+            for provider in ("claude", "codex", "qoder", "qoder_cn"):
+                _ttl_cache.pop(f"sources_{provider}", None)
+            _ttl_cache.pop("usage", None)
         if "quota_interval" in clean:
             # 间隔变更立即生效：把现有「成功」额度缓存的到期改为 now+新间隔（调大即刻
             # 延长静默、不强制立刻重拉）。退避/降级条目(stale/error)不动，让其跑完退避，
@@ -422,7 +436,7 @@ def cached(key, ttl, fn):
                 return hit[1]
         val = fn()
         with _cache_lock:
-            _ttl_cache[key] = (now + ttl, val)
+            _ttl_cache[key] = (time.time() + ttl, val)
         return val
 
 
@@ -844,7 +858,8 @@ def _safe_update_url(url):
     if p.scheme != "https":
         return False
     host = (p.hostname or "").lower()
-    if host != "github.com":
+    if (host != "github.com" or p.netloc.lower() != "github.com"
+            or p.query or p.fragment):
         return False
     m = re.fullmatch(
         rf"/Spacebody/AgentDeck/releases/download/v({_UPDATE_VERSION_RE})/"
@@ -862,7 +877,8 @@ def _normalize_update_manifest(manifest):
     dmg = str(manifest.get("dmg") or "").strip()
     if not dmg:
         dmg = f"{GITHUB_RELEASES}/download/v{version}/AgentDeck-{version}.dmg"
-    if not _safe_update_url(dmg):
+    if (not _safe_update_url(dmg)
+            or dmg != f"{GITHUB_RELEASES}/download/v{version}/AgentDeck-{version}.dmg"):
         raise ValueError("invalid update url")
     return {
         "version": version,
@@ -1733,6 +1749,10 @@ class _CodexAppServerClient:
 
     def _read_message_locked(self, deadline):
         while True:
+            if len(self._buffer) > 4 * 1024 * 1024:
+                raise RuntimeError("Codex app-server message exceeds size limit")
+            if time.monotonic() >= deadline:
+                raise TimeoutError("Codex app-server response timed out")
             newline = self._buffer.find(b"\n")
             if newline >= 0:
                 raw, self._buffer = self._buffer[:newline], self._buffer[newline + 1:]
@@ -3914,7 +3934,8 @@ def _session_index_scan():
                 # 已解析/忽略的文件追加增长不改变会话头；不完整文件有变化则重试。
                 if stable_app_entry:
                     fast_processed += 1
-                elif stable_file and ((complete and entry["size"] >= old["size"])
+                elif stable_file and ((complete and (entry["size"] > old["size"]
+                        or (entry["size"] == old["size"] and entry["mtime"] == old["mtime"])))
                                       or unchanged_incomplete):
                     if (old["size"] != entry["size"] or old["mtime"] != entry["mtime"]
                             or old["account"] != entry["account"]):
@@ -3961,7 +3982,9 @@ def _session_index_scan():
                         and not _qoder_app_scan_authoritative):
                     continue
                 conn.execute("DELETE FROM session_file_state WHERE path=?", (path,))
-            _rebuild_session_rows(conn)
+                writes += 1
+            if writes:
+                _rebuild_session_rows(conn)
             _sync_pins_to_db(conn)
             _update_session_revision_if_changed(conn)
             now = time.time()
@@ -4079,7 +4102,8 @@ def _decode_session_cursor(raw, scope):
             "p": int(value["p"]), "r": int(value["r"]), "m": float(value["m"]),
             "t": str(value["t"]), "a": str(value["a"]), "s": str(value["s"]),
         }
-        if (normalized["rev"] < 0 or normalized["p"] not in (0, 1)
+        if (not math.isfinite(normalized["m"])
+                or normalized["rev"] < 0 or normalized["p"] not in (0, 1)
                 or not 0 <= normalized["r"] <= 3):
             return None
         if normalized["t"] not in AGENT_IDS:
@@ -4088,7 +4112,7 @@ def _decode_session_cursor(raw, scope):
                 or not _ID_RE.match(normalized["s"])):
             return None
         return normalized
-    except (ValueError, TypeError, KeyError, UnicodeDecodeError,
+    except (ValueError, TypeError, OverflowError, KeyError, UnicodeDecodeError,
             json.JSONDecodeError, binascii.Error):
         return None
 
@@ -5988,6 +6012,8 @@ def _events_load():
                 e = json.loads(line)
             except ValueError:
                 continue
+            if not isinstance(e, dict):
+                continue
             _event_seq += 1
             e["id"] = _event_seq
             e["replayed"] = True   # 回灌仅供「最近完成」卡；不得再次触发灵动岛
@@ -6738,7 +6764,7 @@ def api_history(query):
 
 # ----------------------------------------------------------------- 用量统计
 
-_CLAUDE_USAGE_CACHE_VERSION = 2
+_CLAUDE_USAGE_CACHE_VERSION = 3
 
 
 def _claude_usage_key(msg, evt):
@@ -6749,10 +6775,43 @@ def _claude_usage_key(msg, evt):
     return hashlib.blake2s(raw, digest_size=8).hexdigest()
 
 
+def _usage_count(value):
+    """Treat malformed counters as absent without poisoning an entire transcript."""
+    if isinstance(value, bool):
+        return 0
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def _codex_usage_snapshot(usage):
+    if not isinstance(usage, dict):
+        return None
+    if not all(key in usage for key in
+               ("input_tokens", "cached_input_tokens", "output_tokens")):
+        return None
+    counters = {}
+    for name, field in (("input", "input_tokens"), ("cached", "cached_input_tokens"),
+                        ("output", "output_tokens"), ("total", "total_tokens")):
+        value = usage.get(field, 0)
+        if isinstance(value, bool) or value is None:
+            return None
+        try:
+            count = int(value)
+            if count < 0 or (isinstance(value, float) and count != value):
+                return None
+        except (TypeError, ValueError, OverflowError):
+            return None
+        counters[name] = count
+    counters["total"] = max(counters["total"], counters["input"] + counters["output"])
+    return counters
+
+
 def _parse_claude_usage_state(path, state=None):
     """Incrementally aggregate Claude usage while preserving response de-duplication."""
     state = dict(state or {})
-    agg = state.get("agg") or {}
+    agg = copy.deepcopy(state.get("agg") or {})
     seen = set(state.get("seen") or [])
     offset = int(state.get("offset") or 0)
     committed_offset = offset
@@ -6782,9 +6841,15 @@ def _parse_claude_usage_state(path, state=None):
                     break
                 committed_offset = line_end
                 continue
+            if not isinstance(evt, dict):
+                committed_offset = line_end
+                continue
             msg = evt.get("message") or {}
+            if not isinstance(msg, dict):
+                committed_offset = line_end
+                continue
             usage = msg.get("usage")
-            if not usage or evt.get("type") != "assistant":
+            if not isinstance(usage, dict) or evt.get("type") != "assistant":
                 committed_offset = line_end
                 continue
             key = _claude_usage_key(msg, evt)
@@ -6793,19 +6858,19 @@ def _parse_claude_usage_state(path, state=None):
                     committed_offset = line_end
                     continue
                 seen.add(key)
-            ts = evt.get("timestamp", "")
+            ts = str(evt.get("timestamp") or "")
             hour = ts[:13]
-            model = msg.get("model", "unknown")
+            model = str(msg.get("model") or "unknown")
             slot = agg.setdefault(hour, {}).setdefault(model, [0, 0, 0, 0, 0])
-            slot[0] += usage.get("input_tokens", 0)
-            slot[1] += usage.get("output_tokens", 0)
-            slot[2] += usage.get("cache_read_input_tokens", 0)
+            slot[0] += _usage_count(usage.get("input_tokens"))
+            slot[1] += _usage_count(usage.get("output_tokens"))
+            slot[2] += _usage_count(usage.get("cache_read_input_tokens"))
             cc = usage.get("cache_creation")
             if isinstance(cc, dict):
-                slot[3] += cc.get("ephemeral_5m_input_tokens", 0)
-                slot[4] += cc.get("ephemeral_1h_input_tokens", 0)
+                slot[3] += _usage_count(cc.get("ephemeral_5m_input_tokens"))
+                slot[4] += _usage_count(cc.get("ephemeral_1h_input_tokens"))
             else:   # 老格式无细分，按 5m 档保守计
-                slot[3] += usage.get("cache_creation_input_tokens", 0)
+                slot[3] += _usage_count(usage.get("cache_creation_input_tokens"))
             committed_offset = line_end
     return {"agg": agg, "seen": sorted(seen), "offset": committed_offset}
 
@@ -6846,7 +6911,7 @@ def _cached_claude_file_usage(path, disk_cache):
         if (same_file and entry.get("size") == stat.st_size
                 and entry.get("mtime_ns") == stat.st_mtime_ns):
             return entry.get("agg") or {}, False
-        state = entry if same_file and stat.st_size >= int(entry.get("offset") or 0) else None
+        state = entry if same_file and stat.st_size > entry.get("size", 0) else None
     else:
         state = None
     parsed = _parse_claude_usage_state(path, state)
@@ -6908,7 +6973,7 @@ def _iter_qoder_usage_files():
     return sorted(files)
 
 
-_CODEX_USAGE_CACHE_VERSION = 5
+_CODEX_USAGE_CACHE_VERSION = 6
 _CODEX_USAGE_ACTIVITY_TYPES = {
     "user_message", "agent_message", "task_started", "task_complete",
 }
@@ -6968,7 +7033,13 @@ def _parse_codex_usage_state(path, state=None):
                     break
                 committed_offset = line_end
                 continue
+            if not isinstance(evt, dict):
+                committed_offset = line_end
+                continue
             payload = evt.get("payload") or {}
+            if not isinstance(payload, dict):
+                committed_offset = line_end
+                continue
             payload_type = payload.get("type")
             if not replay_complete:
                 child_start = payload.get("started_at")
@@ -6981,22 +7052,12 @@ def _parse_codex_usage_state(path, state=None):
                     # A thread_spawn rollout starts with a physical copy of the
                     # parent's history. Preserve its last cumulative snapshot as
                     # the baseline, but never aggregate that replay into the child.
-                    replay_usage = (payload.get("info") or {}).get(
-                        "total_token_usage")
-                    if isinstance(replay_usage, dict):
-                        replay_input = max(
-                            0, int(replay_usage.get("input_tokens") or 0))
-                        replay_output = max(
-                            0, int(replay_usage.get("output_tokens") or 0))
-                        previous = {
-                            "input": replay_input,
-                            "cached": max(0, int(
-                                replay_usage.get("cached_input_tokens") or 0)),
-                            "output": replay_output,
-                            "total": max(
-                                replay_input + replay_output,
-                                int(replay_usage.get("total_tokens") or 0)),
-                        }
+                    replay_info = payload.get("info")
+                    replay_usage = replay_info.get("total_token_usage") \
+                        if isinstance(replay_info, dict) else None
+                    replay_snapshot = _codex_usage_snapshot(replay_usage)
+                    if replay_snapshot is not None:
+                        previous = replay_snapshot
                     committed_offset = line_end
                     continue
             if payload_type in _CODEX_USAGE_ACTIVITY_TYPES:
@@ -7007,18 +7068,14 @@ def _parse_codex_usage_state(path, state=None):
             if evt.get("type") == "turn_context" and payload.get("model"):
                 model = str(payload["model"])
             info = payload.get("info") or {}
-            usage = info.get("total_token_usage")
-            if not isinstance(usage, dict):
+            if not isinstance(info, dict):
                 committed_offset = line_end
                 continue
-            current = {
-                "input": max(0, int(usage.get("input_tokens") or 0)),
-                "cached": max(0, int(usage.get("cached_input_tokens") or 0)),
-                "output": max(0, int(usage.get("output_tokens") or 0)),
-            }
-            current["total"] = max(
-                current["input"] + current["output"],
-                int(usage.get("total_tokens") or 0))
+            usage = info.get("total_token_usage")
+            current = _codex_usage_snapshot(usage)
+            if current is None:
+                committed_offset = line_end
+                continue
             if current["total"] > 0:
                 has_usage = True
             reset = previous is None or any(current[k] < previous[k] for k in current)
@@ -7077,7 +7134,7 @@ def _cached_codex_file_usage(path, disk_cache):
             return ({hour: (value[0], value[1])
                      for hour, value in (entry.get("agg") or {}).items()},
                     False, coverage)
-        appendable = same_file and stat.st_size >= int(entry.get("offset") or 0)
+        appendable = same_file and stat.st_size > entry.get("size", 0)
         state = entry if appendable else None
     else:
         state = None
@@ -7145,11 +7202,13 @@ def api_usage():
             if not project_cwd:
                 return
             project = projects.setdefault(
-                project_cwd, {"tokens": 0, "cost": 0.0, "agents": {}})
+                project_cwd, {"tokens": 0, "cost": 0.0, "agents": {}, "costs_by_agent": {}})
             project["tokens"] += tokens
             project["cost"] += cost
             project["agents"][agent] = \
                 project["agents"].get(agent, 0) + tokens
+            project["costs_by_agent"][agent] = \
+                project["costs_by_agent"].get(agent, 0.0) + cost
 
         claude_usage_files = _iter_claude_usage_files()
         claude_cache = _load_claude_usage_cache()
@@ -7284,10 +7343,11 @@ def api_usage():
             except OSError:
                 pass
 
-        top = sorted(projects.items(), key=lambda kv: -kv[1]["tokens"])[:6]
-        projects_7d = [{"cwd": cwd, "name": Path(cwd).name or cwd,
+        top = sorted(projects.items(), key=lambda kv: (-kv[1]["tokens"], kv[0]))
+        projects_all_7d = [{"cwd": cwd, "name": Path(cwd).name or cwd,
                         "tokens": v["tokens"], "cost": round(v["cost"], 2),
-                        "agents": v["agents"]}
+                        "agents": v["agents"],
+                        "costs_by_agent": v["costs_by_agent"]}
                        for cwd, v in top]
 
         return {
@@ -7296,7 +7356,8 @@ def api_usage():
             "codex_daily": codex_daily,
             "qoder_daily": qoder_daily,
             "hourly": [{"ts": ep, **v} for ep, v in sorted(hourly.items())],
-            "projects_7d": projects_7d,
+            "projects_7d": projects_all_7d[:6],
+            "projects_all_7d": projects_all_7d,
             "cost_daily": {d: round(v, 2) for d, v in cost_daily.items()},
             "cost_7d": round(cost_7d + xcost_7d, 2),
             "cost_30d": round(cost_30d + xcost_30d, 2),
@@ -7659,6 +7720,8 @@ def _local_long_poll_request(headers):
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "agentdeck/1.0"
+    timeout = 30
+    max_body_bytes = 1024 * 1024
 
     def _send(self, code, payload, ctype="application/json; charset=utf-8"):
         body = payload if isinstance(payload, bytes) else \
@@ -7789,8 +7852,22 @@ class Handler(BaseHTTPRequestHandler):
         if path != "/api/shutdown" and path not in handlers:
             return self._send(404, {"error": "not found"})
         try:
-            length = int(self.headers.get("Content-Length", 0))
-            body = json.loads(self.rfile.read(length) or b"{}")
+            if self.headers.get("Transfer-Encoding"):
+                return self._send(400, {"error": "unsupported transfer encoding"})
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+            except (ValueError, TypeError):
+                return self._send(400, {"error": "invalid content length"})
+            if length < 0:
+                return self._send(400, {"error": "invalid content length"})
+            if length > self.max_body_bytes:
+                return self._send(413, {"error": "request body too large"})
+            try:
+                body = json.loads(self.rfile.read(length) or b"{}")
+            except (ValueError, UnicodeDecodeError):
+                return self._send(400, {"error": "invalid JSON"})
+            if not isinstance(body, dict):
+                return self._send(400, {"error": "JSON object required"})
             if path == "/api/shutdown":
                 supplied = str(body.get("instance_id") or "") \
                     if isinstance(body, dict) else ""

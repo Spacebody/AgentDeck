@@ -289,8 +289,14 @@ struct Pulse: ViewModifier {
     /// 常显桌面小组件(flatCard)里禁用呼吸：持续动画 = 合成器每帧为该窗口干活 = 持续 GPU 能耗，
     /// 会把 app 推进「能耗显著」列表。小组件改静态点（更像原生），呼吸只留在短暂打开的面板里。
     @Environment(\.flatCard) private var flat
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    static func validPeriod(_ period: Double) -> Bool {
+        period.isFinite && period > 0
+    }
+
     func body(content: Content) -> some View {
-        if GlassRender.useNativeEffect && !flat {
+        if GlassRender.useNativeEffect && !flat && !reduceMotion && Self.validPeriod(period) {
             content
                 .opacity(dim ? 0.35 : 1.0)   // 对应 pulse{50%{opacity:.35}}
                 .animation(.easeInOut(duration: period / 2).repeatForever(autoreverses: true), value: dim)

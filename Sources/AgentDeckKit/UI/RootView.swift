@@ -121,7 +121,7 @@ public struct AgentDeckRootView: View {
     var version: String
     var onQuit: () -> Void
     var onOpenExternal: (String) -> Void
-    var onPasteEnter: () -> Void
+    var onPasteEnter: (String) -> Void
     var onHidePanel: () -> Void
     /// 字体大小变更（驱动主壳同步缩放窗口，保持有效布局宽度）。
     var onScale: (CGFloat) -> Void
@@ -133,7 +133,7 @@ public struct AgentDeckRootView: View {
     public init(store: AppStore, version: String = "dev",
                 onQuit: @escaping () -> Void = {},
                 onOpenExternal: @escaping (String) -> Void = { _ in },
-                onPasteEnter: @escaping () -> Void = {},
+                onPasteEnter: @escaping (String) -> Void = { _ in },
                 onHidePanel: @escaping () -> Void = {},
                 onScale: @escaping (CGFloat) -> Void = { _ in },
                 onContentHeight: @escaping (CGFloat) -> Void = { _ in }) {
@@ -147,7 +147,7 @@ public struct AgentDeckRootView: View {
     // 内部预览构造（PreviewRender 用，非 public）。
     init(previewStore: AppStore, version: String) {
         self.store = previewStore; self.version = version
-        self.onQuit = {}; self.onOpenExternal = { _ in }; self.onPasteEnter = {}; self.onHidePanel = {}
+        self.onQuit = {}; self.onOpenExternal = { _ in }; self.onPasteEnter = { _ in }; self.onHidePanel = {}
         self.onScale = { _ in }; self.onContentHeight = { _ in }
         self.previewMode = true
     }
@@ -229,6 +229,7 @@ public struct AgentDeckRootView: View {
     }
 
     private func manualRefresh() {
+        guard !spinning else { return }
         spinning = true
         Task {
             await store.refresh(force: true)   // 手动刷新强制重采额度（绕过缓存，对应 v1 force=1）
@@ -600,7 +601,7 @@ public struct AgentDeckRootView: View {
                           : L("session.cmdCopied"))
                 if result?.paste == true, result?.autoPaste == true {
                     onHidePanel()
-                    onPasteEnter()
+                    onPasteEnter(result?.terminal ?? "")
                 }
             } else {
                 showToast(result?.opened == true ? L("session.openedApp", ["app": result?.app ?? "Qoder"])

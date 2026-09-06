@@ -50,7 +50,7 @@ let kDirectSession: URLSession = {
     ]
     cfg.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
     cfg.timeoutIntervalForRequest = 20
-    return URLSession(configuration: cfg)
+    return LoopbackSessionPolicy.makeSession(configuration: cfg)
 }()
 
 // 默认高取概览页全显 + 设置页大半的折中值，展示时钳制到屏幕可视高度
@@ -254,7 +254,9 @@ func openMailto(_ url: URL) {
 // 自动粘贴：合成 ⌘V + 回车，让无 CLI 注入的终端（Warp / VS Code / Cursor…）一键直达会话。
 // 首次未授权时 kAXTrustedCheckOptionPrompt=true 会拉起系统授权框，我们再补一个引导 NSAlert
 // 兜底（提示用户去系统设置授权 + 当次仍可手动粘贴）。
-func autoPasteEnter() {
+@MainActor func autoPasteEnter(terminal: String) {
+    guard let name = AutoPastePolicy.applicationName(for: terminal) else { return }
+    let clipboard = NSPasteboard.general.changeCount
     let opt = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
     let trusted = AXIsProcessTrustedWithOptions([opt: true] as CFDictionary)
     if !trusted {
@@ -278,18 +280,30 @@ func autoPasteEnter() {
         return
     }
     // 已授权：等 ~800ms 让目标终端拿到焦点（open -a 异步前台），再合成按键
-    DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.8) {
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+        guard let target = NSWorkspace.shared.runningApplications.first(where: {
+            $0.bundleURL?.lastPathComponent == name + ".app" && !$0.isTerminated
+        }) else { return }
+        func canSend() -> Bool {
+            !target.isTerminated && AutoPastePolicy.shouldSend(
+                expectedPID: target.processIdentifier,
+                frontmostPID: NSWorkspace.shared.frontmostApplication?.processIdentifier,
+                originalClipboard: clipboard, currentClipboard: NSPasteboard.general.changeCount)
+        }
+        guard canSend() else { return }
         let src = CGEventSource(stateID: .hidSystemState)
         let kV: CGKeyCode = 0x09, kReturn: CGKeyCode = 0x24
         if let d = CGEvent(keyboardEventSource: src, virtualKey: kV, keyDown: true),
            let u = CGEvent(keyboardEventSource: src, virtualKey: kV, keyDown: false) {
             d.flags = .maskCommand; u.flags = .maskCommand
-            d.post(tap: .cghidEventTap); u.post(tap: .cghidEventTap)
+            d.postToPid(target.processIdentifier); u.postToPid(target.processIdentifier)
         }
-        Thread.sleep(forTimeInterval: 0.08)   // 让目标 App 消化完 paste 再发回车
-        if let d = CGEvent(keyboardEventSource: src, virtualKey: kReturn, keyDown: true),
-           let u = CGEvent(keyboardEventSource: src, virtualKey: kReturn, keyDown: false) {
-            d.post(tap: .cghidEventTap); u.post(tap: .cghidEventTap)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+            guard canSend() else { return }
+            if let d = CGEvent(keyboardEventSource: src, virtualKey: kReturn, keyDown: true),
+               let u = CGEvent(keyboardEventSource: src, virtualKey: kReturn, keyDown: false) {
+                d.postToPid(target.processIdentifier); u.postToPid(target.processIdentifier)
+            }
         }
     }
 }
@@ -642,7 +656,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             store: store, version: appVersion,
             onQuit: { NSApp.terminate(nil) },
             onOpenExternal: { [weak self] in self?.openExternal($0) },
-            onPasteEnter: { autoPasteEnter() },
+            onPasteEnter: { autoPasteEnter(terminal: $0) },
             onHidePanel: { [weak self] in self?.hidePanel() },
             onScale: { [weak self] z in self?.applyUIScale(z) },
             onContentHeight: { [weak self] h in self?.fitPanelHeight(h) })
@@ -798,10 +812,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try? JSONSerialization.data(withJSONObject: [
             "tool": event.tool, "session": event.session, "cwd": event.cwd])
-        kDirectSession.dataTask(with: req) { [weak self] data, _, _ in
-            let ok = (data.flatMap {
+        kDirectSession.dataTask(with: req) { [weak self] data, response, _ in
+            let ok = (response as? HTTPURLResponse)?.statusCode == 200 && ((data.flatMap {
                 try? JSONSerialization.jsonObject(with: $0) as? [String: Any]
-            })?["ok"] as? Bool ?? false
+            })?["ok"] as? Bool ?? false)
             if !ok {   // 找不到终端 → 兜底打开面板
                 DispatchQueue.main.async { self?.showPanel() }
             }
@@ -825,6 +839,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             request.timeoutInterval = 35
             do {
                 let (data, response) = try await kDirectSession.data(for: request)
+                try Task.checkCancellation()
                 guard (response as? HTTPURLResponse)?.statusCode == 200,
                       let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                       let events = json["events"] as? [[String: Any]] else {
@@ -897,7 +912,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         eventTask?.cancel()
-        backend?.terminate()
+        pollTimer?.invalidate()
+        rotateTimer?.invalidate()
+        menubarAnimationTimer?.invalidate()
+        if let m = clickMonitor { NSEvent.removeMonitor(m) }
+        if let m = keyMonitor { NSEvent.removeMonitor(m) }
+        if let backend, backend.isRunning { backend.terminate() }
     }
 
     func icon(named: String) -> NSImage? {
@@ -1224,6 +1244,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
 
         // transient 行为：点击面板外（其他 App 区域）或按 ESC 关闭
+        if let m = clickMonitor { NSEvent.removeMonitor(m) }
+        if let m = keyMonitor { NSEvent.removeMonitor(m) }
         clickMonitor = NSEvent.addGlobalMonitorForEvents(
             matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
             self?.hidePanel()
@@ -1561,9 +1583,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func healthCheck(_ cb: @escaping (BackendHealth) -> Void) {
         var req = URLRequest(url: URL(string: "\(kBase)/api/health")!)
         req.timeoutInterval = 2
-        kDirectSession.dataTask(with: req) { data, _, _ in
+        kDirectSession.dataTask(with: req) { data, response, _ in
             // 校验响应身份：端口被其他进程占用时不能误当作后端
-            let obj = data.flatMap {
+            let body = (response as? HTTPURLResponse)?.statusCode == 200 ? data : nil
+            let obj = body.flatMap {
                 try? JSONSerialization.jsonObject(with: $0) as? [String: Any]
             }
             DispatchQueue.main.async {
@@ -1666,7 +1689,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func stopOwnedBackend(
         _ process: Process, then done: @escaping BackendReadyCallback
     ) {
-        backend = nil
         if process.isRunning { process.terminate() }
         waitForOwnedProcessExit(process, retries: 50, then: done)
     }
@@ -1675,6 +1697,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         _ process: Process, retries: Int, then done: @escaping BackendReadyCallback
     ) {
         if !process.isRunning {
+            if backend === process { backend = nil }
             done()
             return
         }
@@ -1682,7 +1705,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // 不对纯数值 PID 强杀；daemon 的 TERM handler 正常应在此窗口内收尾，
             // 若未退出则留给后续轮询继续恢复，避免 PID 复用误伤。
             NSLog("AgentDeck: owned backend did not exit after terminate")
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: done)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+                self?.waitForOwnedProcessExit(process, retries: 50, then: done)
+            }
             return
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in

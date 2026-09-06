@@ -12,6 +12,60 @@ private func fmtAxis(_ n: Double) -> String { Fmt.tokens(n).replacingOccurrences
 
 enum UsageMode: String, CaseIterable { case curve, usage, proj }
 
+struct VisibleProjectUsage {
+    let name: String
+    let cwd: String
+    let tokens: Double
+    let cost: Double?
+    let agents: [String: Double]
+}
+
+enum UsageVisibilityPolicy {
+    static let allAgents: Set<String> = ["claude", "codex", "qoder"]
+
+    static func costs(_ usage: UsageResponse, visibleAgents: Set<String>)
+        -> (sevenDay: Double, thirtyDay: Double) {
+        let claude = visibleAgents.contains("claude")
+        let codex = visibleAgents.contains("codex")
+        return ((claude ? usage.claudeCost7d ?? 0 : 0) + (codex ? usage.codexCost7d ?? 0 : 0),
+                (claude ? usage.claudeCost30d ?? 0 : 0) + (codex ? usage.codexCost30d ?? 0 : 0))
+    }
+
+    static func projects(_ usage: UsageResponse?, visibleAgents: Set<String>) -> [VisibleProjectUsage] {
+        guard let usage, !visibleAgents.isEmpty else { return [] }
+        let candidates = usage.projectsAll7d ?? usage.projects7d ?? []
+        let rows: [VisibleProjectUsage] = candidates.compactMap { project in
+            let agents: [String: Double]
+            let tokens: Double
+            let includesAllContributors: Bool
+            if let attributed = project.agents, !attributed.isEmpty {
+                agents = attributed.filter { visibleAgents.contains($0.key) }
+                tokens = agents.values.reduce(0, +)
+                includesAllContributors = Set(attributed.keys).isSubset(of: visibleAgents)
+            } else {
+                // Legacy unattributed totals cannot be split safely when an agent is hidden.
+                guard allAgents.isSubset(of: visibleAgents) else { return nil }
+                agents = [:]
+                tokens = project.tokens
+                includesAllContributors = true
+            }
+            guard tokens > 0 else { return nil }
+            let cost: Double?
+            if let costs = project.costsByAgent {
+                cost = costs.filter { visibleAgents.contains($0.key) }.values.reduce(0, +)
+            } else {
+                cost = includesAllContributors ? project.cost : nil
+            }
+            return VisibleProjectUsage(name: project.name, cwd: project.cwd,
+                                       tokens: tokens, cost: cost, agents: agents)
+        }
+        return Array(rows.sorted {
+            if $0.tokens != $1.tokens { return $0.tokens > $1.tokens }
+            return $0.cwd < $1.cwd
+        }.prefix(6))
+    }
+}
+
 struct UsageView: View {
     let usage: UsageResponse?
     var showClaude: Bool = true
@@ -19,6 +73,11 @@ struct UsageView: View {
     var showQoder: Bool = true
     @State private var mode: UsageMode = .curve
     @Environment(\.adShowInfo) private var showInfo
+
+    private var visibleAgents: Set<String> {
+        Set([showClaude ? "claude" : nil, showCodex ? "codex" : nil,
+             showQoder ? "qoder" : nil].compactMap { $0 })
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -37,7 +96,7 @@ struct UsageView: View {
                         Week7Bars(usage: usage, showClaude: showClaude,
                                   showCodex: showCodex, showQoder: showQoder)
                     case .proj:
-                        ProjectTop(usage: usage)
+                        ProjectTop(usage: usage, visibleAgents: visibleAgents)
                     }
                 }
             }
@@ -74,8 +133,9 @@ struct UsageView: View {
                         .help(warning)
                         .accessibilityLabel(warning)
                 }
-                Text(L("usage.costEq", ["c7": "\(Int((u.cost7d ?? 0).rounded()))",
-                                        "c30": "\(Int((u.cost30d ?? 0).rounded()))"]).strippingBold)
+                let costs = UsageVisibilityPolicy.costs(u, visibleAgents: visibleAgents)
+                Text(L("usage.costEq", ["c7": "\(Int(costs.sevenDay.rounded()))",
+                                        "c30": "\(Int(costs.thirtyDay.rounded()))"]).strippingBold)
                     .font(.system(size: 10.5)).foregroundStyle(Theme.ink3)
                     .lineLimit(1).truncationMode(.tail)
             }
@@ -387,8 +447,9 @@ struct Week7Bars: View {
 // MARK: - 项目 Top（loadProjects）
 struct ProjectTop: View {
     let usage: UsageResponse?
+    var visibleAgents: Set<String> = UsageVisibilityPolicy.allAgents
     var body: some View {
-        let list = usage?.projects7d ?? []
+        let list = UsageVisibilityPolicy.projects(usage, visibleAgents: visibleAgents)
         if list.isEmpty {
             Text(L("proj.none7d")).font(.system(size: 10.5)).foregroundStyle(Theme.ink3)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -403,7 +464,9 @@ struct ProjectTop: View {
                             Text(p.name).font(.system(size: 11.5, weight: .medium))
                                 .foregroundStyle(Theme.ink).lineLimit(1)
                             Spacer(minLength: 6)
-                            Text("$\(Int(p.cost.rounded()))").font(.system(size: 9)).foregroundStyle(Theme.ink3)
+                            if let cost = p.cost {
+                                Text("$\(Int(cost.rounded()))").font(.system(size: 9)).foregroundStyle(Theme.ink3)
+                            }
                             Text(Fmt.tokens(p.tokens)).font(.rounded(11, weight: .semibold)).foregroundStyle(Theme.ink2)
                         }
                         GeometryReader { geo in
@@ -420,8 +483,10 @@ struct ProjectTop: View {
         }
     }
 
-    private func dominantBrand(for project: ProjectUsage) -> Brand {
-        if let agent = project.agents?.max(by: { $0.value < $1.value })?.key,
+    private func dominantBrand(for project: VisibleProjectUsage) -> Brand {
+        if let agent = project.agents.max(by: {
+            $0.value == $1.value ? $0.key > $1.key : $0.value < $1.value
+        })?.key,
            let brand = Brand(rawValue: agent) {
             return brand
         }

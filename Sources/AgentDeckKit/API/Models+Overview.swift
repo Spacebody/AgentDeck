@@ -11,6 +11,7 @@ struct UsageResponse: Decodable {
     let costDaily: [String: Double]               // cost_daily: 日 → 等值美元
     let hourly: [HourBucket]                       // 覆盖 48h，每小时 c=claude x=codex q=qoder
     let projects7d: [ProjectUsage]?               // projects_7d
+    var projectsAll7d: [ProjectUsage]? = nil
     // 成本汇总（用量卡头部 + 口径弹层拆分）
     let cost7d: Double?
     let cost30d: Double?
@@ -33,6 +34,7 @@ struct ProjectUsage: Decodable {
     let tokens: Double
     let cost: Double
     let agents: [String: Double]?
+    var costsByAgent: [String: Double]? = nil
 }
 struct UsageCoverage: Decodable {
     let codexFiles: Int
