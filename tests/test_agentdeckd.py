@@ -215,7 +215,7 @@ class DaemonLifecycleTests(unittest.TestCase):
         self.assertTrue(shutdown_called.wait(timeout=1))
 
     def test_sigterm_stops_a_real_http_server_loop(self):
-        server = daemon.ThreadingHTTPServer(("127.0.0.1", 0), daemon.Handler)
+        server = daemon.LoopbackHTTPServer(("127.0.0.1", 0), daemon.Handler)
         server.daemon_threads = True
         handlers = {}
         with mock.patch.object(

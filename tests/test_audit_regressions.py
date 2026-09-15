@@ -11,6 +11,14 @@ import agentdeckd as daemon
 
 
 class AuditBoundaryTests(unittest.TestCase):
+    def test_loopback_server_starts_without_reverse_dns(self):
+        with mock.patch('socket.getfqdn', side_effect=AssertionError('DNS must not run')):
+            with daemon.LoopbackHTTPServer(('127.0.0.1', 0), daemon.Handler) as server:
+                self.assertEqual(server.server_name, '127.0.0.1')
+                self.assertGreater(server.server_port, 0)
+                self.assertEqual(server.server_port, server.socket.getsockname()[1])
+                self.assertEqual(server.server_address[0], '127.0.0.1')
+
     def test_manifest_rejects_mismatched_release_and_url_authority(self):
         for url in [
             'https://github.com/Spacebody/AgentDeck/releases/download/v2.8.2/AgentDeck-2.8.2.dmg',

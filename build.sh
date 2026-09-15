@@ -35,7 +35,7 @@ sign_app() {
     codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$APP"
   else
     echo "  ⚠️ 未找到 Developer ID Application 证书 → ad-hoc 签名（不可公证分发）"
-    codesign --force --deep -s - "$APP" 2>/dev/null || true
+    codesign --force --deep -s - "$APP"
   fi
 }
 
@@ -47,7 +47,7 @@ notarize() {
     echo "✗ DMG 分发需要 Developer ID Application 证书" >&2; return 1
   fi
   if ! xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" >/dev/null 2>&1; then
-    echo "✗ 未配置 notarytool 凭证 profile「$NOTARY_PROFILE」" >&2
+    echo "✗ notarytool 凭证或服务检查失败，profile「${NOTARY_PROFILE}」" >&2
     echo "     一次性配置: xcrun notarytool store-credentials $NOTARY_PROFILE \\"
     echo "                   --apple-id <AppleID> --team-id <TeamID> --password <App专用密码>"
     return 1
@@ -83,13 +83,15 @@ build() {
   local PROD=(--product AgentDeck --package-path "$ROOT")
   # 发布构建使用自己的 scratch，避免仓库搬家后通用 .build 仍引用旧 checkout 绝对路径。
   local SPM=(--scratch-path "$DIST/.swiftpm")
-  if ! swift build -c release "${PROD[@]}" "${ARCHS[@]}" "${SPM[@]}" 2>"$DIST/.swiftbuild.err"; then
-    echo "  ⚠️ x86_64 交叉构建失败，回退 arm64-only（仍适配 ${MIN_MACOS}+ 的 Apple Silicon）"
-    cat "$DIST/.swiftbuild.err" | tail -5
-    ARCHS=(--arch arm64)
-    swift build -c release "${PROD[@]}" "${ARCHS[@]}" "${SPM[@]}"
-  fi
-  rm -f "$DIST/.swiftbuild.err"
+  local SDK_PATH SDK_VERSION
+  SDK_PATH="$(xcrun --sdk macosx --show-sdk-path)"
+  SDK_VERSION="$(xcrun --sdk macosx --show-sdk-version)"
+  # SwiftPM 27 的 Swift Build 引擎曾把 LC_BUILD_VERSION.sdk 写成部署目标 13.0。
+  # 显式传入真实 SDK，避免新系统错误选择旧 SDK 的兼容行为；不抬高 minos。
+  SPM+=(--sdk "$SDK_PATH" -Xlinker -platform_version -Xlinker macos
+        -Xlinker "$MIN_MACOS" -Xlinker "$SDK_VERSION")
+  # 新 SDK 的交叉编译失败必须可见，不能悄悄发布缺少 Intel 支持的同名安装包。
+  swift build -c release "${PROD[@]}" "${ARCHS[@]}" "${SPM[@]}"
   local BIN; BIN="$(swift build -c release "${PROD[@]}" "${ARCHS[@]}" "${SPM[@]}" --show-bin-path)"
   cp "$BIN/AgentDeck" "$APP/Contents/MacOS/AgentDeck"
 
@@ -125,14 +127,17 @@ build() {
   <key>CFBundleExecutable</key><string>AgentDeck</string>
   <key>CFBundleIconFile</key><string>AgentDeck</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>LSMinimumSystemVersion</key><string>13.0</string>
+  <key>LSMinimumSystemVersion</key><string>$MIN_MACOS</string>
   <key>LSUIElement</key><true/>
   <key>NSAppTransportSecurity</key>
   <dict><key>NSAllowsLocalNetworking</key><true/></dict>
 </dict>
 </plist>
 EOF
+  python3 "$ROOT/scripts/verify-macos-build.py" "$APP" \
+    --minimum-os "$MIN_MACOS" --sdk-version "$SDK_VERSION"
   sign_app
+  codesign --verify --strict "$APP"
   echo "✓ 构建完成: $APP"
 }
 

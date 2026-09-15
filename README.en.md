@@ -86,6 +86,8 @@ Compiles, installs to `/Applications`, and launches; the first launch registers 
 
 **Requirements**: macOS 13+ (universal Apple Silicon + Intel build), plus at least one agent to monitor: [Claude Code](https://claude.com/claude-code), [Codex](https://openai.com/codex), Qoder App, [Qoder CLI](https://docs.qoder.com/en/cli/quick-start), or [Qoder CN CLI](https://docs.qoder.cn/en/cli/quickstart). Xcode Command Line Tools are only required when building from source.
 
+The build has been adapted to the macOS 27 SDK while retaining macOS 13 as the minimum. Local build, installation, and regression tests have passed on macOS 27; see the [compatibility record (Chinese)](docs/technical-design/macos-27-compatibility.md) for coverage limits.
+
 Other build targets:
 
 ```bash

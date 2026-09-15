@@ -39,6 +39,7 @@ import uuid
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from socketserver import TCPServer
 from pathlib import Path
 
 HOME = Path.home()
@@ -7928,11 +7929,20 @@ def _run_delayed_loop(delay, shutdown_requested, task):
         task()
 
 
+class LoopbackHTTPServer(ThreadingHTTPServer):
+    def server_bind(self):
+        # HTTPServer.server_bind performs reverse DNS before listen(). Our fixed
+        # loopback endpoint must stay available even when the system resolver hangs.
+        TCPServer.server_bind(self)
+        self.server_name = self.server_address[0]
+        self.server_port = self.server_address[1]
+
+
 def main():
     global _daemon_shutdown_requested
     _events_load()
     _alert_state_load()
-    server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+    server = LoopbackHTTPServer(("127.0.0.1", PORT), Handler)
     # 长轮询连接不能阻塞进程收尾；额度 manager 及其 app-server 子进程仍由
     # finally 同步关闭。
     server.daemon_threads = True

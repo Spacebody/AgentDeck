@@ -86,6 +86,8 @@ git clone https://github.com/Spacebody/AgentDeck.git && cd AgentDeck
 
 **环境要求**：macOS 13+（Apple Silicon + Intel 通用二进制）；至少安装一个需要监控的 Agent：[Claude Code](https://claude.com/claude-code)、[Codex](https://openai.com/codex)、Qoder App、[Qoder CLI](https://docs.qoder.com/en/cli/quick-start) 或 [Qoder CN CLI](https://docs.qoder.cn/cli/quickstart)。仅从源码构建时需要 Xcode Command Line Tools（可经 `xcode-select --install` 安装）。
 
+已适配 macOS 27 SDK，并在 macOS 27 上完成本地构建、安装和回归测试。最低系统仍为 macOS 13；详细覆盖范围见 [系统兼容性记录](docs/technical-design/macos-27-compatibility.md)。
+
 其余构建目标：
 
 ```bash

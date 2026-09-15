@@ -121,7 +121,7 @@ public struct AgentDeckRootView: View {
     var version: String
     var onQuit: () -> Void
     var onOpenExternal: (String) -> Void
-    var onPasteEnter: (String) -> Void
+    var onPasteEnter: (String, Int) -> Void
     var onHidePanel: () -> Void
     /// 字体大小变更（驱动主壳同步缩放窗口，保持有效布局宽度）。
     var onScale: (CGFloat) -> Void
@@ -133,7 +133,7 @@ public struct AgentDeckRootView: View {
     public init(store: AppStore, version: String = "dev",
                 onQuit: @escaping () -> Void = {},
                 onOpenExternal: @escaping (String) -> Void = { _ in },
-                onPasteEnter: @escaping (String) -> Void = { _ in },
+                onPasteEnter: @escaping (String, Int) -> Void = { _, _ in },
                 onHidePanel: @escaping () -> Void = {},
                 onScale: @escaping (CGFloat) -> Void = { _ in },
                 onContentHeight: @escaping (CGFloat) -> Void = { _ in }) {
@@ -147,7 +147,7 @@ public struct AgentDeckRootView: View {
     // 内部预览构造（PreviewRender 用，非 public）。
     init(previewStore: AppStore, version: String) {
         self.store = previewStore; self.version = version
-        self.onQuit = {}; self.onOpenExternal = { _ in }; self.onPasteEnter = { _ in }; self.onHidePanel = {}
+        self.onQuit = {}; self.onOpenExternal = { _ in }; self.onPasteEnter = { _, _ in }; self.onHidePanel = {}
         self.onScale = { _ in }; self.onContentHeight = { _ in }
         self.previewMode = true
     }
@@ -574,8 +574,8 @@ public struct AgentDeckRootView: View {
                     originalPath: result?.originalCwd ?? s.cwd ?? "",
                     expectedProject: s.project ?? "") else {
                     if let fallbackCommand = result?.command {
-                        copyText(fallbackCommand)
-                        showToast(L("session.pathFallbackCopied"))
+                        showToast(L(copyText(fallbackCommand) != nil
+                                    ? "session.pathFallbackCopied" : "session.copyFailed"))
                     }
                     return
                 }
@@ -588,20 +588,22 @@ public struct AgentDeckRootView: View {
                     showToast(L("session.copyFailed"))
                     return
                 }
-                copyText(command)
-                showToast(L("session.cmdCopied"))
+                showToast(L(copyText(command) != nil ? "session.cmdCopied" : "session.copyFailed"))
             } else if result?.ok == true, result?.copy == true {
                 guard let command = result?.command else {
                     showToast(L("session.resumeFailed"))
                     return
                 }
-                copyText(command)
+                guard let clipboardGeneration = copyText(command) else {
+                    showToast(L("session.copyFailed"))
+                    return
+                }
                 showToast(result?.paste == true
                           ? L("session.openedPaste", ["app": result?.app ?? ""])
                           : L("session.cmdCopied"))
                 if result?.paste == true, result?.autoPaste == true {
                     onHidePanel()
-                    onPasteEnter(result?.terminal ?? "")
+                    onPasteEnter(result?.terminal ?? "", clipboardGeneration)
                 }
             } else {
                 showToast(result?.opened == true ? L("session.openedApp", ["app": result?.app ?? "Qoder"])
@@ -670,9 +672,8 @@ public struct AgentDeckRootView: View {
         let wasPinned = s.pinned == true
         Task { await store.pin(s); showToast(L(wasPinned ? "session.unpinned" : "session.pinned")) }
     }
-    private func copyText(_ s: String) {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(s, forType: .string)
+    private func copyText(_ s: String) -> Int? {
+        AutoPastePolicy.copyCommand(s)
     }
 
     private func settingsAction(_ act: String) {

@@ -254,9 +254,9 @@ func openMailto(_ url: URL) {
 // 自动粘贴：合成 ⌘V + 回车，让无 CLI 注入的终端（Warp / VS Code / Cursor…）一键直达会话。
 // 首次未授权时 kAXTrustedCheckOptionPrompt=true 会拉起系统授权框，我们再补一个引导 NSAlert
 // 兜底（提示用户去系统设置授权 + 当次仍可手动粘贴）。
-@MainActor func autoPasteEnter(terminal: String) {
+@MainActor func autoPasteEnter(terminal: String, clipboard: Int) {
     guard let name = AutoPastePolicy.applicationName(for: terminal) else { return }
-    let clipboard = NSPasteboard.general.changeCount
+    guard NSPasteboard.general.changeCount == clipboard else { return }
     let opt = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
     let trusted = AXIsProcessTrustedWithOptions([opt: true] as CFDictionary)
     if !trusted {
@@ -293,11 +293,11 @@ func openMailto(_ url: URL) {
         guard canSend() else { return }
         let src = CGEventSource(stateID: .hidSystemState)
         let kV: CGKeyCode = 0x09, kReturn: CGKeyCode = 0x24
-        if let d = CGEvent(keyboardEventSource: src, virtualKey: kV, keyDown: true),
-           let u = CGEvent(keyboardEventSource: src, virtualKey: kV, keyDown: false) {
-            d.flags = .maskCommand; u.flags = .maskCommand
-            d.postToPid(target.processIdentifier); u.postToPid(target.processIdentifier)
-        }
+        guard let d = CGEvent(keyboardEventSource: src, virtualKey: kV, keyDown: true),
+              let u = CGEvent(keyboardEventSource: src, virtualKey: kV, keyDown: false),
+              canSend() else { return }
+        d.flags = .maskCommand; u.flags = .maskCommand
+        d.postToPid(target.processIdentifier); u.postToPid(target.processIdentifier)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
             guard canSend() else { return }
             if let d = CGEvent(keyboardEventSource: src, virtualKey: kReturn, keyDown: true),
@@ -656,7 +656,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             store: store, version: appVersion,
             onQuit: { NSApp.terminate(nil) },
             onOpenExternal: { [weak self] in self?.openExternal($0) },
-            onPasteEnter: { autoPasteEnter(terminal: $0) },
+            onPasteEnter: { autoPasteEnter(terminal: $0, clipboard: $1) },
             onHidePanel: { [weak self] in self?.hidePanel() },
             onScale: { [weak self] z in self?.applyUIScale(z) },
             onContentHeight: { [weak self] h in self?.fitPanelHeight(h) })
