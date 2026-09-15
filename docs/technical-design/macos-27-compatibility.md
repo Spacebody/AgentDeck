@@ -69,3 +69,10 @@ python3 scripts/verify-runtime.py
 - DMG 制作完成，但公证凭证检查返回 `No Keychain password item found for profile: AgentDeck`；
   公证和公开发布尚未完成，需恢复凭证后继续。错误提示中的变量已用花括号明确边界，避免
   新系统 shell 将紧邻的中文标点误解析为变量名的一部分。不会推送更新清单来宣传未公证的产物。
+
+## 发布验收（2026-09-16）
+
+- 用户确认 macOS 27 上概览额度、会话搜索/分页、设置页、面板开关均正常，人工界面验收通过。
+- 重新检查 AgentDeck 公证凭证，已可获取 Apple 提交历史；此前凭证阻塞已解除。
+- 2.8.5 DMG 已通过 Apple 公证，提交 ID `57bd4aec-078d-454a-b279-a6ecc2cc9b12`，
+  状态 Accepted；装订校验与 Gatekeeper 检查均通过。
