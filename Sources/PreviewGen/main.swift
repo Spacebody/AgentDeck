@@ -6,7 +6,7 @@ import AgentDeckKit
 // 用法：PreviewGen [overview|codexonly|visibilityoff|visibilityon|quotacases|quotadual|quotaclaude|quotaduplicate|quotaharmony|charts|chartsfiltered|sessions|settings|agentsettings|widget|widgetsizes|widgetfour|widgetstress|root|readme|readmesettings|widgetroot] [outPath]
 var args = Array(CommandLine.arguments.dropFirst())
 let mode = ["overview", "codexonly", "visibilityoff", "visibilityon", "quotacases", "quotadual", "quotaclaude", "quotaduplicate", "quotaharmony", "charts", "chartsfiltered",
-            "sessions", "settings", "agentsettings", "widget", "widgetsizes", "widgetfour", "widgetstress", "root", "readme", "readmesettings", "widgetroot", "carousel"].contains(args.first)
+            "sessions", "settings", "agentsettings", "widget", "widgetsizes", "widgetfour", "widgetstress", "root", "readme", "readmesettings", "widgetroot", "carousel", "quotamixed"].contains(args.first)
     ? args.removeFirst() : "overview"
 let outPath = args.first ?? "/tmp/agentdeck-\(mode).png"
 
@@ -40,6 +40,7 @@ let data = MainActor.assumeIsolated { () -> Data? in
     case "readmesettings": return PreviewRender.readmeSettingsPNG()
     case "widgetroot": return PreviewRender.widgetRootPNG()
     case "carousel":   return PreviewRender.carouselPNG()
+    case "quotamixed": return PreviewRender.quotaMixedHeightPNG()
     default:           return PreviewRender.overviewPNG()
     }
 }

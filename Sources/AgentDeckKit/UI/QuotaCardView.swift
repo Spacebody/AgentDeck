@@ -420,9 +420,11 @@ struct FlatQuotaCarousel: View {
                                       accountLabel: item.account.account)
                             .opacity(0).allowsHitTesting(false).accessibilityHidden(true)
                     }
+                }
+                .overlay(alignment: .topLeading) {
                     let current = pages[page]
                     QuotaCardView(brand: current.brand, node: current.account,
-                                  accountLabel: current.account.account)
+                                  accountLabel: current.account.account, fillsHeight: true)
                         .id(current.id)
                         .offset(x: dragX)
                         .transition(cardTransition)
@@ -589,6 +591,7 @@ struct QuotaCardView: View {
     /// 多账号时显示的账号名（carousel 页）。
     var accountLabel: String? = nil
     var presentation: QuotaCardPresentation = .panelWide
+    var fillsHeight = false
 
     private var name: String {
         switch brand {
@@ -610,7 +613,7 @@ struct QuotaCardView: View {
         .padding(compact ? EdgeInsets(top: 10, leading: 11, bottom: 8, trailing: 11)
                          : EdgeInsets(top: 13, leading: 13, bottom: 11, trailing: 13))
         .frame(maxWidth: .infinity,
-               maxHeight: presentation.isDualPanel ? .infinity : nil,
+               maxHeight: presentation.isDualPanel || fillsHeight ? .infinity : nil,
                alignment: .topLeading)
         .background(alignment: .topTrailing) {   // qcard::before 品牌辉光（右上角径向）
             RadialGradient(colors: [brand.tint, .clear], center: .topTrailing,
@@ -622,9 +625,14 @@ struct QuotaCardView: View {
     }
 
     @ViewBuilder private var content: some View {
+        head
+        quotaBody
+            .frame(maxHeight: fillsHeight ? .infinity : nil, alignment: .center)
+    }
+
+    @ViewBuilder private var quotaBody: some View {
         if let node, node.ok {
             let windows = node.displayWindows
-            head
             if windows.count == 1, let window = windows.first {
                 singleWindowBody(window)
             } else if let mainIndex = QuotaWindowPolicy.preferredPrimaryIndex(
@@ -641,7 +649,6 @@ struct QuotaCardView: View {
             }
         } else {
             // 错误/无额度态
-            head
             VStack(alignment: .leading, spacing: 3) {
                 Text(node?.hidden == true ? L("quota.loading")
                      : (node?.noQuota == true ? L("quota.noQuota") : L("quota.fetchFailed")))
@@ -664,7 +671,7 @@ struct QuotaCardView: View {
         let valueSize: CGFloat = compact ? 11.5 : (narrow ? 13 : 14)
         let detailSize: CGFloat = compact ? 8.5 : (narrow ? 9.5 : 10)
         return VStack(alignment: .leading,
-                      spacing: compact ? 5 : (narrow ? 0 : 7)) {
+                      spacing: compact ? 5 : (narrow || fillsHeight ? 0 : 7)) {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(window.displayLabel)
                     .font(.system(size: labelSize, weight: .semibold))
@@ -676,6 +683,7 @@ struct QuotaCardView: View {
                     .foregroundStyle(Theme.ink).fixedSize()
             }
             if narrow { Spacer(minLength: 8) }
+            else if fillsHeight && !compact { Spacer(minLength: 7).frame(maxHeight: 18) }
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
                     Capsule().fill(Color.white.opacity(0.09))
@@ -686,6 +694,7 @@ struct QuotaCardView: View {
             }
             .frame(height: compact ? 4 : (narrow ? 4 : 5))
             if narrow { Spacer(minLength: 8) }
+            else if fillsHeight && !compact { Spacer(minLength: 7).frame(maxHeight: 18) }
             HStack(spacing: 8) {
                 Text(L("quota.remainingPercent", ["pct": remaining]))
                 Spacer(minLength: 6)

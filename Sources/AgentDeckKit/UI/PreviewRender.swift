@@ -392,6 +392,27 @@ public enum PreviewRender {
         }, scale: scale)
     }
 
+    public static func quotaMixedHeightPNG(scale: CGFloat = 2) -> Data? {
+        let one = quotaNode([PreviewSamples.win("seven_day", "周限额", 37, resetIn: 86400)])
+        return png(VStack(alignment: .leading, spacing: 16) {
+            ForEach([2, 3, 5], id: \.self) { count in
+                let multiple = quotaNode((0..<count).map {
+                    PreviewSamples.win("quota_\($0)", "Quota \($0 + 1)", Double(20 + $0 * 12), resetIn: 86400)
+                })
+                HStack(alignment: .top, spacing: 16) {
+                    FlatQuotaCarousel(pages: [
+                        QuotaPage(id: "codex", agentID: "codex", agentName: "Codex", brand: .codex, account: one),
+                        QuotaPage(id: "qoder", agentID: "qoder", agentName: "Qoder", brand: .qoder, account: multiple)
+                    ], autoRotate: false)
+                    FlatQuotaCarousel(pages: [
+                        QuotaPage(id: "qoder", agentID: "qoder", agentName: "Qoder", brand: .qoder, account: multiple),
+                        QuotaPage(id: "codex", agentID: "codex", agentName: "Codex", brand: .codex, account: one)
+                    ], autoRotate: false)
+                }
+            }
+        }.padding(16).frame(width: 800).background(Theme.bg), scale: scale)
+    }
+
     private static func quotaNode(_ windows: [QuotaWindow],
                                   sampledAt: String? = nil) -> QuotaNode {
         QuotaNode(ok: true, hidden: false, accountId: nil, account: nil, isDefault: true,
