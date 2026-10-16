@@ -190,6 +190,9 @@ public struct AgentDeckRootView: View {
         }
         .preferredColorScheme(.dark)
         .onChange(of: fontScale) { onScale($0) }
+        .onChange(of: tab) { store.performanceShowsSessions = $0 != "overview" && !showSettings }
+        .onChange(of: showSettings) { store.performanceShowsSessions = !$0 && tab != "overview" }
+        .environment(\.sessionPerformanceStore, previewMode ? nil : store.performance)
     }
 
     // MARK: 背景（native：系统玻璃之上叠暗化 scrim + 弱 aurora；精简模式去 aurora）
@@ -744,6 +747,7 @@ public struct AgentDeckWidgetRootView: View {
                         Task { _ = await store.focus(tool: a.tool, id: a.id ?? "", cwd: a.cwd ?? "", pid: a.pid ?? 0) }
                     })
                 .padding(EdgeInsets(top: 18, leading: 10, bottom: 8, trailing: 10))
+                .environment(\.sessionPerformanceStore, store.performance)
             }
             .environment(\.minimalMode, minimal)
         }

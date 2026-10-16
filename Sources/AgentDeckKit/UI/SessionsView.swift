@@ -387,15 +387,20 @@ private struct SessionRow: View {
                         Text(session.title ?? "—").font(.system(size: 11)).foregroundStyle(Theme.ink).lineLimit(1)
                     }
                     Text(meta).font(.system(size: 8.5)).foregroundStyle(Theme.ink3).lineLimit(1)
+                    SessionSpeedView(request: session.performanceRequest)
                 }
                 Spacer(minLength: 6)
-                if hovering || expanded { actions }
+                if hovering || expanded { actions.fixedSize(horizontal: true, vertical: false) }
             }
             .padding(.horizontal, 9).padding(.vertical, 8)
             .contentShape(Rectangle())
             .onTapGesture { onToggle() }
 
-            if expanded { previewBox.padding(.leading, 35).padding(.trailing, 4).padding(.bottom, 6) }
+            if expanded {
+                SessionSpeedView(request: session.performanceRequest, expanded: true)
+                    .padding(.leading, 35).padding(.trailing, 9)
+                previewBox.padding(.leading, 35).padding(.trailing, 4).padding(.bottom, 6)
+            }
         }
         .background(RoundedRectangle(cornerRadius: Theme.rMd, style: .continuous)
             .fill(session.pinned == true ? Color(hex: 0xffd479).opacity(0.045)

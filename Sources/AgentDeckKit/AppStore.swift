@@ -140,6 +140,17 @@ public final class AppStore: ObservableObject {
     public var onQuotaRotationPauseChanged: ((Bool) -> Void)?
 
     @Published var quota: QuotaResponse?
+    lazy var performance = SessionPerformanceStore(api: api)
+    var performanceShowsSessions = false
+
+    public func setPerformanceVisible(_ owner: String, _ visible: Bool) {
+        performance.setVisible(owner, visible) { [weak self] in
+            guard let self else { return [] }
+            return (self.performanceShowsSessions && self.performance.isVisible("panel")
+                    ? self.sessionsShown.map(\.performanceRequest) : [])
+                + self.activeShown.map(\.performanceRequest).filter { !$0.id.isEmpty }
+        }
+    }
     @Published var usage: UsageResponse?
     @Published var sessions: [SessionItem] = []
     @Published var active: [ActiveSession] = []

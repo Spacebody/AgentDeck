@@ -83,20 +83,26 @@ private struct SessionRow: View {
     let title: String
     let monospaced: Bool       // 活跃用等宽路径
     let trailing: AnyView
+    var detail: AnyView? = nil
     var onTap: () -> Void = {}
 
     var body: some View {
         Button(action: onTap) {
             HStack(spacing: 8) {
                 BrandBadge(brand: Brand(rawValue: tool) ?? .claude, size: 20)
-                Text(title)
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 6) {
+                        Text(title)
                     .font(.system(size: monospaced ? 10.5 : 11,
                                   weight: monospaced ? .semibold : .regular,
                                   design: monospaced ? .monospaced : .default))
                     .foregroundStyle(monospaced ? Theme.ink2 : Theme.ink)
                     .lineLimit(1).truncationMode(.head)   // 从左截断保尾部目录
                     .frame(maxWidth: .infinity, alignment: .leading)
-                trailing
+                        trailing.fixedSize(horizontal: true, vertical: false)
+                    }
+                    if let detail { detail }
+                }
                 Image(systemName: "chevron.right")
                     .font(.system(size: 9, weight: .semibold)).foregroundStyle(Theme.ink3)
             }
@@ -130,8 +136,14 @@ struct ActiveCard: View {
                         monospaced: true,
                         trailing: AnyView(HStack(spacing: 6) {
                             if a.host == "app" { tag("App") }
-                            Text(L("active.runningFor", ["dur": runtime(a)])).font(.system(size: 10.5)).foregroundStyle(Theme.ink2)
                             if let st = a.status, !st.isEmpty { statePill(st) }
+                        }),
+                        detail: AnyView(HStack(spacing: 6) {
+                            Text(L("active.runningFor", ["dur": runtime(a)]))
+                                .font(.system(size: 9)).foregroundStyle(Theme.ink3)
+                                .lineLimit(1).minimumScaleFactor(0.85)
+                            Spacer(minLength: 0)
+                            SessionSpeedView(request: a.performanceRequest)
                         }),
                         onTap: { onTap(a) })
                 }

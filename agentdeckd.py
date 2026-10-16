@@ -30,6 +30,8 @@ import sqlite3
 import stat
 import subprocess
 import sys
+# Imported local helpers must not write unsealed .pyc files into the signed app.
+sys.dont_write_bytecode = True
 import tempfile
 import threading
 import time
@@ -4951,6 +4953,74 @@ def _session_index_path(tool, sid, account_id=""):
         conn.close()
 
 
+def _performance_key(tool, account, source, sid):
+    return f"{tool}|{account}|{source or 'transcript'}|{sid}"
+
+
+def _performance_candidates():
+    conn = _session_db_connect()
+    try:
+        rows = conn.execute(
+            "SELECT tool,account_id,session_id,path FROM session_index "
+            "WHERE source_present=1 AND mtime>? ORDER BY mtime DESC LIMIT 32",
+            (time.time() - 300,)).fetchall()
+        return [(_performance_key(r['tool'], r['account_id'], '', r['session_id']),
+                 r['tool'], r['path']) for r in rows if not r['path'].startswith('qoder-app')]
+    finally:
+        conn.close()
+
+
+from session_performance import PerformanceCollector
+
+_performance = PerformanceCollector(DATA_DIR / "session_performance.sqlite3", _performance_candidates)
+
+
+def api_session_performance(query):
+    raw = query.get("sessions", ["[]"])[0]
+    if len(raw) > 65536:
+        return {"ok": False, "metrics": {}}
+    try:
+        requests = json.loads(raw)
+    except ValueError:
+        return {"ok": False, "metrics": {}}
+    if not isinstance(requests, list) or len(requests) > 232:
+        return {"ok": False, "metrics": {}}
+    conn = _session_db_connect()
+    rows, aliases, metrics = [], {}, {}
+    try:
+        for req in requests:
+            if not isinstance(req, dict):
+                continue
+            tool, sid = req.get('tool'), req.get('id')
+            account, source = req.get('account', 'default'), req.get('source', 'transcript')
+            if (tool not in AGENT_IDS or not isinstance(sid, str) or not _ID_RE.fullmatch(sid)
+                    or not isinstance(account, str) or len(account) > 120
+                    or source not in ('transcript', 'qoder_app')):
+                continue
+            key = _performance_key(tool, account, source, sid)
+            if source == 'qoder_app':
+                metrics[key] = {"state": "unavailable"}
+                continue
+            # Active process rows do not carry an account. Resolve only when
+            # unambiguous; never borrow throughput from another account.
+            found = conn.execute(
+                "SELECT account_id,path FROM session_index WHERE tool=? AND session_id=? "
+                "AND source_present=1" + (" AND account_id=?" if account != '*' else "") + " LIMIT 2",
+                (tool, sid, account) if account != '*' else (tool, sid)).fetchall()
+            if len(found) != 1 or found[0]['path'].startswith('qoder-app'):
+                metrics[key] = {"state": "unavailable"}
+                continue
+            canonical = _performance_key(tool, found[0]['account_id'], source, sid)
+            aliases[key] = canonical
+            rows.append((canonical, tool, found[0]['path']))
+    finally:
+        conn.close()
+    _performance.start()
+    values = _performance.request(rows)
+    metrics.update({key: values[value] for key, value in aliases.items()})
+    return {"ok": True, "metrics": metrics}
+
+
 def api_preview(query):
     tool = query.get("tool", [""])[0]
     sid = query.get("id", [""])[0]
@@ -7779,6 +7849,10 @@ class Handler(BaseHTTPRequestHandler):
                     cursor=query.get("cursor", [""])[0]))
             elif path == "/api/usage":
                 self._send(200, api_usage())
+            elif path == "/api/session-performance":
+                if not _local_long_poll_request(self.headers):
+                    return self._send(403, {"error": "forbidden"})
+                self._send(200, api_session_performance(query))
             elif path == "/api/active":
                 self._send(200, api_active())
             elif path == "/api/preview":
@@ -7958,6 +8032,7 @@ def main():
                      args=("integration", install_integration),
                      daemon=True, name="agentdeck-integration-startup").start()
     _codex_quota_manager.start()
+    _performance.start()
     threading.Thread(target=_parent_watchdog,
                      args=(shutdown_requested,), daemon=True).start()
     # Both loops may inspect large rollout files while holding Python's GIL. On
@@ -7975,6 +8050,7 @@ def main():
     finally:
         server.server_close()
         _codex_quota_manager.stop()
+        _performance.stop()
 
 
 if __name__ == "__main__":

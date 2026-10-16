@@ -1219,6 +1219,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             effect.addSubview(host.view, positioned: .below, relativeTo: nil)
         }
         loaded = true
+        store.setPerformanceVisible("panel", true)
         Task { await store.refreshOnOpen() }   // 开面板即刻按缓存快刷，与菜单栏对齐；实时最新值由🔄(force)触发
 
         // 尺寸：恢复用户上次拖拽的大小，高度不超过屏幕可视范围
@@ -1257,6 +1258,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func hidePanel() {
+        store.setPerformanceVisible("panel", false)
         // 尺寸已在拖拽时由 windowDidResize(inLiveResize) 持续落盘，这里不再保存——
         // 否则会把 showPanel 恢复时的「按屏高钳制后的值」反写覆盖，导致高度逐次缩水。
         panel?.orderOut(nil)
@@ -1373,9 +1375,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             effect.addSubview(host.view, positioned: .below, relativeTo: nil)
         }
         widgetPanel?.orderFront(nil)
+        store.setPerformanceVisible("widget", true)
     }
 
     func hideWidget() {
+        store.setPerformanceVisible("widget", false)
         widgetPanel?.orderOut(nil)
         widgetHost?.view.removeFromSuperview()   // 同面板：摘下承载视图停离屏 display link，关掉小组件后不再耗电
     }

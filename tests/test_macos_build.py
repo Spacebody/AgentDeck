@@ -42,7 +42,7 @@ class MacOSBuildTests(unittest.TestCase):
             app = Path(temp)
             resources = app / "Contents/Resources"
             resources.mkdir(parents=True)
-            for name in ("agentdeckd.py", "VERSION", "AgentDeck_AgentDeckKit.bundle"):
+            for name in ("agentdeckd.py", "session_performance.py", "VERSION", "AgentDeck_AgentDeckKit.bundle"):
                 (resources / name).touch()
             with (app / "Contents/Info.plist").open("wb") as stream:
                 plistlib.dump({"CFBundleExecutable": "AgentDeck",
@@ -62,7 +62,7 @@ class MacOSBuildTests(unittest.TestCase):
             with patch.object(CHECK, "command", side_effect=OSError("tool missing")):
                 with self.assertRaises(OSError):
                     CHECK.verify(app, "13.0", "27.0")
-            (resources / "agentdeckd.py").unlink()
+            (resources / "session_performance.py").unlink()
             with patch.object(CHECK, "command", side_effect=[
                     "arm64 x86_64", METADATA, METADATA]):
                 with self.assertRaisesRegex(ValueError, "Missing bundled"):

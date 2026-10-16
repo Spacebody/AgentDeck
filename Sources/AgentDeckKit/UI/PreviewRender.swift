@@ -239,6 +239,31 @@ public enum PreviewRender {
         }, scale: scale)
     }
 
+    public static func sessionSpeedPNG(scale: CGFloat = 2) -> Data? {
+        let store = SessionPerformanceStore()
+        let states = ["active", "completed", "stale", "unavailable"]
+        for (index, session) in PreviewSamples.sessions.enumerated() {
+            store.metrics[session.performanceRequest.key] = SessionPerformance(
+                state: states[index], mode: "turn_average", tokensPerSecond: 28.4,
+                outputTokens: 1420, durationSecs: 50, sampledAt: Date().timeIntervalSince1970 - 5)
+        }
+        for (index, session) in PreviewSamples.active.enumerated() {
+            store.metrics[session.performanceRequest.key] = SessionPerformance(
+                state: states[index], mode: "turn_average", tokensPerSecond: 28.4)
+        }
+        let first = PreviewSamples.sessions[0].rowKey
+        return png(VStack(spacing: 16) {
+            ForEach([CGFloat(420), CGFloat(600)], id: \.self) { width in
+                VStack(spacing: 12) {
+                    ActiveCard(sessions: PreviewSamples.active)
+                    SessionsView(sessions: PreviewSamples.sessions, scrollable: false,
+                                 total: 4, initialExpanded: first,
+                                 seededPreviews: [first: PreviewSamples.previewMsgs])
+                }.padding(12).frame(width: width).background(Theme.bg)
+            }
+        }.environment(\.sessionPerformanceStore, store), scale: scale)
+    }
+
     /// 设置页（全展开，不滚动以便整图自检）。
     public static func settingsPNG(scale: CGFloat = 2) -> Data? {
         png(PanelChrome(height: 1480) {

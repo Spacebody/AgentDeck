@@ -80,6 +80,7 @@ actor APIClient {
         // A cache-version upgrade may require one full 30-day JSONL rebuild.
         // Keep the stricter default for every other loopback endpoint.
         if path == "/api/usage" { request.timeoutInterval = 45 }
+        if path == "/api/session-performance" { request.timeoutInterval = 3 }
         // 手动额度刷新可能等待正在执行的 Codex 校准，再查询多个账号。
         // 普通缓存读取仍保留 20s，只有明确 force 时放宽。
         if path == "/api/quota", query["force"] == "1" {

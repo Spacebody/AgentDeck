@@ -64,6 +64,29 @@ private final class AuditHeldRequest {
 }
 
 final class AppStoreAPIAuditTests: XCTestCase {
+    @MainActor func testPerformanceVisibilityAndDecode() async throws {
+        let called = expectation(description: "Performance requested")
+        let client = api { request in
+            XCTAssertEqual(request.request.url?.path, "/api/session-performance")
+            request.respond(#"{"ok":true,"metrics":{"codex|default|transcript|id":{"state":"completed","mode":"turn_average","tokens_per_second":25,"output_tokens":250,"duration_secs":10}}}"#)
+            called.fulfill()
+        }
+        let store = SessionPerformanceStore(api: client)
+        let requests = { [SessionPerformanceRequest(tool: "codex", account: "default", source: "transcript", id: "id")] }
+        store.setVisible("panel", true, requests: requests)
+        await fulfillment(of: [called], timeout: 2)
+        for _ in 0..<50 where store.metrics.isEmpty {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(store.metrics[requests()[0].key]?.rate, 25)
+        store.setVisible("widget", true, requests: requests)
+        store.setVisible("panel", false, requests: requests)
+        XCTAssertFalse(store.metrics.isEmpty)
+        store.setVisible("widget", false, requests: requests)
+        XCTAssertTrue(store.metrics.isEmpty)
+        XCTAssertFalse(store.isVisible("widget"))
+    }
+
     private func api(handler: @escaping (AuditURLProtocol) -> Void) -> APIClient {
         let id = UUID().uuidString
         AuditURLProtocol.register(id, handler: handler)

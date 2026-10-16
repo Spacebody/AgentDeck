@@ -50,7 +50,7 @@ def verify(app, minimum_os, sdk_version):
                          "-show-build", str(binary))
         validate_load_commands(output, minimum_os, sdk_version)
     resources = app / "Contents/Resources"
-    for name in ("agentdeckd.py", "VERSION", "AgentDeck_AgentDeckKit.bundle"):
+    for name in ("agentdeckd.py", "session_performance.py", "VERSION", "AgentDeck_AgentDeckKit.bundle"):
         if not (resources / name).exists():
             raise ValueError(f"Missing bundled resource: {name}")
     print(f"Build metadata verified: arm64 + x86_64, deployment target {minimum_os}, "
