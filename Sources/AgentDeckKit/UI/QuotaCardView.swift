@@ -60,6 +60,7 @@ enum QuotaCardPresentation {
 
 // MARK: - 进度环（.ring：r=27 / stroke 6 / 顶部起、顺时针；中心大号百分比）
 struct RingView: View {
+    @ObservedObject private var palette = AgentColors.shared
     let percent: Double
     let brand: Brand
     var size: CGFloat = 64
@@ -92,6 +93,7 @@ struct RingView: View {
 // MARK: - 官方品牌字形（claude/codex tray 模板图，currentColor 上色）。
 // 复刻 index.html badge()：claude mask-size 141%（图内留白，放大填充）、codex contain。
 struct BrandGlyph: View {
+    @ObservedObject private var palette = AgentColors.shared
     let brand: Brand
     /// 字形显示边长（v1：qbadge 20 内 glyph 12）
     var glyph: CGFloat = 12
@@ -139,6 +141,7 @@ struct BrandGlyph: View {
 
 // MARK: - 品牌徽章（.qbadge：品牌色底 + 描边 + 官方字形）
 struct BrandBadge: View {
+    @ObservedObject private var palette = AgentColors.shared
     let brand: Brand
     var size: CGFloat = 20
     var body: some View {
@@ -153,6 +156,7 @@ struct BrandBadge: View {
 
 // MARK: - 单个窗口条（.wrow：标签 + 倒计时 + 百分比 + 进度条）
 struct WindowRow: View {
+    @ObservedObject private var palette = AgentColors.shared
     let window: QuotaWindow
     let brand: Brand
     var presentation: QuotaCardPresentation = .panelWide
@@ -292,6 +296,7 @@ private struct CarouselWidthKey: PreferenceKey {
 }
 
 struct QuotaCarousel: View {
+    @ObservedObject private var palette = AgentColors.shared
     let brand: Brand
     let accounts: [QuotaNode]
     var presentation: QuotaCardPresentation = .panelWide
@@ -372,7 +377,9 @@ struct QuotaCarousel: View {
 
 // MARK: - 多 Agent × 多账号拍平轮播
 struct FlatQuotaCarousel: View {
+    @ObservedObject private var palette = AgentColors.shared
     let pages: [QuotaPage]
+    var dashboard = false
     var autoRotate = true
     var interval = 6
     var isActive = true
@@ -408,23 +415,20 @@ struct FlatQuotaCarousel: View {
         if pages.isEmpty {
             EmptyView()
         } else if pages.count == 1, let only = pages.first {
-            QuotaCardView(brand: only.brand, node: only.account,
-                          accountLabel: only.account.account)
+            card(only)
         } else {
             VStack(spacing: 8) {
                 ZStack(alignment: .topLeading) {
                     // Invisible copies participate in layout so the carousel height is the
                     // maximum page height and content below never jumps during rotation.
                     ForEach(pages) { item in
-                        QuotaCardView(brand: item.brand, node: item.account,
-                                      accountLabel: item.account.account)
+                        card(item)
                             .opacity(0).allowsHitTesting(false).accessibilityHidden(true)
                     }
                 }
                 .overlay(alignment: .topLeading) {
                     let current = pages[page]
-                    QuotaCardView(brand: current.brand, node: current.account,
-                                  accountLabel: current.account.account, fillsHeight: true)
+                    card(current, fillsHeight: true)
                         .id(current.id)
                         .offset(x: dragX)
                         .transition(cardTransition)
@@ -496,6 +500,12 @@ struct FlatQuotaCarousel: View {
                 if direction == .right { select(page + 1) }
             }
         }
+    }
+
+    @ViewBuilder private func card(_ item: QuotaPage, fillsHeight: Bool = false) -> some View {
+        if dashboard { DashboardQuota(brand: item.brand, node: item.account) }
+        else { QuotaCardView(brand: item.brand, node: item.account,
+                             accountLabel: item.account.account, fillsHeight: fillsHeight) }
     }
 
     private var controls: some View {
@@ -586,6 +596,7 @@ struct FlatQuotaCarousel: View {
 
 // MARK: - 额度卡
 struct QuotaCardView: View {
+    @ObservedObject private var palette = AgentColors.shared
     let brand: Brand
     let node: QuotaNode?
     /// 多账号时显示的账号名（carousel 页）。

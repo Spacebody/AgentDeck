@@ -1,5 +1,4 @@
-// AgentDeck v2 — 概览页。里程碑阶段先实现额度卡区（核心质感）；
-// 今日条 / 活跃会话 / 完成事件 / 用量图表在 #5、#6 接入。
+// AgentDeck v3 overview: daily usage, account quota, trend and project activity.
 import SwiftUI
 
 /// 双 Agent 额度行：先以相同列宽测量两侧当前页，再把较高值作为共同高度。
@@ -40,6 +39,7 @@ struct EqualHeightQuotaRow: Layout {
 }
 
 struct OverviewView: View {
+    @Environment(\.adShowInfo) private var showInfo
     let quota: QuotaResponse?
     var usage: UsageResponse? = nil
     var today: TodaySummary? = nil
@@ -59,16 +59,54 @@ struct OverviewView: View {
     var onQuotaRotationPauseChange: (Bool) -> Void = { _ in }
     var onFocusActive: (ActiveSession) -> Void = { _ in }
     var onFocusDone: (DoneEvent) -> Void = { _ in }
+    var onViewUsage: () -> Void = {}
 
     var body: some View {
-        // 入场错峰淡入上滑，延时逐一对齐 v1 各卡 animation-delay。
-        VStack(spacing: 10) {
-            quotaSection.reveal(delay: 0.05)
-            if let today { TodayBar(summary: today).reveal(delay: 0.06) }
-            if showActive { ActiveCard(sessions: active, onTap: onFocusActive).reveal(delay: 0.09) }
-            DoneCard(events: done, onTap: onFocusDone).reveal(delay: 0.10)
-            UsageView(usage: usage, showClaude: showClaude,
-                      showCodex: showCodex, showQoder: showQoder).reveal(delay: 0.12)
+        VStack(alignment: .leading, spacing: 24) {
+            HStack(alignment: .top, spacing: 20) {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(spacing: 8) {
+                        AgentUsageDonut(summary: today)
+                        Text(L("info.todayTerm")).font(.system(size: 12, weight: .semibold))
+                        InfoButton { showInfo(.today) }.accessibilityLabel(L("info.title"))
+                    }
+                    HStack(alignment: .firstTextBaseline, spacing: 5) {
+                        Text(Fmt.tokens(today?.totalTokens ?? 0))
+                            .font(.system(size: 34, weight: .semibold)).monospacedDigit()
+                            .lineLimit(1).minimumScaleFactor(0.6)
+                        Text("tokens").font(.system(size: 10)).foregroundStyle(Theme.ink3)
+                    }
+                    HStack(spacing: 10) {
+                        Text(todayCost).font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.ink2)
+                            .fixedSize(horizontal: false, vertical: true)
+                        if let delta = today?.deltaPercent {
+                            Label("\(abs(delta))%", systemImage: delta >= 0 ? "arrow.up.right" : "arrow.down.right")
+                                .font(.system(size: 10)).foregroundStyle(delta > 0 ? Theme.warn : DashboardStyle.accent)
+                                .fixedSize()
+                        }
+                    }
+                }.frame(maxWidth: .infinity, alignment: .leading)
+                Rectangle().fill(Color.white.opacity(0.1)).frame(width: 1)
+                quotaSection.frame(maxWidth: .infinity, alignment: .top)
+            }.fixedSize(horizontal: false, vertical: true)
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    DashboardHeading(text: L("usage.tabCurve"))
+                    Button(action: onViewUsage) {
+                        Label(L("v3.viewUsage"), systemImage: "arrow.up.right")
+                            .font(.system(size: 11))
+                    }.buttonStyle(.plain).foregroundStyle(DashboardStyle.accent).fixedSize()
+                }
+                if let usage {
+                    DashboardTrend(hourly: usage.hourly, agents: visibleAgents).frame(height: 95)
+                } else { Text(L("common.loading")).foregroundStyle(Theme.ink3) }
+            }
+            Divider().opacity(0.4)
+            if showActive && !active.isEmpty {
+                DashboardActiveList(sessions: active, onOpen: onFocusActive)
+                Divider().opacity(0.4)
+            }
+            DashboardDoneList(events: done, onOpen: onFocusDone)
         }
         .animation(.easeInOut(duration: 0.18), value: showClaude)
         .animation(.easeInOut(duration: 0.18), value: showCodex)
@@ -92,6 +130,18 @@ struct OverviewView: View {
         showQoderCNAgent ?? !(quota?.qoderCn?.hidden ?? true)
     }
 
+    private var visibleAgents: Set<String> {
+        Set([showClaude ? "claude" : nil, showCodex ? "codex" : nil,
+             showQoder ? "qoder" : nil, showQoderCN ? "qoder_cn" : nil].compactMap { $0 })
+    }
+
+    private var todayCost: String {
+        guard let usage, let cost = UsageRangeSummary(usage: usage, span: 1, visible: visibleAgents).cost else {
+            return L("v3.unavailable")
+        }
+        return String(format: "≈ $%.2f", cost)
+    }
+
     @ViewBuilder private var quotaSection: some View {
         if let quota {
             let visible = Set([
@@ -102,6 +152,7 @@ struct OverviewView: View {
             ].compactMap { $0 })
             FlatQuotaCarousel(
                 pages: quota.flatPages(visibleAgents: visible),
+                dashboard: true,
                 autoRotate: quotaAutoRotate,
                 interval: quotaRotateSecs,
                 isActive: carouselActive,
@@ -109,7 +160,63 @@ struct OverviewView: View {
                 onSelectionChange: onSelectQuota,
                 onRotationPauseChange: onQuotaRotationPauseChange)
                 .frame(maxWidth: .infinity, alignment: .top)
-        }
+        } else { Text(L("common.loading")).font(.system(size: 11)).foregroundStyle(Theme.ink3) }
+    }
+}
+
+struct DashboardTrend: View {
+    @ObservedObject private var palette = AgentColors.shared
+    let hourly: [HourBucket]
+    let agents: Set<String>
+    var body: some View {
+        Canvas { context, size in
+            let now = Date().timeIntervalSince1970
+            let end = floor(now / 3600) * 3600
+            let totals = (0..<24).map { index -> Double in
+                let start = end - Double(23 - index) * 3600
+                return hourly.filter { $0.ts >= start && $0.ts < start + 3600 }.reduce(0) {
+                    $0 + (agents.contains("claude") ? $1.c : 0) + (agents.contains("codex") ? $1.x : 0)
+                        + (agents.contains("qoder") ? $1.q ?? 0 : 0)
+                        + (agents.contains("qoder_cn") ? $1.qcn ?? 0 : 0)
+                }
+            }
+            let maxValue = max(totals.max() ?? 0, 1)
+            let height = max(0, size.height - 20)
+            let points = totals.enumerated().map { i, value in
+                CGPoint(x: size.width * Double(i) / 23, y: height - max(0, height - 3) * value / maxValue)
+            }
+            // Equal hourly spacing: limit tangents to the smaller adjacent change.
+            // This keeps flat hours flat and makes the tangent horizontal at extrema.
+            func tangent(_ i: Int) -> CGFloat {
+                if i == 0 { return points[1].y - points[0].y }
+                if i == points.count - 1 { return points[i].y - points[i - 1].y }
+                let a = points[i].y - points[i - 1].y, b = points[i + 1].y - points[i].y
+                return a * b > 0 ? (a > 0 ? min(a, b) : max(a, b)) : 0
+            }
+            var line = Path()
+            line.move(to: points[0])
+            for i in 1..<points.count {
+                let a = points[i - 1], b = points[i]
+                // Longer tangent handles broaden the shoulders at peaks and troughs.
+                // Below 0.5 the controls stay ordered, even on steep hourly jumps.
+                let reach: CGFloat = 0.48
+                let dx = (b.x - a.x) * reach
+                line.addCurve(to: b, control1: CGPoint(x: a.x + dx, y: a.y + tangent(i - 1) * reach),
+                              control2: CGPoint(x: b.x - dx, y: b.y - tangent(i) * reach))
+            }
+            let ink = agents.count == 1 ? agents.first.flatMap(Brand.init(rawValue:))?.accent : nil
+            context.stroke(line, with: .color(ink ?? DashboardStyle.accent),
+                           style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
+            var baseline = Path(); baseline.move(to: CGPoint(x: 0, y: height)); baseline.addLine(to: CGPoint(x: size.width, y: height))
+            context.stroke(baseline, with: .color(.white.opacity(0.1)), lineWidth: 1)
+            let formatter = DateFormatter(); formatter.dateFormat = "HH:mm"
+            for index in [0, 6, 12, 18, 23] {
+                let date = Date(timeIntervalSince1970: end - Double(23 - index) * 3600)
+                context.draw(Text(formatter.string(from: date)).font(.system(size: 10)).foregroundColor(Theme.ink2),
+                             at: CGPoint(x: size.width * Double(index) / 23, y: height + 13),
+                             anchor: index == 0 ? .leading : index == 23 ? .trailing : .center)
+            }
+        }.accessibilityLabel(L("usage.tabCurve"))
     }
 }
 
@@ -119,8 +226,7 @@ struct PanelChrome<Content: View>: View {
     @ViewBuilder var content: Content
     var body: some View {
         ZStack(alignment: .top) {
-            Theme.bg
-            AuroraBackground(opacity: 0.72)
+            DashboardStyle.background
             // 不用 ScrollView：ImageRenderer 渲染不了其内容；定高 VStack 顶对齐即可。
             VStack(spacing: 0) {
                 content.padding(14)
@@ -128,6 +234,8 @@ struct PanelChrome<Content: View>: View {
             }
         }
         .frame(width: 420, height: height)
+        .foregroundStyle(Theme.ink)
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .preferredColorScheme(.dark)
     }
 }

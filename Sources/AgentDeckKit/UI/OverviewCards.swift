@@ -3,6 +3,17 @@
 import SwiftUI
 
 // MARK: - 迷你模型分布环（miniDonut）：12 点起始、段间 1.2pt 缝
+struct AgentUsageDonut: View {
+    let summary: TodaySummary?
+    @ObservedObject private var palette = AgentColors.shared
+    var body: some View {
+        MiniDonut(parts: Brand.allCases.compactMap { brand in
+            guard let value = summary?.byAgent[brand], value > 0 else { return nil }
+            return (value, brand.accent)
+        })
+    }
+}
+
 struct MiniDonut: View {
     let parts: [(value: Double, color: Color)]
     var size: CGFloat = 22
@@ -10,17 +21,22 @@ struct MiniDonut: View {
     var body: some View {
         let total = parts.reduce(0) { $0 + $1.value }
         Canvas { ctx, _ in
-            guard total > 0 else { return }
             let r = size / 2 - 2.5
             let center = CGPoint(x: size / 2, y: size / 2)
+            guard total > 0 else {
+                ctx.stroke(Path(ellipseIn: CGRect(x: 2.5, y: 2.5, width: 2*r, height: 2*r)),
+                           with: .color(Theme.ink3.opacity(0.3)), lineWidth: 4)
+                return
+            }
             let gapDeg = Double(1.2 / (2 * .pi * r)) * 360
             var start = -90.0   // 12 点
             for p in parts where p.value > 0 {
                 let sweep = p.value / total * 360
+                let gap = parts.count == 1 ? 0 : min(gapDeg, sweep * 0.15)
                 var path = Path()
                 path.addArc(center: center, radius: r,
-                            startAngle: .degrees(start + gapDeg / 2),
-                            endAngle: .degrees(start + sweep - gapDeg / 2),
+                            startAngle: .degrees(start + gap / 2),
+                            endAngle: .degrees(start + sweep - gap / 2),
                             clockwise: false)
                 ctx.stroke(path, with: .color(p.color), style: StrokeStyle(lineWidth: 4))
                 start += sweep
@@ -45,17 +61,15 @@ struct InfoButton: View {
 // MARK: - 今日摘要条（#today）
 struct TodayBar: View {
     let summary: TodaySummary
+    var showsInfo = true
     @Environment(\.adShowInfo) private var showInfo
 
     var body: some View {
         HStack(spacing: 10) {
-            MiniDonut(parts: TodaySummary.Family.allCases.compactMap { f in
-                let v = summary.byFamily[f] ?? 0
-                return v > 0 ? (v, Color(hex: TodaySummary.color(f))) : nil
-            })
+            AgentUsageDonut(summary: summary)
             text
             Spacer(minLength: 6)
-            InfoButton { showInfo(.today) }
+            if showsInfo { InfoButton { showInfo(.today) } }
         }
         .padding(.horizontal, 14).padding(.vertical, 8)
         .frame(maxWidth: .infinity, alignment: .leading)

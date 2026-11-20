@@ -4134,7 +4134,7 @@ def _session_cursor_where(cursor):
     return "WHERE " + " OR ".join(clauses), params
 
 
-def _query_session_index(query="", tool="all", limit=None, cursor=""):
+def _query_session_index(query="", tool="all", limit=None, cursor="", project_cwds=None):
     q = (query or "").strip().casefold()[:80]
     requested_tools = tuple(agent for agent in AGENT_IDS
                             if agent in str(tool).split(","))
@@ -4153,6 +4153,9 @@ def _query_session_index(query="", tool="all", limit=None, cursor=""):
         limit = 30
 
     where, where_params = ["(source_present=1 OR pinned=1)", "title<>''"], []
+    if project_cwds is not None:
+        where.append(f"cwd IN ({','.join('?' for _ in project_cwds)})" if project_cwds else "0")
+        where_params.extend(project_cwds)
     if tool != "all":
         where.append(f"tool IN ({','.join('?' for _ in requested_tools)})")
         where_params.extend(requested_tools)
@@ -4169,14 +4172,14 @@ def _query_session_index(query="", tool="all", limit=None, cursor=""):
     else:
         rank_sql, rank_params = "0", []
 
-    scope = _cursor_scope(q, tool)
+    scope = _cursor_scope(q + (json.dumps(sorted(project_cwds)) if project_cwds is not None else ''), tool)
     decoded = _decode_session_cursor(cursor, scope)
     conn = _session_db_connect()
     try:
         # total、rows 和 revision 必须来自同一 SQLite 读快照。
         conn.execute("BEGIN")
         revision = _session_revision(conn)
-        cursor_stale = bool(decoded and decoded["rev"] != revision)
+        cursor_stale = bool(cursor and (decoded is None or decoded["rev"] != revision))
         if cursor_stale:
             decoded = None
         cursor_sql, cursor_params = \
@@ -4257,6 +4260,54 @@ def api_pin(body):
 def api_sessions(query=None, tool="all", limit=None, cursor=""):
     _ensure_session_index_started()
     return _query_session_index(query, tool, limit, cursor)
+
+
+def api_projects(query):
+    """Group indexed metadata, never the current page or decoded transcripts."""
+    _ensure_session_index_started()
+    requested = str(query.get('tool', ['all'])[0])
+    tools = list(AGENT_IDS) if requested == 'all' else [t for t in requested.split(',') if t in AGENT_IDS]
+    with _path_mappings_lock:
+        mappings = _load_path_mappings()
+    conn = _session_db_connect()
+    try:
+        rows = conn.execute(
+            f"SELECT cwd,COUNT(*) AS count,MAX(mtime) AS mtime FROM session_index "
+            f"WHERE (source_present=1 OR pinned=1) AND title<>'' AND cwd<>'' "
+            f"AND tool IN ({','.join('?' for _ in tools)}) GROUP BY cwd", tools).fetchall()
+        revision = _session_revision(conn)
+    finally:
+        conn.close()
+    groups = {}
+    for row in rows:
+        cwd = _usage_project_cwd(row['cwd'], mappings)
+        if not cwd:
+            continue
+        group = groups.setdefault(cwd, dict(cwd=cwd, name=Path(cwd).name or cwd,
+                                            mtime=0, count=0, active=[], original_cwds=[]))
+        group['original_cwds'].append(row['cwd'])
+        group['mtime'] = max(group['mtime'], row['mtime'])
+        group['count'] += row['count']
+    now = time.time()
+    for active in api_active().get('active', []):
+        if active.get('tool') not in tools:
+            continue
+        cwd = _usage_project_cwd(active.get('cwd'), mappings)
+        if not cwd:
+            continue
+        group = groups.setdefault(cwd, dict(cwd=cwd, name=Path(cwd).name or cwd,
+                                            mtime=0, count=0, active=[], original_cwds=[]))
+        group['active'].append(active)
+        group['mtime'] = max(group['mtime'], active.get('last_active_at') or now)
+    project = query.get('cwd', [''])[0]
+    if project:
+        canonical = project if project in groups else _usage_project_cwd(project, mappings)
+        group = groups.get(canonical)
+        return _query_session_index(tool=','.join(tools), limit=30,
+                                    cursor=query.get('cursor', [''])[0],
+                                    project_cwds=group['original_cwds'] if group else [])
+    return {'projects': [dict(p, revision=revision) for p in sorted(groups.values(), key=lambda p: (-p['mtime'], p['cwd']))],
+            'indexing': bool(_session_status()['indexing']), 'ts': time.time()}
 
 
 # ----------------------------------------------------------------- 活跃会话
@@ -4618,6 +4669,36 @@ def _claude_tx_mtime(session_id):
     return best
 
 
+def _attach_active_index_metadata(active):
+    """Only bind unambiguous account identities; never guess across copied sessions."""
+    conn = None
+    try:
+        conn = _session_db_connect()
+        for entry in active:
+            sid = entry.get('id')
+            if not sid:
+                continue
+            rows = conn.execute(
+                "SELECT tool,account_id,session_id,title,cwd,path,project,branch,mtime,account,pinned FROM session_index "
+                "WHERE tool=? AND session_id=? AND source_present=1",
+                (entry.get('tool'), sid)).fetchall()
+            candidates = [row for row in rows
+                          if (not entry.get('cwd') or row['cwd'] == entry['cwd'])
+                          and (str(row['path']).startswith('qoder-app://') == (entry.get('source') == 'qoder_app'))]
+            if len(candidates) == 1:
+                row = candidates[0]
+                entry['indexed_row_key'] = f"{row['tool']}:{row['account_id'] or 'default'}:{sid}"
+                entry['title'] = row['title']
+                entry['indexed_session'] = {key: row[key] for key in
+                                            ('tool', 'account_id', 'title', 'cwd', 'project', 'branch', 'mtime', 'account')}
+                entry['indexed_session'].update(id=sid, pinned=bool(row['pinned']), source=entry.get('source'))
+    except (OSError, sqlite3.Error):
+        pass
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 def api_active():
     def build():
         active, claude_pids = [], {}
@@ -4841,6 +4922,7 @@ def api_active():
             qoder_rows, now, qoder_app_service_alive))
 
         active.sort(key=_active_sort_key)
+        _attach_active_index_metadata(active)
         return {"active": active, "ts": time.time()}
     return cached("active", 3, build)
 
@@ -7036,10 +7118,10 @@ def _iter_claude_usage_files():
     return sorted(files)
 
 
-def _iter_qoder_usage_files():
+def _iter_qoder_usage_files(sources=None):
     """Return Qoder transcripts from every discovered config directory."""
     files = set()
-    for src in qoder_sources():
+    for src in qoder_sources() if sources is None else sources:
         files.update((src["path"] / "projects").glob("**/*.jsonl"))
     return sorted(files)
 
@@ -7265,21 +7347,22 @@ def api_usage():
         hour_cut = now - 48 * 3600    # 48h：近 24h 画曲线，前 24h 供环比
         hourly = {}   # epoch_hour -> {"c": Claude, "x": Codex, "q": Qoder}
         projects = {}  # cwd -> {"tokens", "cost", "agents"}（近 7 天）
+        projects30 = {}
+        costs_by_agent_daily = {a: {d: 0.0 for d in days} for a in AGENT_IDS}
         with _path_mappings_lock:
             path_mappings = _load_path_mappings()
 
-        def add_project_usage(raw_cwd, tokens, cost, agent):
+        def add_project_usage(raw_cwd, tokens, cost, agent, day):
             project_cwd = _usage_project_cwd(raw_cwd, path_mappings)
             if not project_cwd:
                 return
-            project = projects.setdefault(
-                project_cwd, {"tokens": 0, "cost": 0.0, "agents": {}, "costs_by_agent": {}})
-            project["tokens"] += tokens
-            project["cost"] += cost
-            project["agents"][agent] = \
-                project["agents"].get(agent, 0) + tokens
-            project["costs_by_agent"][agent] = \
-                project["costs_by_agent"].get(agent, 0.0) + cost
+            for target in ([projects30, projects] if day >= week_cut else [projects30]):
+                project = target.setdefault(
+                    project_cwd, {"tokens": 0, "cost": 0.0, "agents": {}, "costs_by_agent": {}})
+                project["tokens"] += tokens
+                project["cost"] += cost
+                project["agents"][agent] = project["agents"].get(agent, 0) + tokens
+                project["costs_by_agent"][agent] = project["costs_by_agent"].get(agent, 0.0) + cost
 
         claude_usage_files = _iter_claude_usage_files()
         claude_cache = _load_claude_usage_cache()
@@ -7310,12 +7393,16 @@ def api_usage():
                         c = _cost(model, tk)
                         cost_30d += c
                         cost_daily[day] += c
+                        if _model_short(model) == 'other' and sum(tk) > 0:
+                            costs_by_agent_daily['claude'][day] = None
+                        elif costs_by_agent_daily['claude'][day] is not None:
+                            costs_by_agent_daily['claude'][day] += c
                         if day >= week_cut:
                             cost_7d += c
-                            if fcwd is None:
-                                fcwd = _claude_file_cwd(path)
-                            if fcwd:
-                                add_project_usage(fcwd, sum(tk), c, "claude")
+                        if fcwd is None:
+                            fcwd = _claude_file_cwd(path)
+                        if fcwd:
+                            add_project_usage(fcwd, sum(tk), c, "claude", day)
                     if ep and ep >= hour_cut:
                         hourly.setdefault(ep, {"c": 0, "x": 0, "q": 0})["c"] += sum(tk)
 
@@ -7359,11 +7446,12 @@ def api_usage():
                     codex_daily[day] += total
                     xcost_30d += cost
                     cost_daily[day] += cost
+                    costs_by_agent_daily['codex'][day] += cost
                     if day >= week_cut:
                         xcost_7d += cost
-                        cwd = _rollout_meta(path)["cwd"]
-                        if cwd:
-                            add_project_usage(cwd, total, cost, "codex")
+                    cwd = _rollout_meta(path)["cwd"]
+                    if cwd:
+                        add_project_usage(cwd, total, cost, "codex", day)
                 if ep and ep >= hour_cut:
                     hourly.setdefault(ep, {"c": 0, "x": 0, "q": 0})["x"] += total
 
@@ -7376,14 +7464,19 @@ def api_usage():
                 pass
 
         qoder_daily = {d: 0 for d in days}
-        qoder_usage_files = _iter_qoder_usage_files()
+        qoder_cn_daily = {d: 0 for d in days}
+        qoder_usage_files = dict.fromkeys(_iter_qoder_usage_files(), "qoder")
+        for path in _iter_qoder_usage_files(qoder_cn_sources()):
+            qoder_usage_files.setdefault(path, "qoder_cn")
+        costs_by_agent_daily["qoder_cn"] = {d: 0.0 for d in days}
         qoder_cache = _load_qoder_usage_cache()
         valid_qoder_paths = {str(path) for path in qoder_usage_files}
         qoder_cache_dirty = False
         for stale_key in set(qoder_cache) - valid_qoder_paths:
             qoder_cache.pop(stale_key, None)
             qoder_cache_dirty = True
-        for path in qoder_usage_files:
+        for path, provider in qoder_usage_files.items():
+            daily = qoder_daily if provider == "qoder" else qoder_cn_daily
             try:
                 if path.stat().st_mtime < cutoff:
                     continue
@@ -7396,15 +7489,18 @@ def api_usage():
                 ep = _hour_epoch(hour)
                 day = datetime.fromtimestamp(ep).strftime("%Y-%m-%d") if ep else hour[:10]
                 total = sum(sum(tokens) for tokens in models.values())
-                if day in qoder_daily:
-                    qoder_daily[day] += total
-                    if total > 0 and day >= week_cut:
+                if day in daily:
+                    daily[day] += total
+                    if total > 0:
+                        costs_by_agent_daily[provider][day] = None
                         if qoder_cwd is None:
                             qoder_cwd = _claude_file_cwd(path)
                         if qoder_cwd:
-                            add_project_usage(qoder_cwd, total, 0.0, "qoder")
+                            add_project_usage(qoder_cwd, total, 0.0, provider, day)
                 if ep and ep >= hour_cut:
-                    hourly.setdefault(ep, {"c": 0, "x": 0, "q": 0})["q"] += total
+                    bucket = hourly.setdefault(ep, {"c": 0, "x": 0, "q": 0})
+                    key = "q" if provider == "qoder" else "qcn"
+                    bucket[key] = bucket.get(key, 0) + total
 
         if qoder_cache_dirty:
             try:
@@ -7426,9 +7522,13 @@ def api_usage():
             "claude_daily": claude_daily,
             "codex_daily": codex_daily,
             "qoder_daily": qoder_daily,
+            "qoder_cn_daily": qoder_cn_daily,
             "hourly": [{"ts": ep, **v} for ep, v in sorted(hourly.items())],
             "projects_7d": projects_all_7d[:6],
             "projects_all_7d": projects_all_7d,
+            "projects_all_30d": [dict(cwd=cwd, name=Path(cwd).name or cwd, **value)
+                                 for cwd, value in sorted(projects30.items(), key=lambda p: (-p[1]['tokens'], p[0]))],
+            "costs_by_agent_daily": costs_by_agent_daily,
             "cost_daily": {d: round(v, 2) for d, v in cost_daily.items()},
             "cost_7d": round(cost_7d + xcost_7d, 2),
             "cost_30d": round(cost_30d + xcost_30d, 2),
@@ -7575,14 +7675,32 @@ def api_data(body):
         return {"ok": True}
     if act == "export":
         u = api_usage()
+        if 'days' in body:
+            span = body.get('days')
+            usage_agents = (*AGENT_IDS, "qoder_cn")
+            agents = body.get('agents', list(usage_agents))
+            if type(span) is not int or span not in (7, 30) or not isinstance(agents, list) or any(a not in usage_agents for a in agents):
+                return {'ok': False, 'error': 'invalid range'}
+            selected = [a for a in usage_agents if a in agents]
+            out = Path.home() / 'Downloads' / f'agentdeck-usage-{span}d-{datetime.now().strftime("%Y%m%d-%H%M%S")}-{uuid.uuid4().hex[:12]}.csv'
+            rows = ['day,agent,tokens,api_cost_usd']
+            for d in u['days'][-span:]:
+                for a in selected:
+                    tokens = (sum(sum(v) for v in u['claude_daily'].get(d, {}).values()) if a == 'claude'
+                              else u.get(a + '_daily', {}).get(d, 0))
+                    cost = u.get('costs_by_agent_daily', {}).get(a, {}).get(d)
+                    rows.append(f"{d},{a},{tokens},{'' if cost is None else round(cost, 4)}")
+            _atomic_write_text(out, '\n'.join(rows) + '\n')
+            subprocess.run(['open', '-R', str(out)], timeout=10)
+            return {'ok': True, 'path': str(out), 'days': span}
         out = Path.home() / "Downloads" / \
             f"agentdeck-usage-{datetime.now().strftime('%Y%m%d')}.csv"
-        rows = ["day,claude_tokens,codex_tokens,qoder_tokens,api_cost_usd"]
+        rows = ["day,claude_tokens,codex_tokens,qoder_tokens,api_cost_usd,qoder_cn_tokens"]
         for d in u["days"]:
             ct = sum(sum(v) for v in (u["claude_daily"].get(d) or {}).values())
             rows.append(f"{d},{ct},{u['codex_daily'].get(d, 0)},"
                         f"{u['qoder_daily'].get(d, 0)},"
-                        f"{u['cost_daily'].get(d, 0)}")
+                        f"{u['cost_daily'].get(d, 0)},{u.get('qoder_cn_daily', {}).get(d, 0)}")
         _atomic_write_text(out, "\n".join(rows) + "\n")
         subprocess.run(["open", "-R", str(out)], timeout=10)   # Finder 中显示
         return {"ok": True, "path": str(out)}
@@ -7807,7 +7925,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         from urllib.parse import urlparse, parse_qs
         parsed = urlparse(self.path)
-        path, query = parsed.path, parse_qs(parsed.query)
+        path, query = parsed.path, parse_qs(parsed.query, keep_blank_values=True)
         if path.startswith("/api/") and not _local_http_host(self.headers):
             return self._send(403, {"error": "forbidden"})
         try:
@@ -7847,6 +7965,8 @@ class Handler(BaseHTTPRequestHandler):
                     tool=query.get("tool", ["all"])[0],
                     limit=query.get("limit", [None])[0],
                     cursor=query.get("cursor", [""])[0]))
+            elif path == "/api/projects":
+                self._send(200, api_projects(query))
             elif path == "/api/usage":
                 self._send(200, api_usage())
             elif path == "/api/session-performance":

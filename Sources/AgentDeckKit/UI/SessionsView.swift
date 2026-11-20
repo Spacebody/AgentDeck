@@ -14,6 +14,8 @@ struct SessionPreviewRequest: Equatable {
 
 struct SessionsView: View {
     let sessions: [SessionItem]
+    var active: [ActiveSession] = []
+    var onOpenActive: (ActiveSession) -> Void = { _ in }
     var scrollable: Bool = true
     var query: String = ""
     var filter: String = "all"
@@ -51,7 +53,8 @@ struct SessionsView: View {
     @FocusState private var searchFocused: Bool
     @FocusState private var customPageSizeFocused: Bool
 
-    init(sessions: [SessionItem], scrollable: Bool = true,
+    init(sessions: [SessionItem], active: [ActiveSession] = [],
+         onOpenActive: @escaping (ActiveSession) -> Void = { _ in }, scrollable: Bool = true,
          query: String = "", filter: String = "all", total: Int = 0,
          hasMore: Bool = false, page: Int = 1, pageCount: Int = 1,
          pageSize: Int = 20, loading: Bool = false,
@@ -69,6 +72,7 @@ struct SessionsView: View {
          onPageSize: @escaping (Int) -> Void = { _ in },
          initialExpanded: String? = nil, seededPreviews: [String: [PreviewMsg]] = [:]) {
         self.sessions = sessions; self.scrollable = scrollable
+        self.active = active; self.onOpenActive = onOpenActive
         self.query = query; self.filter = filter; self.total = total
         self.hasMore = hasMore; self.loading = loading
         self.page = page; self.pageCount = pageCount; self.pageSize = pageSize
@@ -90,6 +94,20 @@ struct SessionsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
             header
+            if !filteredActive.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    DashboardHeading(text: L("active.running", ["n": "\(filteredActive.count)"]))
+                    ForEach(Array(filteredActive.enumerated()), id: \.offset) { _, active in
+                        if let session = previewSessions.first(where: { $0.rowKey == active.indexedRowKey }) {
+                            sessionRow(session, onOpen: { onOpenActive(active) })
+                        } else {
+                            DashboardActiveList(sessions: [active], showsHeading: false, onOpen: onOpenActive)
+                        }
+                    }
+                }.padding(.vertical, 12)
+                Divider().opacity(0.4)
+            }
+            titleAndCount.padding(.top, 12)
             if sessions.isEmpty {
                 emptyState
                 if page > 1 { pagination }
@@ -98,16 +116,16 @@ struct SessionsView: View {
                 pagination
             }
         }
-        .onChange(of: sessions.map { "\($0.rowKey)|\($0.mtime)" }) { _ in
-            let current = Dictionary(uniqueKeysWithValues: sessions.map { ($0.rowKey, $0.mtime) })
+        .onChange(of: previewSessions.map { "\($0.rowKey)|\($0.mtime)" }) { _ in
+            let current = Dictionary(uniqueKeysWithValues: previewSessions.map { ($0.rowKey, $0.mtime) })
             previews = previews.filter { previewMtimes[$0.key] == current[$0.key] }
             previewMtimes = previewMtimes.filter { current[$0.key] == $0.value }
             previewOrder.removeAll { previews[$0] == nil }
             if let expandedKey, current[expandedKey] == nil { self.expandedKey = nil }
         }
-        .task(id: SessionPreviewRequest.expanded(expandedKey, in: sessions)) {
-            guard let request = SessionPreviewRequest.expanded(expandedKey, in: sessions),
-                  let session = sessions.first(where: { $0.rowKey == request.key }),
+        .task(id: SessionPreviewRequest.expanded(expandedKey, in: previewSessions)) {
+            guard let request = SessionPreviewRequest.expanded(expandedKey, in: previewSessions),
+                  let session = previewSessions.first(where: { $0.rowKey == request.key }),
                   previews[request.key] == nil || previewMtimes[request.key] != request.mtime
             else { return }
             let messages = await loadPreview(session)
@@ -127,17 +145,32 @@ struct SessionsView: View {
 
     private var rows: some View {
         LazyVStack(spacing: 2) {
-            ForEach(sessions, id: \.rowKey) { s in
-                SessionRow(
-                    session: s,
-                    expanded: expandedKey == s.rowKey,
-                    preview: previewMtimes[s.rowKey] == s.mtime ? previews[s.rowKey] : nil,
-                    onToggle: { toggle(s) },
-                    onResume: { onResume(s) }, onCopy: { onCopy(s) }, onPin: { onPin(s) },
-                    onRelocate: { onRelocate(s) }, onForgetPath: { onForgetPath(s) })
+            ForEach(sessions.filter { session in !filteredActive.contains { $0.indexedRowKey == session.rowKey } }, id: \.rowKey) { s in
+                sessionRow(s)
             }
             if indexing { statusRow("session.indexing", spinning: true) }
             if loadFailed { statusRow("session.loadFailed", spinning: false) }
+        }
+    }
+
+    private var previewSessions: [SessionItem] {
+        var keys = Set(sessions.map(\.rowKey))
+        return sessions + active.compactMap(\.indexedSession).filter { keys.insert($0.rowKey).inserted }
+    }
+
+    private func sessionRow(_ s: SessionItem, onOpen: (() -> Void)? = nil) -> some View {
+        SessionRow(session: s, expanded: expandedKey == s.rowKey,
+                   preview: previewMtimes[s.rowKey] == s.mtime ? previews[s.rowKey] : nil,
+                   onToggle: { toggle(s) }, onResume: { onResume(s) }, onCopy: { onCopy(s) }, onPin: { onPin(s) },
+                   onRelocate: { onRelocate(s) }, onForgetPath: { onForgetPath(s) }, onOpen: onOpen)
+    }
+
+    private var filteredActive: [ActiveSession] {
+        let terms = query.split(whereSeparator: \.isWhitespace).map(String.init)
+        return active.filter { item in
+            guard filter == "all" || filter == item.tool else { return false }
+            let text = [item.project ?? "", item.cwd ?? "", item.title ?? ""].joined(separator: " ")
+            return terms.allSatisfy { text.localizedStandardContains($0) }
         }
     }
 
@@ -162,49 +195,23 @@ struct SessionsView: View {
 
     private var pagination: some View {
         HStack(spacing: 8) {
-            Menu {
-                ForEach(Array(Set([10, 20, 30, 50, pageSize])).sorted(), id: \.self) { size in
-                    Button {
-                        onPageSize(size)
-                    } label: {
-                        if size == pageSize {
-                            Label("\(size)", systemImage: "checkmark")
-                        } else {
-                            Text("\(size)")
-                        }
-                    }
-                }
-                Divider()
-                Button {
+            let sizes = Array(Set([10, 20, 30, 50, pageSize])).sorted()
+            PanelChoiceMenu(title: L("session.perPage", ["n": "\(pageSize)"]), selected: String(pageSize),
+                            choices: sizes.map { .init(id: String($0), title: String($0)) }
+                                + [.init(id: "custom", title: L("session.customPageSize"))]) { id in
+                if let size = Int(id) { onPageSize(size) }
+                else {
                     customPageSizeText = String(pageSize)
                     DispatchQueue.main.async { showingCustomPageSize = true }
-                } label: {
-                    Label(L("session.customPageSize"), systemImage: "number")
                 }
-            } label: {
-                HStack(spacing: 4) {
-                    Text(L("session.perPage", ["n": "\(pageSize)"]))
-                    Image(systemName: "chevron.up.chevron.down")
-                        .font(.system(size: 7.5, weight: .semibold))
-                }
-                .font(.system(size: 9.5, weight: .medium))
-                .foregroundStyle(Theme.ink2)
-                .padding(.horizontal, 9)
-                .frame(height: 26)
-                .background(Capsule().fill(Color.white.opacity(0.055)))
-                .overlay(Capsule().strokeBorder(Theme.edge, lineWidth: 1))
             }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
-            .popover(isPresented: $showingCustomPageSize, arrowEdge: .bottom) {
-                customPageSizeEditor
-            }
+            .background(Color.clear.popover(isPresented: $showingCustomPageSize) { customPageSizeEditor })
 
             Spacer(minLength: 4)
 
             Text(L("session.pageOf", ["page": "\(page)", "pages": "\(pageCount)"]))
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(Theme.ink3)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(Theme.ink2)
                 .monospacedDigit()
                 .fixedSize()
 
@@ -279,7 +286,7 @@ struct SessionsView: View {
     ) -> some View {
         Button(action: action) {
             Image(systemName: system)
-                .font(.system(size: 9, weight: .semibold))
+                .font(.system(size: 10.5, weight: .semibold))
                 .foregroundStyle(disabled ? Theme.ink3.opacity(0.45) : Theme.ink2)
                 .frame(width: 26, height: 26)
                 .background(Circle().fill(Color.white.opacity(disabled ? 0.025 : 0.055)))
@@ -297,14 +304,14 @@ struct SessionsView: View {
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            HStack(spacing: 8) {
-                titleAndCount
-                Spacer(minLength: 6)
-                loadingIndicator
-                filterChips
-            }
+        HStack(spacing: 10) {
             searchField
+            loadingIndicator
+            let agents = ["all", "claude", "codex", "qoder"]
+            PanelChoiceMenu(title: filter == "all" ? L("session.all") : filter.capitalized,
+                            selected: filter, choices: agents.map {
+                .init(id: $0, title: $0 == "all" ? L("session.all") : $0.capitalized)
+            }, onSelect: onFilter)
         }
     }
 
@@ -314,7 +321,7 @@ struct SessionsView: View {
                 .foregroundStyle(Theme.ink).lineLimit(1)
                 .fixedSize(horizontal: true, vertical: false)
             if total > 0 {
-                Text("\(total)").font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.ink3)
+                Text("\(total)").font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.ink2)
                     .monospacedDigit()
             }
         }
@@ -341,6 +348,7 @@ struct SessionsView: View {
             TextField(L("session.search"), text: Binding(get: { query }, set: onSearch))
                 .textFieldStyle(.plain).font(.system(size: 12)).foregroundStyle(Theme.ink)
                 .focused($searchFocused)
+                .onExitCommand { searchFocused = false }
                 .frame(maxWidth: .infinity)
             if !query.isEmpty {
                 Button { onSearch("") } label: {
@@ -355,8 +363,9 @@ struct SessionsView: View {
         }
         .padding(.horizontal, 13)
         .frame(maxWidth: .infinity, minHeight: 40, maxHeight: 40)
-        .background(Capsule().fill(Color.white.opacity(searchFocused ? 0.09 : 0.06)))
-        .overlay(Capsule().strokeBorder(searchFocused ? Theme.edgeHi : Theme.edge, lineWidth: 1))
+        .background(PanelInputRegion(.focusedSearch, active: searchFocused) { searchFocused = false })
+        .background(RoundedRectangle(cornerRadius: 6).fill(Color.white.opacity(searchFocused ? 0.09 : 0.04)))
+        .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(searchFocused ? DashboardStyle.accent : Theme.edge, lineWidth: 1))
         .animation(.easeOut(duration: 0.16), value: searchFocused)
     }
 }
@@ -372,6 +381,7 @@ private struct SessionRow: View {
     var onPin: () -> Void = {}
     var onRelocate: () -> Void = {}
     var onForgetPath: () -> Void = {}
+    var onOpen: (() -> Void)? = nil
 
     @State private var hovering = false
     private var brand: Brand { Brand(rawValue: session.tool) ?? .claude }
@@ -407,6 +417,9 @@ private struct SessionRow: View {
                   : (hovering ? Color.white.opacity(0.06) : .clear)))
         .onHover { hovering = $0 }
         .contextMenu {
+            if let onOpen { Button(L("v3.open"), action: onOpen) }
+            Button(L("session.resume"), action: onResume)
+            if session.source != "qoder_app" { Button(L("session.copyCmd"), action: onCopy) }
             if session.cwd?.isEmpty == false {
                 Button(action: onRelocate) {
                     Label(L("session.relocate"), systemImage: "folder.badge.gearshape")
@@ -432,8 +445,8 @@ private struct SessionRow: View {
                     .font(.system(size: 11))
                     .foregroundStyle(session.pinned == true ? Color(hex: 0xffd479) : Theme.ink2)
             }.buttonStyle(.plain)
-            Button(action: onResume) {
-                Text(L(session.source == "qoder_app" ? "session.open" : "session.resume"))
+            Button(action: onOpen ?? onResume) {
+                Text(L(onOpen != nil ? "v3.open" : session.source == "qoder_app" ? "session.open" : "session.resume"))
                     .font(.system(size: 9.5, weight: .semibold)).foregroundStyle(Theme.ink)
                     .padding(.horizontal, 11).frame(height: 25)
                     .background(Capsule().fill(Color.white.opacity(0.10)))

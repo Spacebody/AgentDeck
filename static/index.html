@@ -210,7 +210,9 @@ body.wgt #view-overview { display: flex !important; overflow: hidden; }
 body.wgt .card { border-radius: 16px; }
 body.wgt #quota { gap: 7px; cursor: pointer; }
 body.wgt .qcard { padding: 10px 11px 8px; }
-body.wgt .qfoot { display: none; }
+body.wgt .qfoot { font-size: 9px; }
+body.wgt #done, body.wgt #active .arow:nth-of-type(n+4),
+body.wgt.dense-quotas #active .arow:nth-of-type(n+3) { display: none; }
 body.wgt #active { padding: 8px 11px 6px; cursor: pointer; }
 /* 小组件卡片窄：隐藏重置进度条防溢出，qsub 缩字号防截断 */
 body.wgt .qreset { display: none; }
@@ -397,7 +399,7 @@ body.wgt #aurora { opacity: .14; }
 #done .dtitle { color: var(--ink); flex: 1; min-width: 0; overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
 #done .dwhen { flex: none; color: var(--ink-3); }
-body.wgt #today, body.wgt #done { display: none !important; }
+body.wgt #done { display: none !important; }
 /* ⓘ 口径说明入口 + 玻璃弹层 */
 .infobtn { margin-left: auto; flex: none; width: 24px; height: 24px; border-radius: 50%;
   border: none; padding: 0; display: grid; place-items: center; cursor: pointer;
@@ -753,6 +755,33 @@ body.wgt #today, body.wgt #done { display: none !important; }
   pointer-events: none; box-shadow: 0 10px 30px rgba(0,0,0,.5);
 }
 #toast.show { opacity: 1; transform: translate(-50%, 0); }
+/* Local browser client shares the panel's graphite surface and section rhythm. */
+body:not(.native) { background: #151819; }
+#aurora, body::after, .qcard::before { display: none; }
+.logo em { background: none; -webkit-text-fill-color: currentColor; }
+#app .card, .setcard, #tabbar {
+  background: transparent; box-shadow: none; border: 0; border-radius: 0;
+  backdrop-filter: none; -webkit-backdrop-filter: none;
+}
+#app .card, .setcard { border-bottom: 1px solid var(--edge); }
+header .iconbtn { background: transparent; border-color: transparent; border-radius: 6px; }
+header .iconbtn:hover { background: var(--glass-hi); }
+#tabbar { gap: 20px; border-bottom: 1px solid var(--edge); }
+#tabbar .tab { flex: none; padding: 8px 2px; border-radius: 0; }
+#tabbar .tab.on { box-shadow: inset 0 -2px #88dcc9; background: transparent; }
+.ipcard { padding: 16px; border-radius: 12px; background: #202526; }
+#settings { background: #181c1d; }
+.setrow { flex-wrap: wrap; row-gap: 8px; }
+#app :focus-visible { outline: 2px solid #88dcc9; outline-offset: 2px; }
+.widget-quotas { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 14px; }
+.qcard .wrow { margin: 8px 0; }
+.qcard .wrow small { color: var(--ink-3); }
+.qcard .wbar i:not(.warn):not(.danger) { background: #88dcc9; }
+.setsec { text-transform: none; letter-spacing: 0; }
+@media (max-width: 420px) {
+  #app { padding: 10px; }
+  .setrow .setlabel { flex: 1 1 10em; }
+}
 </style>
 </head>
 <body>
@@ -1325,13 +1354,8 @@ function quotaCardInner(name, data, gradId, accountLabel) {
       <div class="qerr">${msg}<br>${esc((data && data.error || '').slice(0,80))}</div>`;
   }
   const ws = data.windows || [];
-  const wgt = document.body.classList.contains('wgt');   // 小组件窄卡精简
-  const mainIndex = primaryWindowIndex(ws);
-  const main = mainIndex >= 0 ? ws[mainIndex] : {used_percent: 0};
-  const rest = ws.filter((w, i) => i !== mainIndex)
-    .filter(w => wgt ? w.used_percent > 0 : (w.used_percent > 0 || w.resets_at));
-  const g = grade(main.used_percent);
-  const mainGrad = g === 'danger' ? 'grad-danger' : g === 'warn' ? 'grad-warn' : gradId;
+  const primary = primaryWindowIndex(ws);
+  const ordered = primary < 0 ? ws : [ws[primary], ...ws.filter((_, i) => i !== primary)];
 
   let foot = '';
   if (data.stale) {
@@ -1346,37 +1370,17 @@ function quotaCardInner(name, data, gradId, accountLabel) {
     }
   }
 
-  // 重置时间进度：优先按结构化 id 取窗口长度，label 仅作兜底（避免文案耦合）
-  const winLen = winSeconds(main.id || '')
-    || {'5 小时窗口': 5 * 3600, '周限额': 7 * 86400}[main.label];
-  let resetBar = '';
-  if (winLen && main.resets_at) {
-    const reset = typeof main.resets_at === 'number'
-      ? main.resets_at * 1000 : Date.parse(main.resets_at);
-    if (Number.isFinite(reset)) {
-      const elapsed = Math.min(1, Math.max(0, 1 - (reset - Date.now()) / 1000 / winLen));
-      resetBar = `<span class="qreset"><i style="width:${(elapsed * 100).toFixed(1)}%"></i></span>`;
-    }
-  }
-  return `
-    <div class="qhead"><span class="qbadge ${tool}">${icon}</span>
-      <span class="qname">${name}</span>${acctTag}
-      <span class="qsub">${esc(winLabel(main))}<br>${cd(main.resets_at)}${resetBar}</span></div>
-    <div class="qbody">
-      ${ringSvg(main.used_percent, mainGrad)}
-      <div class="qmeta">
-        ${rest.length ? rest.map(w => {
-          const wcd = cd(w.resets_at, true);   // 副窗口空间小，cd 用紧凑版
-          return `
-          <div class="wrow">
-            <div class="wlabel"><span><i>${esc(winLabel(w))}</i>${wcd ? `<em>${wcd}</em>` : ''}</span><b>${w.used_percent}%</b></div>
-            <div class="wbar"><i class="${grade(w.used_percent)}" data-w="${Math.min(w.used_percent,100)}"></i></div>
-          </div>`;
-        }).join('')
-        : `<div class="wrow"><div class="wlabel"><span style="color:var(--ink-3)">${t('quota.noOther')}</span></div></div>`}
-      </div>
-    </div>
-    ${foot ? `<div class="qfoot"><span>${foot}</span></div>` : ''}`;
+  const rows = ordered.map(w => {
+    const n = w.used_percent;
+    const valid = typeof n === 'number' && Number.isFinite(n);
+    return `<div class="wrow"><div class="wlabel"><span>${esc(winLabel(w))}</span>
+      <b>${valid ? n + '%' : '—'}</b></div>
+      <div class="wbar"><i class="${valid ? grade(n) : ''}" data-w="${valid ? Math.max(0, Math.min(100,n)) : 0}"></i></div>
+      <small>${cd(w.resets_at, true)}</small></div>`;
+  }).join('');
+  return `<div class="qhead"><span class="qbadge ${esc(tool)}">${icon}</span><span class="qname">${esc(name)}</span>${acctTag}</div>
+    ${rows || '<div class="qerr">—</div>'}
+    ${foot ? `<div class="qfoot">${foot}</div>` : ''}`;
 }
 
 function animateQuota(el) {
@@ -1455,9 +1459,16 @@ function renderQuotaFlat(el, data) {
     }));
   });
   clearTimeout(_quotaFlatTimer);
+  document.body.classList.toggle('dense-quotas', pages.slice(0, 2).some(p => (p.account.windows || []).length >= 4));
   if (!pages.length) {
     el.className = 'card qcard';
     el.innerHTML = `<div class="qerr">${t('usage.noVisibleAgents')}</div>`;
+    return;
+  }
+  if (document.body.classList.contains('wgt')) {
+    el.className = 'card qcard widget-quotas';
+    el.innerHTML = pages.slice(0, 2).map(p => `<div>${quotaCardInner(p.name, p.account, '', p.account.account || '')}</div>`).join('');
+    animateQuota(el);
     return;
   }
   let index = Math.max(0, pages.findIndex(p => p.id === _quotaFlatID));
@@ -1939,7 +1950,9 @@ const _IP_ROW = (term, text) =>
   `<div class="iprow"><span class="ipterm">${term}</span><span>${text}</span></div>`;
 const _IP_NOTE = () => `<div class="ipnote">${t('info.note')}</div>`;
 const _IP_PRICE = () => _IP_ROW(t('info.priceTerm'), t('info.priceText'));
+let infoOpener;
 function showInfoPop(kind) {
+  infoOpener = document.activeElement;
   let html;
   if (kind === 'today') {
     const fams = Object.entries(_todayFams).filter(([, v]) => v > 0)
@@ -1960,10 +1973,21 @@ function showInfoPop(kind) {
   }
   $('#ipbody').innerHTML = html + _IP_NOTE();
   $('#infopop').classList.add('show');
+  $('#infopop .ipclose').focus();
+}
+function dismissInfo() {
+  $('#infopop').classList.remove('show');
+  if (infoOpener?.isConnected) infoOpener.focus();
+  else $('#today .infobtn')?.focus();
 }
 $('#infopop').addEventListener('click', e => {
   if (!e.target.closest('.ipcard') || e.target.closest('.ipclose'))
-    $('#infopop').classList.remove('show');
+    dismissInfo();
+});
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && $('#infopop').classList.contains('show')) {
+    e.preventDefault(); dismissInfo();
+  }
 });
 $('#usageinfo').onclick = () => showInfoPop('usage');
 
@@ -2126,7 +2150,7 @@ const SET_SCHEMA = [
    opts: [300, 600, 1800, 3600], fmt: v => t('set.minUnit', {n: v / 60}), custom: [300, 21600]},
   {key: 'quota_auto_rotate', label: 'set.quotaAutoRotate', hint: 'set.quotaAutoRotateHint', type: 'toggle'},
   {key: 'quota_rotate_secs', label: 'set.quotaRotateSecs', hint: 'set.quotaRotateSecsHint', type: 'chips',
-   opts: [4, 6, 8, 10], fmt: v => v + 's', custom: [4, 10]},
+   opts: [4, 6, 8, 10], fmt: v => v + 's'},
   {sec: 'set.secMenubar'},
   {key: 'menubar_value_dim', label: 'set.mbValueDim', hint: 'set.mbValueDimHint', type: 'select',
    opts: ['shortest', 'weekly', 'max'],
@@ -2254,11 +2278,10 @@ function renderSettings() {
       : it.type === 'select'
       ? `<select class="setselect" data-k="${it.key}">${it.opts.map(o => `
           <option value="${o}" ${String(o) === String(v) ? 'selected' : ''}>${optName(it, o)}</option>`).join('')}</select>`
-      : `<div class="setchips" data-key="${it.key}">${it.opts.map(o => `
-          <button type="button" class="chip ${String(o) === String(v) ? 'on' : ''}" data-k="${it.key}"
-            data-val="${o}">${it.names ? it.names[o] : it.fmt ? it.fmt(o) : o}</button>`).join('')}
-          ${isCustomVal ? `<button type="button" class="chip on" data-k="${it.key}" data-val="${v}">${it.fmt ? it.fmt(v) : v}</button>` : ''}
-          ${it.custom ? `<button type="button" class="chip edit" data-edit="${it.key}" data-min="${it.custom[0]}" data-max="${it.custom[1]}" title="${t('set.custom')}">✎</button>` : ''}</div>`;
+      : `<div class="setchips"><select class="setselect" data-preset="${it.key}" aria-label="${t(it.label)}">
+          ${(isCustomVal ? [...it.opts, v] : it.opts).map(o => `<option value="${Number(o)}" ${String(o) === String(v) ? 'selected' : ''}>${it.names ? it.names[o] : it.fmt ? it.fmt(o) : Number(o)}</option>`).join('')}
+          ${it.custom ? `<option value="custom">${t('set.custom')}</option>` : ''}</select>
+          ${it.custom ? `<button hidden type="button" class="chip edit" data-edit="${it.key}" data-min="${it.custom[0]}" data-max="${it.custom[1]}"></button>` : ''}</div>`;
     html += `<div class="setrow"><div class="setlabel">${t(it.label)}
       ${it.hint ? `<small>${t(it.hint)}</small>` : ''}</div>${ctrl}</div>`;
   }
@@ -2367,7 +2390,9 @@ function applySettings(key) {
     bridge.postMessage('sync');
   if (all || key === 'refresh_interval') {
     clearInterval(pollTimer);
-    pollTimer = setInterval(() => refreshAll(false), settings.refresh_interval * 1000);
+    const seconds = Number(settings.refresh_interval);
+    pollTimer = setInterval(() => refreshAll(false),
+      (Number.isFinite(seconds) && seconds > 0 ? Math.max(5, seconds) : 30) * 1000);
   }
 }
 
@@ -2438,7 +2463,7 @@ $('#setbody').addEventListener('click', e => {
     inp.focus(); inp.select();
     const commit = () => {
       const n = Math.round(+inp.value);
-      if (Number.isFinite(n) && inp.value !== '') saveSetting(key, n);
+      if (Number.isFinite(n) && inp.value !== '') saveSetting(key, Math.min(+inp.max, Math.max(+inp.min, n)));
       else renderSettings();
     };
     inp.onkeydown = ev => {
@@ -2503,7 +2528,10 @@ $('#setbody').addEventListener('click', e => {
 });
 $('#setbody').addEventListener('change', e => {
   const sel = e.target.closest('select.setselect');
-  if (sel) saveSetting(sel.dataset.k, sel.value);
+  if (sel?.dataset.preset) {
+    if (sel.value === 'custom') sel.parentElement.querySelector('[data-edit]').click();
+    else saveSetting(sel.dataset.preset, Number(sel.value));
+  } else if (sel) saveSetting(sel.dataset.k, sel.value);
   const col = e.target.closest('input[type="color"][data-color]');
   if (col) {
     settings[col.dataset.color] = col.value;   // 乐观即时上色

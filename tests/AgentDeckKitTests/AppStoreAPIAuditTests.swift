@@ -64,6 +64,42 @@ private final class AuditHeldRequest {
 }
 
 final class AppStoreAPIAuditTests: XCTestCase {
+    @MainActor func testProjectsDiscardHiddenScopeEvenWhenRefreshFails() async {
+        let client = api { request in
+            let tool = URLComponents(url: request.request.url!, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "tool" }?.value
+            if tool == "claude" {
+                request.respond(#"{"projects":[{"cwd":"/work/secret","name":"secret","mtime":1,"count":1,"active":[]}],"indexing":false}"#)
+            } else { request.respond("{}", status: 500) }
+        }
+        let store = ProjectStore(api: client)
+        await store.refresh(agents: ["claude"])
+        XCTAssertEqual(store.projects.count, 1)
+        await store.refresh(agents: ["codex"])
+        XCTAssertTrue(store.projects.isEmpty)
+        XCTAssertTrue(store.failed)
+        XCTAssertFalse(store.loading)
+    }
+
+    @MainActor func testProjectHistoryRefreshPreservesPageAndReconcilesStaleCursor() async {
+        let client = api { request in
+            let cursor = URLComponents(url: request.request.url!, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "cursor" }?.value
+            if cursor == "next" {
+                request.respond(#"{"sessions":[],"total":30,"has_more":false,"cursor_stale":true}"#)
+            } else {
+                request.respond(#"{"sessions":[],"total":60,"has_more":true,"next_cursor":"next"}"#)
+            }
+        }
+        let store = ProjectSessionsStore(api: client)
+        await store.load(cwd: "/work", agents: ["codex"])
+        XCTAssertTrue(store.hasMore)
+        await store.load(cwd: "/work", agents: ["codex"], direction: 1)
+        XCTAssertEqual(store.page, 1)
+        XCTAssertFalse(store.hasMore)
+        await store.load(cwd: "/work", agents: ["codex"], refreshCurrent: true)
+        XCTAssertEqual(store.total, 60)
+        XCTAssertFalse(store.loading)
+    }
+
     @MainActor func testPerformanceVisibilityAndDecode() async throws {
         let called = expectation(description: "Performance requested")
         let client = api { request in

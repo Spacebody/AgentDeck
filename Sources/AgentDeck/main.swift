@@ -125,35 +125,25 @@ final class CmdDragView: NSView {
     }
 }
 
-/// 顶亮底暗的渐变描边（rim light）：系统桌面小组件的边缘语言——
-/// 顶部受光更亮、向下渐隐，比均匀白边更有体积感。点击穿透，不挡交互
-final class RimView: NSView {
-    var radius: CGFloat = 28
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
-    override func draw(_ dirtyRect: NSRect) {
-        guard let ctx = NSGraphicsContext.current?.cgContext else { return }
-        let r = bounds.insetBy(dx: 0.5, dy: 0.5)
-        let path = CGPath(roundedRect: r, cornerWidth: min(radius, r.width / 2),
-                          cornerHeight: min(radius, r.height / 2), transform: nil)
-        ctx.addPath(path.copy(strokingWithWidth: 1, lineCap: .round,
-                              lineJoin: .round, miterLimit: 10))
-        ctx.clip()
-        let colors = [NSColor.white.withAlphaComponent(0.04).cgColor,   // 底
-                      NSColor.white.withAlphaComponent(0.10).cgColor,
-                      NSColor.white.withAlphaComponent(0.34).cgColor]   // 顶
-        guard let grad = CGGradient(colorsSpace: nil, colors: colors as CFArray,
-                                    locations: [0, 0.55, 1]) else { return }
-        ctx.drawLinearGradient(grad,
-                               start: CGPoint(x: bounds.midX, y: 0),
-                               end: CGPoint(x: bounds.midX, y: bounds.height),
-                               options: [])
-    }
-}
 
 /// 边缘缩放光标提示：borderless 窗口没有系统光标反馈，用户不知道可拉伸。
 /// hitTest 穿透不拦事件；NSTrackingArea 按几何触发，照常收 mouseMoved
 final class EdgeCursorView: NSView {
     var allowTop = true   // 小组件顶部是拖动把手，不提示缩放
+    private var appliedCursor: NSCursor?
+
+    private func releaseEdgeCursor() {
+        if let appliedCursor, NSCursor.current == appliedCursor {
+            NSCursor.arrow.set()
+        }
+        appliedCursor = nil
+    }
+
+    override func mouseExited(with event: NSEvent) { releaseEdgeCursor() }
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if newWindow == nil { releaseEdgeCursor() }
+        super.viewWillMove(toWindow: newWindow)
+    }
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
@@ -168,7 +158,11 @@ final class EdgeCursorView: NSView {
         let m: CGFloat = 7
         let l = p.x < m, r = p.x > bounds.width - m
         let b = p.y < m, t = allowTop && p.y > bounds.height - m
-        guard l || r || b || t else { return }   // 非边带不干预，光标交还内容视图
+        guard bounds.contains(p), l || r || b || t else {
+            releaseEdgeCursor()
+            return
+        }
+        let cursor: NSCursor
         // NSCursor.FrameResizePosition 是 macOS 15+ 类型，整段引用须收进可用性守卫内，
         // 否则部署目标 13.0 编译报错（14.4.1 等旧系统支持的前提）
         if #available(macOS 15.0, *) {
@@ -177,10 +171,12 @@ final class EdgeCursorView: NSView {
             else if l && t { pos = .topLeft } else if r && t { pos = .topRight }
             else if l { pos = .left } else if r { pos = .right }
             else if b { pos = .bottom } else { pos = .top }
-            NSCursor.frameResize(position: pos, directions: .all).set()
+            cursor = NSCursor.frameResize(position: pos, directions: .all)
         } else {
-            if l || r { NSCursor.resizeLeftRight.set() } else { NSCursor.resizeUpDown.set() }
+            cursor = l || r ? .resizeLeftRight : .resizeUpDown
         }
+        cursor.set()
+        appliedCursor = cursor
     }
 }
 
@@ -191,12 +187,6 @@ func addEdgeCursor(to view: NSView, allowTop: Bool = true) {
     view.addSubview(edge, positioned: .above, relativeTo: nil)
 }
 
-func addRim(to view: NSView, radius: CGFloat) {
-    let rim = RimView(frame: view.bounds)
-    rim.radius = radius
-    rim.autoresizingMask = [.width, .height]
-    view.addSubview(rim, positioned: .above, relativeTo: nil)
-}
 
 /// behindWindow 模糊的圆角必须用 maskImage 裁，layer.cornerRadius 裁不到材质本体。
 /// 用 CALayer cornerCurve=.continuous 渲染连续曲率角（squircle）——
@@ -398,6 +388,7 @@ final class IslandController {
     }
 
     private func brandColor(for tool: String) -> NSColor {
+        if let custom = customAgentInk(tool) { return custom }
         switch tool.lowercased() {
         case "codex": return NSColor(calibratedRed: 0.55, green: 0.91, blue: 0.89, alpha: 1)
         case "qoder": return NSColor(calibratedRed: 0.65, green: 0.55, blue: 0.98, alpha: 1)
@@ -419,14 +410,14 @@ final class IslandController {
         let head = NSTextField(labelWithString: headText)
         head.font = .systemFont(ofSize: 12.5, weight: .semibold)
         let accent = quotaAlertColor(e.level)
-        head.textColor = isAlert ? accent : .labelColor
+        head.textColor = isAlert ? accent : NSColor(srgbRed: 0.61, green: 0.89, blue: 0.80, alpha: 1)
         let sub = NSTextField(labelWithString: isAlert ? e.title
                                                        : (e.title.isEmpty ? L("island.taskDone") : e.title))
         sub.font = .systemFont(ofSize: 10.5)
         sub.textColor = .secondaryLabelColor
         sub.lineBreakMode = .byTruncatingTail
         head.sizeToFit(); sub.sizeToFit()
-        let textW = min(max(head.frame.width, sub.frame.width), 250)
+        let textW = min(max(160, max(head.frame.width, sub.frame.width)), 250)
         let W: CGFloat = 16 + 26 + 10 + textW + 18
 
         // 玻璃胶囊
@@ -439,12 +430,7 @@ final class IslandController {
         effect.layer?.cornerRadius = H / 2
         effect.layer?.cornerCurve = .continuous
         effect.layer?.masksToBounds = true
-        effect.layer?.borderWidth = 1
-        effect.layer?.borderColor = (isAlert ? accent.withAlphaComponent(0.42)
-                                             : NSColor.white.withAlphaComponent(0.15)).cgColor
-        if isAlert {
-            effect.layer?.backgroundColor = accent.withAlphaComponent(0.08).cgColor
-        }
+        effect.layer?.backgroundColor = NSColor(srgbRed: 0.06, green: 0.075, blue: 0.08, alpha: 0.94).cgColor
 
         let iconView = NSImageView(frame: NSRect(x: 14, y: (H - 26) / 2, width: 26, height: 26))
         iconView.image = brandIcon(for: e.tool)
@@ -562,6 +548,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 }
             })
         }
+        panel?.minSize = NSSize(width: kPanelW * s, height: 200)
         if let p = panel, p.isVisible {          // 面板：锚定顶边中心重排
             let w = savedPanelW() * s
             let h = savedPanelH() * s
@@ -600,7 +587,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     /// 恢复用的面板基准尺寸（未缩放）。自动测高可能在数据尚未加载时得到很小的值，
     /// 因此已保存高度只用于记住更高的内容，不能把下次打开压到默认高度以下。
-    func savedPanelW() -> CGFloat { let v = UserDefaults.standard.double(forKey: "panelW"); return v > 0 ? CGFloat(v) : kPanelW }
+    func savedPanelW() -> CGFloat { let v = UserDefaults.standard.double(forKey: "panelW"); return v.isFinite ? max(kPanelW, CGFloat(v)) : kPanelW }
     func savedPanelH() -> CGFloat {
         let v = CGFloat(UserDefaults.standard.double(forKey: "panelH"))
         return max(kPanelH, v)
@@ -620,7 +607,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var statusItem: NSStatusItem!
     var panel: KeyPanel?
     var clickMonitor: Any?
-    var keyMonitor: Any?
     // 单一数据 store：面板与桌面小组件共用一份轮询（@MainActor）。
     let store = AppStore()
     var panelHost: HostController?
@@ -916,7 +902,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         rotateTimer?.invalidate()
         menubarAnimationTimer?.invalidate()
         if let m = clickMonitor { NSEvent.removeMonitor(m) }
-        if let m = keyMonitor { NSEvent.removeMonitor(m) }
         if let backend, backend.isRunning { backend.terminate() }
     }
 
@@ -982,12 +967,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// items 为空 → 仅显示 AgentDeck 仪表图标
     func composedIcon(items: [MBItem]) -> NSImage? {
         let barH: CGFloat = 22, gap: CGFloat = 3, groupGap: CGFloat = 8
-        let anyAlert = items.contains { $0.alert != nil }
+        let usesColor = items.contains { $0.alert != nil }
         let isDark = statusItem.button?.effectiveAppearance
             .bestMatch(from: [.darkAqua, .vibrantDark, .aqua, .vibrantLight])
             .map { $0 == .darkAqua || $0 == .vibrantDark } ?? true
         // 模板模式只取 alpha，黑色即可；混色模式常规段需匹配菜单栏明暗
-        let normalInk: NSColor = anyAlert ? (isDark ? .white : .black) : .black
+        let normalInk: NSColor = usesColor ? (isDark ? .white : .black) : .black
         var parts: [(NSImage, NSAttributedString)] = []
         for it in items {
             guard let g = agentGlyph(it.tool) else { continue }
@@ -1024,7 +1009,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
             return true
         }
-        img.isTemplate = !anyAlert
+        img.isTemplate = !usesColor
         return img
     }
 
@@ -1171,10 +1156,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                          backing: .buffered, defer: false)
         p.isFloatingPanel = true
         p.level = .popUpMenu
+        p.animationBehavior = .none
         p.backgroundColor = .clear
         p.isOpaque = false
         p.hasShadow = true
-        p.minSize = NSSize(width: 420, height: 200)   // 宽度下限 420；高度自适应内容，下限放小
+        p.minSize = NSSize(width: kPanelW * uiScale, height: 200)
         p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         p.appearance = NSAppearance(named: .darkAqua)
         p.delegate = self
@@ -1185,8 +1171,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         effect.blendingMode = .behindWindow
         effect.state = .active
         effect.wantsLayer = true
-        effect.maskImage = roundedMask(radius: 28)
-        effect.layer?.cornerRadius = 28
+        let shellRadius: CGFloat = 16
+        effect.maskImage = roundedMask(radius: shellRadius)
+        effect.layer?.cornerRadius = shellRadius
         effect.layer?.cornerCurve = .continuous
         effect.layer?.masksToBounds = true
         effect.autoresizingMask = [.width, .height]
@@ -1196,7 +1183,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         hv.frame = effect.bounds
         hv.autoresizingMask = [.width, .height]
         effect.addSubview(hv)
-        addRim(to: effect, radius: 28)   // 顶亮底暗渐变描边
         addEdgeCursor(to: effect)        // 边缘缩放光标提示
         p.contentView = effect
         return p
@@ -1233,9 +1219,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // 定位：状态栏图标正下方，水平钳制在屏幕内
         let x = min(max(bFrame.midX - w / 2, vis.minX + 8), vis.maxX - w - 8)
         let y = bFrame.minY - 6 - h
-        p.setFrame(NSRect(x: x, y: y, width: w, height: h), display: true)
-        p.makeKeyAndOrderFront(nil)
+        p.setFrame(NSRect(x: x, y: y, width: w, height: h), display: false)
+        p.contentView?.layoutSubtreeIfNeeded()
+        p.contentView?.displayIfNeeded()
         NSApp.activate(ignoringOtherApps: true)
+        p.makeKeyAndOrderFront(nil)
         button.highlight(true)
         // 内容(webview)异步渲染完成后重算窗口阴影，消除圆角外的矩形残角
         for delay in [0.15, 0.6, 1.5] {
@@ -1246,14 +1234,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         // transient 行为：点击面板外（其他 App 区域）或按 ESC 关闭
         if let m = clickMonitor { NSEvent.removeMonitor(m) }
-        if let m = keyMonitor { NSEvent.removeMonitor(m) }
         clickMonitor = NSEvent.addGlobalMonitorForEvents(
             matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
             self?.hidePanel()
-        }
-        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] ev in
-            if ev.keyCode == 53 { self?.hidePanel(); return nil }   // ESC
-            return ev
         }
     }
 
@@ -1274,7 +1257,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         statusItem.button?.highlight(false)
         if let m = clickMonitor { NSEvent.removeMonitor(m); clickMonitor = nil }
-        if let m = keyMonitor { NSEvent.removeMonitor(m); keyMonitor = nil }
     }
 
     // MARK: - 桌面小组件（驻留桌面层的玻璃小窗）
@@ -1319,8 +1301,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             effect.blendingMode = .behindWindow
             effect.state = .active
             effect.wantsLayer = true
-            effect.maskImage = roundedMask(radius: 28)
-            effect.layer?.cornerRadius = 28
+            let shellRadius: CGFloat = 14
+            effect.maskImage = roundedMask(radius: shellRadius)
+            effect.layer?.cornerRadius = shellRadius
             effect.layer?.cornerCurve = .continuous
             effect.layer?.masksToBounds = true
             effect.autoresizingMask = [.width, .height]
@@ -1330,7 +1313,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             wv.frame = effect.bounds
             wv.autoresizingMask = [.width, .height]
             effect.addSubview(wv)
-            addRim(to: effect, radius: 28)   // 顶亮底暗渐变描边
             // 顶部 28px 原生拖拽把手（盖在内容之上）
             let handle = DragHandle(frame: NSRect(x: 0, y: H - 28, width: W, height: 28))
             handle.autoresizingMask = [.width, .minYMargin]

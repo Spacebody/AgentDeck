@@ -29,22 +29,51 @@ struct WidgetView: View {
         let activeLimit = maxWindows >= 4 ? 1 : 2
         let activeRows = Array(active.prefix(activeLimit))
         return VStack(spacing: 7) {
+            if widgetPages.isEmpty {
+                Text(L(visible.isEmpty ? "usage.noVisibleAgents" : quota == nil ? "quota.loading" : "quota.noQuota"))
+                    .foregroundStyle(Theme.ink2).frame(maxWidth: .infinity, alignment: .leading)
+            }
             HStack(alignment: .top, spacing: 7) {
                 ForEach(widgetPages) { page in
-                    QuotaCardView(brand: page.brand, node: page.account,
-                                  accountLabel: page.account.account,
-                                  presentation: .widget)
+                    DashboardQuota(brand: page.brand, node: page.account, compact: true)
                         .frame(maxWidth: .infinity, alignment: .top)
                         .layoutPriority(1)
                 }
             }
-            if let today { TodayBar(summary: today) }
-            if showActive {
-                ActiveCard(sessions: activeRows, totalCount: active.count,
-                           onTap: onFocusActive)
+            if let today {
+                Divider()
+                HStack(alignment: .firstTextBaseline, spacing: 5) {
+                    Text(L("info.todayTerm")).foregroundStyle(Theme.ink2)
+                    Text(Fmt.tokens(today.totalTokens)).font(.system(size: 19, weight: .semibold))
+                    Text("tokens").foregroundStyle(Theme.ink3)
+                    Spacer(minLength: 2)
+                    Text(String(format: "≈ $%.2f", today.costUSD)).foregroundStyle(Theme.ink2)
+                }.font(.system(size: 11)).monospacedDigit()
+            }
+            if showActive && !activeRows.isEmpty {
+                HStack {
+                    Text(L("active.running", ["n": "\(active.count)"])).fontWeight(.semibold)
+                    Spacer()
+                }
+                ForEach(Array(activeRows.enumerated()), id: \.offset) { _, session in
+                    Button { onFocusActive(session) } label: {
+                        HStack {
+                            Text(session.project ?? session.cwd ?? session.tool)
+                                .lineLimit(1).truncationMode(.middle)
+                            Spacer(minLength: 4)
+                            SessionSpeedView(request: session.performanceRequest)
+                            if let status = session.status, ["busy", "idle"].contains(status) {
+                                SessionActivityLabel(status: status, tool: session.tool)
+                                    .environment(\.flatCard, true)
+                            }
+                            Image(systemName: "chevron.right").foregroundStyle(Theme.ink3)
+                        }.contentShape(Rectangle())
+                    }.buttonStyle(.plain)
+                }
             }
         }
-        .environment(\.flatCard, true)   // 小组件内卡片走扁平轻磨砂（原生小组件观感）
+        .font(.system(size: 12))
+        .foregroundStyle(Theme.ink)
         .contentShape(Rectangle())
         .onTapGesture(perform: onTapPanel)   // 点击小组件 → 打开主面板（body.wgt #quota/#active cursor:pointer）
         .animation(.easeInOut(duration: 0.18), value: showClaude)
@@ -61,8 +90,7 @@ struct WidgetChrome<Content: View>: View {
     @ViewBuilder var content: Content
     var body: some View {
         ZStack(alignment: .top) {
-            Theme.bg
-            AuroraBackground(opacity: 0.14)
+            DashboardStyle.background
             VStack(spacing: 0) {
                 Capsule().fill(Color.white.opacity(0.16)).frame(width: 28, height: 3.5).padding(.top, 7)
                 content.padding(EdgeInsets(top: 8, leading: 10, bottom: 8, trailing: 10))
@@ -70,7 +98,7 @@ struct WidgetChrome<Content: View>: View {
             }
         }
         .frame(width: width, height: height)
-        .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .preferredColorScheme(.dark)
     }
 }

@@ -16,6 +16,7 @@ struct SettingsView: View {
 
     @State private var editingKey: String?
     @State private var editText: String = ""
+    @FocusState private var numericFocus: String?
 
     // 把 schema 按 section 切成卡
     private struct Group { let title: String; let rows: [SetRow] }
@@ -30,7 +31,10 @@ struct SettingsView: View {
 
     var body: some View {
         SwiftUI.Group {
-            if scrollable { ScrollView { pageContent }.scrollIndicators(.hidden) }
+            if scrollable {
+                ScrollView { pageContent.background(PanelInputRegion(.scrollBody)) }
+                    .scrollIndicators(.hidden)
+            }
             else { pageContent }
         }
     }
@@ -47,17 +51,15 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 0) {
             // 标题由外壳 .sethead 提供（设置浮层顶部），此处直接从首个分区开始。
             ForEach(Array(groups.enumerated()), id: \.offset) { _, g in
-                Text(L(g.title).uppercased())
-                    .font(.system(size: 12, weight: .bold)).foregroundStyle(Theme.ink2)
-                    .tracking(1.2).padding(.top, 14).padding(.bottom, 7).padding(.leading, 4)
+                Text(L(g.title))
+                    .font(.system(size: 14, weight: .semibold)).foregroundStyle(Theme.ink)
+                    .padding(.top, 20).padding(.bottom, 7)
                 VStack(spacing: 0) {
-                    ForEach(Array(g.rows.enumerated()), id: \.offset) { idx, row in
+                    ForEach(Array(g.rows.enumerated()), id: \.offset) { _, row in
                         rowView(row)
-                        if idx < g.rows.count - 1 { Divider().overlay(Color.white.opacity(0.06)) }
                     }
                 }
-                .padding(.horizontal, 13)
-                .glassCard()
+                Rectangle().fill(Theme.ink.opacity(0.07)).frame(height: 1).padding(.top, 8)
             }
             Text("AgentDeck v\(version) · \(L("set.dataLocal"))")
                 .font(.rounded(9)).foregroundStyle(Theme.ink3)
@@ -71,11 +73,10 @@ struct SettingsView: View {
         case .section: EmptyView()
         case let .toggle(key, label, hint):
             setrow(label, hint) {
-                Toggle("", isOn: bool(key)).labelsHidden().toggleStyle(.switch).tint(Brand.claude.accent)
+                Toggle(L(label), isOn: bool(key)).labelsHidden().toggleStyle(.switch).controlSize(.small).tint(DashboardStyle.accent)
             }
         case let .chips(key, label, hint, opts, fmt, custom):
-            // 成排 chip 走整行块式（标签在上、chip 右对齐自动换行在下），避免被标签挤成「1 分 钟」竖排。
-            setrowBlock(label, hint) { chips(key: key, opts: opts, fmt: fmt, custom: custom) }
+            setrow(label, hint) { chips(key: key, opts: opts, fmt: fmt, custom: custom) }
         case let .select(key, label, hint, opts):
             // 恢复方式：auto + 已安装终端 + copy（对应 v1 /api/terminals 动态注入）。
             let effective = key == "terminal" && !terminals.isEmpty
@@ -133,70 +134,58 @@ struct SettingsView: View {
     }
 
     private func setrow<C: View>(_ label: String, _ hint: String?, @ViewBuilder control: () -> C) -> some View {
-        HStack(alignment: .center, spacing: 10) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text(L(label)).font(.system(size: 13)).foregroundStyle(Theme.ink)
-                if let hint { Text(L(hint)).font(.system(size: 10.5)).foregroundStyle(Theme.ink3) }
-            }
-            Spacer(minLength: 8)
-            control()
+        let title = VStack(alignment: .leading, spacing: 3) {
+            Text(L(label)).font(.system(size: 13)).foregroundStyle(Theme.ink)
+            if let hint { Text(L(hint)).font(.system(size: 10.5)).foregroundStyle(Theme.ink3) }
         }
-        .padding(.vertical, 10)
+        let controls = control()
+        return ViewThatFits(in: .horizontal) {
+            HStack(spacing: 10) {
+                title.frame(minWidth: 150, maxWidth: .infinity, alignment: .leading)
+                controls.fixedSize()
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                title
+                controls.frame(maxWidth: .infinity, alignment: .trailing)
+            }
+        }.padding(.vertical, 10)
     }
 
-    /// 块式行：标签/说明在上，控件整行在下右对齐（成排 chip 用，给足横向空间自动换行）。
-    private func setrowBlock<C: View>(_ label: String, _ hint: String?, @ViewBuilder control: () -> C) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text(L(label)).font(.system(size: 13)).foregroundStyle(Theme.ink)
-                if let hint { Text(L(hint)).font(.system(size: 10.5)).foregroundStyle(Theme.ink3) }
-            }
-            control().frame(maxWidth: .infinity, alignment: .trailing)
-        }
-        .padding(.vertical, 10)
-    }
-
-    // MARK: chips（含自定义编辑）。FlowLayout 自动换行 + 右对齐（对应 v1 .setchips flex-wrap）。
     @ViewBuilder private func chips(key: String, opts: [Int], fmt: ChipFmt, custom: ClosedRange<Int>?) -> some View {
         let cur = values[key]?.intVal ?? opts.first ?? 0
-        let isCustom = !opts.contains(cur)
-        FlowLayout(spacing: 4, lineSpacing: 6) {
-            ForEach(opts, id: \.self) { o in
-                Chip(text: fmt.text(o), on: cur == o && !editing(key), size: 11.5) { onSet(key, .int(o)); editingKey = nil }
-            }
-            if isCustom && !editing(key) {
-                Chip(text: fmt.text(cur), on: true, size: 11.5) { startEdit(key, cur) }
-            }
-            if custom != nil {
-                if editing(key) {
-                    TextField("", text: $editText)
-                        .textFieldStyle(.plain).frame(width: 44).font(.system(size: 11))
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 6).padding(.vertical, 3)
-                        .background(Capsule().fill(Color.white.opacity(0.10)))
-                        .onSubmit { commitEdit(key, custom!) }
-                } else {
-                    Chip(text: L("set.custom"), on: false, size: 11.5) { startEdit(key, cur) }
+        if editing(key), let custom {
+            let unit = fmt == .percent ? "%" : fmt == .plain ? "" : "s"
+            VStack(alignment: .trailing, spacing: 3) {
+                HStack(spacing: 5) {
+                    TextField(L("set.custom"), text: $editText)
+                        .frame(width: 64).focused($numericFocus, equals: key)
+                        .onAppear { numericFocus = key }
+                        .onSubmit { commitEdit(key, custom) }
+                        .onExitCommand { editingKey = nil }
+                    Text(unit)
+                    Button { commitEdit(key, custom) } label: {
+                        Image(systemName: "return")
+                    }.help(L("set.applyValue")).accessibilityLabel(L("set.applyValue"))
                 }
+                Text("\(custom.lowerBound)–\(custom.upperBound)\(unit) · \(L("set.applyValue"))")
+                    .font(.system(size: 10)).foregroundStyle(Theme.ink3)
+            }
+        } else {
+            let choices = opts.map { PanelChoiceMenu.Choice(id: String($0), title: fmt.text($0)) }
+            PanelChoiceMenu(title: fmt.text(cur), selected: opts.contains(cur) ? String(cur) : "custom",
+                            choices: choices + (custom == nil ? [] : [.init(id: "custom", title: L("set.custom"))])) { id in
+                if let value = Int(id) { onSet(key, .int(value)) }
+                else { startEdit(key, cur) }
             }
         }
     }
 
     private func selectMenu(key: String, opts: [(String, String)]) -> some View {
         let cur = values[key]?.stringVal ?? opts.first?.0 ?? ""
-        return Menu {
-            ForEach(opts, id: \.0) { v, name in Button(L(name)) { onSet(key, .string(v)) } }
-        } label: {
-            HStack(spacing: 5) {
-                Text(L(opts.first { $0.0 == cur }?.1 ?? cur)).font(.system(size: 12, weight: .medium))
-                Image(systemName: "chevron.down").font(.system(size: 8, weight: .semibold))
-            }
-            .foregroundStyle(Theme.ink)
-            .padding(.horizontal, 11).padding(.vertical, 5)
-            .background(RoundedRectangle(cornerRadius: 8).fill(Color.white.opacity(0.08)))
-            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Theme.edge))
+        return PanelChoiceMenu(title: L(opts.first { $0.0 == cur }?.1 ?? cur), selected: cur,
+                               choices: opts.map { .init(id: $0.0, title: L($0.1)) }) {
+            onSet(key, .string($0))
         }
-        .menuStyle(.borderlessButton).fixedSize()
     }
 
     // MARK: 绑定/编辑辅助

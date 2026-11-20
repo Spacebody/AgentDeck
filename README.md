@@ -21,13 +21,13 @@
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/i18n-demo.gif" width="380" alt="Claude、Codex 与 Qoder 概览面板（中 / 英 / 日）">
+  <img src="docs/screenshots/overview-zh.png" width="360" alt="AgentDeck 3.0 概览">
 </p>
-<p align="center"><sub>Claude、Codex 与 Qoder 概览（三语轮播，默认跟随系统语言）</sub></p>
+<p align="center"><sub>概览：今日用量、账号额度与正在运行的会话</sub></p>
 <p align="center">
-  <img src="docs/screenshots/settings-zh.png" width="480" alt="Agent 管理面板">
+  <img src="docs/screenshots/usage-zh.png" width="360" alt="AgentDeck 3.0 用量">
 </p>
-<p align="center"><sub>Agent 管理：分别控制面板、状态栏与主题色</sub></p>
+<p align="center"><sub>用量：按 Agent 和项目比较近 7 天或 30 天的消耗</sub></p>
 
 AgentDeck 将 Claude Code、Codex 与 Qoder 的额度监控、会话管理和用量统计集成在一个菜单栏面板中。后端为纯标准库 Python daemon，macOS 客户端为 SwiftPM 工程中的原生 AppKit + SwiftUI 应用，仍保持零第三方运行时依赖、无 Electron / 打包器、无运行时下载。
 
@@ -42,7 +42,7 @@ AgentDeck 将 Claude Code、Codex 与 Qoder 的额度监控、会话管理和用
 
 **额度监控**
 - 实时聚合 Claude 官方额度（5 小时 / 7 天窗口）、Codex rate limits 与 Qoder UsageInfo
-- 多账号并行：自动发现 Claude / Codex / Qoder / Qoder CN 的独立配置目录；概览将“不同 Agent × 多个账号”拍平成同级全宽卡片，默认 6 秒自动轮播，可暂停并支持鼠标、触控板与键盘切换
+- 多账号并行：自动发现 Claude / Codex / Qoder / Qoder CN 的独立配置目录；概览将“不同 Agent × 多个账号”拍平成同级轮播项，默认 6 秒自动轮播，可暂停并支持鼠标、触控板与键盘切换
 - 状态栏用一个固定宽度槽位逐项滚动“Agent/账号图标＋对应额度”，默认 6 秒；对同时参与两处展示的 Agent/账号，与概览卡同步自动轮播、手动切换及暂停状态；可关闭后固定当前项，数字与变色各自可选 5h / 周 / 最吃紧窗口
 - Claude / Qoder 额度查询间隔可调（默认 10 分钟，可至 6 小时）；Codex 由完成事件实时更新，并由 CLI 自带 app-server 周期校准
 - 窗口重置进度条；额度临界与回满的系统通知（阈值可配置）
@@ -58,7 +58,7 @@ AgentDeck 将 Claude Code、Codex 与 Qoder 的额度监控、会话管理和用
 
 **用量统计**
 - Claude / Codex / Qoder 近 7 / 30 天 token 用量；Claude / Codex 提供成本估算（口径见下文）
-- 今日摘要、三 Agent 24 小时曲线、模型/Agent 分布、项目维度排行
+- 四个标签页：概览、会话、项目、用量。今日圆环按已显示 Agent 的 token 占比分段；用量页可对照每日用量、Agent 占比与项目排行。
 - 支持导出 CSV
 
 **界面与系统**

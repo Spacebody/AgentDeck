@@ -23,6 +23,7 @@ import Testing
     let summary = try #require(TodaySummary(from: usage, now: now))
 
     #expect(summary.totalTokens == 60)
+    #expect(summary.byAgent == [.claude: 10, .codex: 20, .qoder: 30, .qoderCn: 0])
     #expect(summary.byFamily[.qoder] == 30)
     #expect(summary.deltaPercent == 100)
 }
@@ -41,6 +42,13 @@ import Testing
     #expect(summary.totalTokens == 30)
     #expect(summary.byFamily[.qoder] == 30)
     #expect(summary.byFamily[.codex] == nil)
+    var withCN = usage
+    withCN.qoderCnDaily = ["2026-08-12": 12]
+    let onlyCN = try #require(TodaySummary(from: withCN, visibleAgents: ["qoder_cn"]))
+    #expect(onlyCN.totalTokens == 12)
+    #expect(onlyCN.byAgent[.qoderCn] == 12)
+    #expect(onlyCN.byAgent[.qoder] == 0)
+    #expect(TodaySummary(from: withCN, visibleAgents: []) == nil)
 }
 
 @Test func usageResponseStillDecodesWithoutQoderFields() throws {

@@ -1014,6 +1014,65 @@ class SessionIndexTests(unittest.TestCase):
         self.assertEqual(result["total"], 1)
         self.assertEqual(result["sessions"][0]["id"], self.session_id(0))
 
+    def test_v3_projects_use_full_index_and_distinguish_same_names(self):
+        base = self.source()
+        for index in range(35):
+            self.write_codex(base, index, f"session {index}")
+        daemon._session_index_scan()
+        active = {"tool": "claude", "cwd": "/other/project-0", "id": "active", "status": "busy"}
+        with mock.patch.object(daemon, "_ensure_session_index_started"), \
+                mock.patch.object(daemon, "_load_path_mappings", return_value={}), \
+                mock.patch.object(daemon, "api_active", return_value={"active": [active]}):
+            result = daemon.api_projects({})
+            self.assertEqual(len(result['projects']), 36)
+            self.assertEqual(len([p for p in result['projects'] if p['name'] == 'project-0']), 2)
+            self.assertEqual(daemon.api_projects({'tool': ['none']})['projects'], [])
+            self.assertEqual(daemon.api_projects({'tool': ['']})['projects'], [])
+            self.assertEqual(daemon.api_projects({'tool': ['claude']})['projects'][0]['active'], [active])
+
+    def test_v3_project_cursor_membership_change_is_stale(self):
+        base = self.source()
+        for index in range(35):
+            self.write_codex(base, index, f"session {index}")
+        daemon._session_index_scan()
+        paths = [f'/work/project-{index}' for index in range(35)]
+        first = daemon._query_session_index(limit=10, project_cwds=paths)
+        second = daemon._query_session_index(limit=10, cursor=first['next_cursor'], project_cwds=paths)
+        self.assertFalse(second['cursor_stale'])
+        self.assertFalse({s['id'] for s in first['sessions']} & {s['id'] for s in second['sessions']})
+        changed = daemon._query_session_index(limit=10, cursor=first['next_cursor'], project_cwds=paths[:-1])
+        self.assertTrue(changed['cursor_stale'])
+
+    def test_v3_project_detail_does_not_map_canonical_key_twice(self):
+        base = self.source()
+        self.write_codex(base, 0, 'mapped title')
+        daemon._session_index_scan()
+        def mapped(path, mappings):
+            return {'/work/project-0': '/new/project', '/new/project': '/third/project'}.get(path, path)
+        with mock.patch.object(daemon, '_ensure_session_index_started'), \
+                mock.patch.object(daemon, '_load_path_mappings', return_value={}), \
+                mock.patch.object(daemon, '_usage_project_cwd', side_effect=mapped), \
+                mock.patch.object(daemon, 'api_active', return_value={'active': []}):
+            self.assertEqual(daemon.api_projects({})['projects'][0]['cwd'], '/new/project')
+            detail = daemon.api_projects({'cwd': ['/new/project']})
+            self.assertEqual(detail['total'], 1)
+            self.assertEqual(detail['sessions'][0]['id'], self.session_id(0))
+
+    def test_v3_active_identity_does_not_guess_between_accounts(self):
+        base = self.source()
+        self.write_codex(base, 0, 'first title')
+        daemon._session_index_scan()
+        entry = {'tool': 'codex', 'id': self.session_id(0), 'cwd': '/work/project-0'}
+        daemon._attach_active_index_metadata([entry])
+        self.assertEqual(entry['indexed_row_key'], 'codex:default:' + self.session_id(0))
+        self.assertEqual(entry['title'], 'first title')
+        other = self.source('work')
+        self.write_codex(other, 0, 'copied title')
+        daemon._session_index_scan()
+        ambiguous = {'tool': 'codex', 'id': self.session_id(0), 'cwd': '/work/project-0'}
+        daemon._attach_active_index_metadata([ambiguous])
+        self.assertNotIn('indexed_row_key', ambiguous)
+
     def test_unchanged_and_growing_files_are_not_reparsed(self):
         base = self.source()
         paths = [self.write_codex(base, i, f"session {i}") for i in range(3)]

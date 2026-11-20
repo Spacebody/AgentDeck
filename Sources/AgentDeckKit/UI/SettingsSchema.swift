@@ -19,7 +19,7 @@ enum ChipFmt { case percent, seconds, minutesFromSecs, plain, rotate
         switch self {
         case .percent: return "\(v)%"
         case .seconds: return "\(v)s"
-        case .minutesFromSecs: return L("set.minUnit", ["n": "\(v / 60)"])
+        case .minutesFromSecs: return v.isMultiple(of: 60) ? L("set.minUnit", ["n": "\(v / 60)"]) : "\(v)s"
         case .plain: return "\(v)"
         case .rotate: return v == 0 ? L("set.rotateOff") : "\(v)s"
         }
@@ -62,7 +62,7 @@ enum SettingsSchema {
     }
 
     static let rows: [SetRow] = [
-        .section("set.secPanel"),
+        .section("set.appearance"),
         .select(key: "language", label: "set.language", hint: nil,
                 opts: [("auto", "set.langAuto"), ("zh-CN", "中文"), ("en", "English"), ("ja", "日本語")]),
         .chips(key: "font_scale", label: "set.fontScale", hint: "set.fontScaleHint",
@@ -70,10 +70,12 @@ enum SettingsSchema {
         .chips(key: "glass_dim", label: "set.glassDim", hint: "set.glassDimHint",
                opts: [40, 55, 68, 80], fmt: .percent, custom: 20...90),
         .toggle(key: "minimal_mode", label: "set.minimal", hint: "set.minimalHint"),
+        .section("set.secPanel"),
         .toggle(key: "show_active", label: "set.showActive", hint: nil),
         .agentManager(label: "set.agentManager", hint: "set.agentManagerHint"),
         .chips(key: "sessions_limit", label: "set.sessionsLimit", hint: "set.sessionsLimitHint",
                opts: [10, 15, 20, 30], fmt: .plain, custom: 5...100),
+        .section("set.refreshAndQuota"),
         .chips(key: "refresh_interval", label: "set.refreshInterval", hint: "set.refreshIntervalHint",
                opts: [15, 30, 60], fmt: .seconds, custom: 5...600),
         .chips(key: "sample_interval", label: "set.sampleInterval", hint: "set.sampleIntervalHint",
@@ -82,7 +84,7 @@ enum SettingsSchema {
                opts: [300, 600, 1800, 3600], fmt: .minutesFromSecs, custom: 300...21600),
         .toggle(key: "quota_auto_rotate", label: "set.quotaAutoRotate", hint: "set.quotaAutoRotateHint"),
         .chips(key: "quota_rotate_secs", label: "set.quotaRotateSecs", hint: "set.quotaRotateSecsHint",
-               opts: [4, 6, 8, 10], fmt: .seconds, custom: 4...10),
+               opts: [4, 6, 8, 10], fmt: .seconds, custom: nil),
         .section("set.secMenubar"),
         .select(key: "menubar_value_dim", label: "set.mbValueDim", hint: "set.mbValueDimHint",
                 opts: [("shortest", "set.dimShortest"), ("weekly", "set.dimWeekly"), ("max", "set.dimMax")]),

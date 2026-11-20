@@ -186,6 +186,7 @@ private func smoothPath(_ pts: [CGPoint]) -> Path {
 
 // MARK: - 24h 额度曲线（loadCurve）
 struct Curve24h: View {
+    @ObservedObject private var palette = AgentColors.shared
     let usage: UsageResponse?
     var showClaude: Bool = true
     var showCodex: Bool = true
@@ -300,6 +301,7 @@ struct Curve24h: View {
 
 // MARK: - 近 7 天堆叠柱（loadUsage）
 struct Week7Bars: View {
+    @ObservedObject private var palette = AgentColors.shared
     let usage: UsageResponse?
     var showClaude: Bool = true
     var showCodex: Bool = true
@@ -446,6 +448,7 @@ struct Week7Bars: View {
 
 // MARK: - 项目 Top（loadProjects）
 struct ProjectTop: View {
+    @ObservedObject private var palette = AgentColors.shared
     let usage: UsageResponse?
     var visibleAgents: Set<String> = UsageVisibilityPolicy.allAgents
     var body: some View {

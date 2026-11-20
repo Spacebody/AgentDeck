@@ -21,13 +21,13 @@
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/i18n-demo.gif" width="380" alt="Claude, Codex, and Qoder overview (zh / en / ja)">
+  <img src="docs/screenshots/overview-en.png" width="360" alt="AgentDeck 3.0 overview">
 </p>
-<p align="center"><sub>Claude, Codex, and Qoder overview (trilingual rotation, follows the system language)</sub></p>
+<p align="center"><sub>Overview: today’s tokens, account quotas and active sessions</sub></p>
 <p align="center">
-  <img src="docs/screenshots/settings-en.png" width="480" alt="Agent Management panel">
+  <img src="docs/screenshots/usage-en.png" width="360" alt="AgentDeck 3.0 usage">
 </p>
-<p align="center"><sub>Agent Management: control panel visibility, menu-bar rotation, and theme color per agent</sub></p>
+<p align="center"><sub>Usage: compare 7 or 30 days by agent and project</sub></p>
 
 AgentDeck integrates quota monitoring, session management, and usage analytics for Claude Code, Codex, and Qoder into a single menu-bar panel. The backend is a pure standard-library Python daemon, and the macOS client is a native AppKit + SwiftUI app in a SwiftPM package.
 
@@ -42,7 +42,7 @@ AgentDeck integrates quota monitoring, session management, and usage analytics f
 
 **Quota monitoring**
 - Live aggregation of Claude's official quota, Codex rate limits, and Qoder UsageInfo
-- Discovers independent Claude, Codex, Qoder, and Qoder CN config roots and flattens every agent/account pair into one full-width peer carousel: no nested account dropdown, optional 4/6/8/10-second auto-rotation, pause, mouse, trackpad, and keyboard controls
+- Discovers independent Claude, Codex, Qoder, and Qoder CN config roots and flattens every agent/account pair into one peer carousel: no nested account dropdown, optional 4/6/8/10-second auto-rotation, pause, mouse, trackpad, and keyboard controls
 - A fixed-width menu-bar slot rolls each agent/account icon together with its quota every 6 seconds by default; for agents/accounts enabled in both surfaces, automatic rotation, manual selection, and pause state stay synchronized with the overview card; rotation can still be disabled, while number and alert-color windows remain independently configurable
 - Adjustable Claude/Qoder quota interval (10 minutes by default, up to 6 hours); Codex updates on completed turns and periodically reconciles through the CLI's app-server
 - Window-reset progress bars; system notifications for nearing or refilled quota (configurable thresholds)
@@ -58,7 +58,7 @@ AgentDeck integrates quota monitoring, session management, and usage analytics f
 
 **Usage analytics**
 - 7- / 30-day token usage for Claude, Codex, and Qoder; cost estimates for Claude/Codex (methodology below)
-- Daily digest, three-agent 24-hour curves, model/agent breakdown, per-project ranking
+- Four tabs: Overview, Sessions, Projects and Usage. The daily ring shows each visible agent’s share; the usage tab compares daily totals, agent shares and project rankings.
 - CSV export
 
 **Interface & system**

@@ -359,6 +359,69 @@ public enum PreviewRender {
             .frame(width: 420 * fontScale, height: 1040 * fontScale), scale: scale)
     }
 
+    static var dashboardProjects: [ProjectItem] {
+        Dictionary(grouping: PreviewSamples.sessions, by: { $0.cwd ?? "" }).map { cwd, sessions in
+            ProjectItem(cwd: cwd, name: URL(fileURLWithPath: cwd).lastPathComponent,
+                        mtime: sessions.map(\.mtime).max() ?? 0, count: sessions.count,
+                        active: PreviewSamples.active.filter { $0.cwd == cwd })
+        }.sorted { $0.mtime > $1.mtime }
+    }
+
+    public static func dashboardPNG(tab: String, scale: CGFloat = 2) -> Data? {
+        let saved = AgentColors.shared.overrides
+        defer { AgentColors.shared.replace(saved) }
+        if ProcessInfo.processInfo.environment["AD_PREVIEW_CUSTOM_COLORS"] == "1" {
+            AgentColors.shared.replace([.claude: Color(hex: 0x63b8ff), .codex: Color(hex: 0xffaf62),
+                                       .qoder: Color(hex: 0x83df97), .qoderCn: Color(hex: 0xf29fcd)])
+        }
+        let store = mockStore()
+        store.update = nil
+        store.quota = PreviewSamples.response
+        store.settings["show_claude"] = .bool(true)
+        store.settings["show_codex"] = .bool(true)
+        store.settings["show_qoder"] = .bool(true)
+        store.sessionsTotal = store.sessions.count
+        for index in store.active.indices {
+            if let session = store.sessions.first(where: { $0.tool == store.active[index].tool && $0.id == store.active[index].id }) {
+                store.active[index].indexedRowKey = session.rowKey
+                store.active[index].indexedSession = session
+                store.active[index].title = session.title
+            }
+        }
+        if let id = store.quota?.flatPages(visibleAgents: ["codex"]).first?.id {
+            store.selectQuotaPage(id, notifyMenubar: false)
+        }
+        let fontScale = previewFontScale
+        let width = min(600, max(260, Double(ProcessInfo.processInfo.environment["AD_PREVIEW_WIDTH"] ?? "420") ?? 420))
+        let scrolled = tab == "scrolled"
+        let settings = tab == "settings"
+        let height: CGFloat = (scrolled || settings ? 650 : 1040) * fontScale
+        let view = ScrollViewReader { proxy in
+            AgentDeckRootView(previewStore: store, version: "v3-dev",
+                              initialTab: scrolled || settings ? "overview" : tab,
+                              settingsOpen: settings, liveLayout: settings || scrolled)
+                .onAppear {
+                    if scrolled {
+                        DispatchQueue.main.async { proxy.scrollTo("overview", anchor: .bottom) }
+                    }
+                }
+        }
+        .frame(width: width * fontScale, height: height, alignment: .top)
+        let host = NSHostingView(rootView: view)
+        host.appearance = NSAppearance(named: .darkAqua)
+        host.frame = NSRect(x: 0, y: 0, width: width * fontScale, height: height)
+        let window = NSWindow(contentRect: host.bounds, styleMask: [.borderless],
+                              backing: .buffered, defer: false)
+        window.contentView = host
+        host.layoutSubtreeIfNeeded()
+        // Capture the settled selection rather than the outgoing carousel page.
+        RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+        host.layoutSubtreeIfNeeded()
+        guard let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { return nil }
+        host.cacheDisplay(in: host.bounds, to: rep)
+        return rep.representation(using: .png, properties: [:])
+    }
+
     /// README 主图：展示三 Agent，首屏选中 Qoder，不注入测试用更新横幅。
     /// 先按真实的“窗口随字体缩放”尺寸布局，再缩回 README 的稳定 420pt 画布；
     /// 这样 120% 字体不会被裁切，也不会把仓库截图放大成 1008px 宽。

@@ -142,8 +142,10 @@ public final class AppStore: ObservableObject {
     @Published var quota: QuotaResponse?
     lazy var performance = SessionPerformanceStore(api: api)
     var performanceShowsSessions = false
+    @Published private(set) var panelVisible = false
 
     public func setPerformanceVisible(_ owner: String, _ visible: Bool) {
+        if owner == "panel" { panelVisible = visible }
         performance.setVisible(owner, visible) { [weak self] in
             guard let self else { return [] }
             return (self.performanceShowsSessions && self.performance.isVisible("panel")
@@ -196,7 +198,7 @@ public final class AppStore: ObservableObject {
 
     var today: TodaySummary? {
         guard let usage else { return nil }
-        let visible = Set(["claude", "codex", "qoder"].filter(agentOnWithQuotaFallback))
+        let visible = Set(Brand.allCases.map(\.rawValue).filter(agentOnWithQuotaFallback))
         return TodaySummary(from: usage, visibleAgents: visible)
     }
     var updateAvailable: Bool { update?.available == true }
@@ -633,9 +635,11 @@ public final class AppStore: ObservableObject {
 
     /// 自定义主色 → Brand 全局覆盖（额度环/进度条/用量图同步）。
     private func applyCustomColors() {
+        var colors: [Brand: Color] = [:]
         for agent in AgentSettingsCatalog.all {
-            Brand.customAccents[agent.brand] = Color(hexString: settings[agent.colorKey]?.stringVal ?? "")
+            colors[agent.brand] = Color(hexString: settings[agent.colorKey]?.stringVal ?? "")
         }
+        AgentColors.shared.replace(colors)
     }
 
     // MARK: 动作

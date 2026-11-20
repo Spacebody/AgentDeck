@@ -1,16 +1,14 @@
-// AgentDeck v2 — 应用外壳（#4+#10）。复刻 index.html 的 body 结构：
-// 顶栏(logo/live/设置/刷新) + 更新横幅 + 双 tab(概览/会话) + 设置右滑浮层 + 统计口径弹层 + toast。
-// 把 store 数据与动作闭包接入各视图；主壳(main.swift)以 NSHostingView 承载本视图，退役 WebView。
+// AgentDeck v3: shared four-page shell, native actions, settings and update overlay.
 import AppKit
 import SwiftUI
 
 // MARK: - 统计口径弹层种类（today 摘要 / usage 当前视图）
-enum InfoKind: Equatable { case today; case usage(UsageMode) }
+enum InfoKind: Equatable { case today; case usage(UsageMode); case range(Int) }
 
 // MARK: - 主内容自然高度（驱动面板高度自适应，消除底部空隙）
 private struct ContentHeightKey: PreferenceKey {
     static let defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value += nextValue() }
 }
 
 // MARK: - 统计口径环境闭包（TodayBar / UsageView 深层触发，根视图实现）
@@ -109,9 +107,8 @@ struct IconButton: View {
         }
             .frame(width: size, height: size)              // 先定方框，再绕方框中心旋转 → 同心转，不晃
             .rotationEffect(.degrees(angle), anchor: .center)
-            .background(Circle().fill(bg))
-            .overlay(Circle().strokeBorder(border))
-            .offset(y: hover ? -1 : 0)                      // :hover translateY(-1px)
+            .contentShape(Rectangle())
+            .background(RoundedRectangle(cornerRadius: 6).fill(hover ? bg : .clear))
     }
 }
 
@@ -145,17 +142,22 @@ public struct AgentDeckRootView: View {
     }
 
     // 内部预览构造（PreviewRender 用，非 public）。
-    init(previewStore: AppStore, version: String) {
+    init(previewStore: AppStore, version: String, initialTab: String = "overview",
+         settingsOpen: Bool = false, liveLayout: Bool = false) {
         self.store = previewStore; self.version = version
         self.onQuit = {}; self.onOpenExternal = { _ in }; self.onPasteEnter = { _, _ in }; self.onHidePanel = {}
         self.onScale = { _ in }; self.onContentHeight = { _ in }
-        self.previewMode = true
+        self.previewMode = !liveLayout
+        _showSettings = State(initialValue: settingsOpen)
+        _tab = State(initialValue: initialTab)
     }
 
     @State private var tab = "overview"
     @State private var showSettings = false
     @State private var settingsPage: SettingsPage = .main
     @State private var info: InfoKind?
+    @State private var infoResponder: NSResponder?
+    @FocusState private var infoCloseFocused: Bool
     @State private var updateDismissed = false
     @State private var spinning = false
     @State private var toastMsg: String?
@@ -173,7 +175,10 @@ public struct AgentDeckRootView: View {
         ScaledContainer(scale: fontScale) {
             ZStack(alignment: .top) {
                 background
-                mainScroll   // 内容自然高 + 量高上报（主壳据此把面板高度自适应到内容）
+                mainScroll
+                    .opacity(showSettings ? 0 : 1)
+                    .disabled(info != nil || showSettings)
+                    .accessibilityHidden(info != nil || showSettings)
 
                 // 设置右滑浮层
                 if showSettings { settingsOverlay.transition(.move(edge: .trailing)) }
@@ -183,51 +188,68 @@ public struct AgentDeckRootView: View {
                 if let msg = toastMsg { toastView(msg) }
             }
             .environment(\.minimalMode, minimal)
-            .environment(\.adShowInfo, { info = $0 })
+            .environment(\.adShowInfo, { kind in
+                infoResponder = NSApp.keyWindow?.firstResponder
+                info = kind
+            })
             .animation(.spring(response: 0.32, dampingFraction: 0.85), value: showSettings)
             .animation(.spring(response: 0.3, dampingFraction: 0.72), value: info)   // ipin 轻微过冲
             .animation(.easeOut(duration: 0.2), value: toastMsg)
         }
         .preferredColorScheme(.dark)
+        .environment(\.colorScheme, .dark)
+        .foregroundStyle(Theme.ink)
+        .onExitCommand {
+            if info != nil { info = nil }
+            else if showSettings && settingsPage == .agents { settingsPage = .main }
+            else if showSettings { showSettings = false }
+            else { onHidePanel() }
+        }
+        .onChange(of: info) { value in
+            if value == nil {
+                if let view = infoResponder as? NSView, let window = view.window {
+                    window.makeFirstResponder(view)
+                }
+                infoResponder = nil
+            }
+        }
         .onChange(of: fontScale) { onScale($0) }
-        .onChange(of: tab) { store.performanceShowsSessions = $0 != "overview" && !showSettings }
-        .onChange(of: showSettings) { store.performanceShowsSessions = !$0 && tab != "overview" }
+        .onChange(of: tab) { store.performanceShowsSessions = $0 == "sessions" && !showSettings }
+        .onChange(of: showSettings) { store.performanceShowsSessions = !$0 && tab == "sessions" }
         .environment(\.sessionPerformanceStore, previewMode ? nil : store.performance)
     }
 
     // MARK: 背景（native：系统玻璃之上叠暗化 scrim + 弱 aurora；精简模式去 aurora）
     @ViewBuilder private var background: some View {
-        if previewMode { Theme.bg }   // 预览无 NSVisualEffectView，垫底色
-        LinearGradient(colors: [Color(hex: 0x08080e).opacity(max(0, dim - 0.13)),
-                                Color(hex: 0x08080e).opacity(dim)],
-                       startPoint: .top, endPoint: .bottom)
-            .ignoresSafeArea()
-        if !minimal { AuroraBackground(opacity: 0.18) }
+        DashboardStyle.background.opacity(min(1, max(0, dim))).ignoresSafeArea()
     }
 
     // MARK: 顶栏
     private var header: some View {
         HStack(spacing: 8) {
-            HStack(spacing: 0) {
-                Text("Agent").foregroundStyle(Theme.ink)
-                Text("Deck").foregroundStyle(
-                    LinearGradient(colors: [Brand.claude.accent, Brand.codex.accent],
-                                   startPoint: .topLeading, endPoint: .bottomTrailing))
-            }
-            .font(.rounded(17, weight: .bold))
+            // Same arcs as scripts/makeicon.swift, without the launcher's tile or tracks.
+            ZStack {
+                Circle().trim(from: 0, to: 250.0 / 360)
+                    .stroke(DashboardStyle.accent.opacity(0.82), style: StrokeStyle(lineWidth: 2.6, lineCap: .round))
+                    .rotationEffect(.degrees(-90)).frame(width: 23, height: 23)
+                Circle().trim(from: 0, to: 198.0 / 360)
+                    .stroke(DashboardStyle.accent.opacity(0.66), style: StrokeStyle(lineWidth: 2.6, lineCap: .round))
+                    .rotationEffect(.degrees(150)).frame(width: 13.6, height: 13.6)
+            }.frame(width: 32, height: 32).accessibilityHidden(true)
+            Text("AgentDeck").font(.system(size: 18, weight: .semibold)).foregroundStyle(Theme.ink)
+                .lineLimit(1).minimumScaleFactor(0.5)
             Circle()
                 .fill(store.online ? Theme.ok : Theme.danger)
                 .frame(width: 7, height: 7)
-                .shadow(color: store.online ? Theme.ok : Theme.danger, radius: 4)
-                .pulse(store.online ? 2.4 : .infinity)   // .live 呼吸 2.4s；离线(err) 不闪
             Spacer()
             IconButton(system: "gearshape", fontSize: 16) {
                 settingsPage = .main
                 showSettings = true
             }
             IconButton(system: "arrow.clockwise", weight: .semibold, fontSize: 15, spinning: spinning, customRefresh: true) { manualRefresh() }
-            // 原生壳里显示退出按钮（对应 v1：bridge 存在时 #quit 显示）。
-            IconButton(system: "power", weight: .semibold, fontSize: 15, danger: true) { onQuit() }
+            IconButton(system: "power", danger: true, action: onQuit)
+                .help(L("header.quit"))
+                .accessibilityLabel(L("header.quit"))
         }
     }
 
@@ -275,7 +297,7 @@ public struct AgentDeckRootView: View {
                             .monospacedDigit()
                     }
                 } else if install?.stage == "error" {
-                    Text(L("update.installFail"))
+                    Text(install?.error.flatMap { $0.isEmpty ? nil : $0 } ?? L("update.installFail"))
                         .font(.system(size: 10)).foregroundStyle(Color(hex: 0xff7a8a))
                         .help(install?.error ?? L("update.installFail"))
                 }
@@ -306,53 +328,67 @@ public struct AgentDeckRootView: View {
 
     // MARK: Tab 栏
     private var tabbar: some View {
-        HStack(spacing: 3) {
+        ViewThatFits(in: .horizontal) {
+            navigationTabs(spacing: 24)
+            navigationTabs(spacing: 10)
+        }.padding(.top, 14).padding(.bottom, 10)
+    }
+
+    private func navigationTabs(spacing: CGFloat) -> some View {
+        HStack(spacing: spacing) {
             tabButton("overview", icon: "chart.bar.fill", label: L("tab.overview"))
             tabButton("sessions", icon: "bubble.left.fill", label: L("tab.sessions"))
-        }
-        .padding(3)
-        .background {
-            RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Theme.glass)
-                .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Theme.edge))
+            tabButton("projects", icon: "folder", label: L("tab.projects"))
+            tabButton("usage", icon: "chart.bar", label: L("tab.usage"))
+            Spacer(minLength: 0)
         }
     }
 
     private func tabButton(_ id: String, icon: String, label: String) -> some View {
         let on = tab == id
         return Button { tab = id } label: {
-            HStack(spacing: 6) {
-                Image(systemName: icon).font(.system(size: 11, weight: .semibold))
-                Text(label).font(.system(size: 11, weight: .semibold)).tracking(0.3)
-            }
+            Text(label).font(.system(size: 13, weight: on ? .semibold : .regular))
+            .lineLimit(1).minimumScaleFactor(0.7)
             .foregroundStyle(on ? Theme.ink : Theme.ink3)
-            .frame(maxWidth: .infinity).padding(.vertical, 6)
-            .background {
-                if on {
-                    RoundedRectangle(cornerRadius: 11, style: .continuous).fill(Color.white.opacity(0.12))
-                        .shadow(color: .black.opacity(0.25), radius: 4, y: 2)
-                }
+            .padding(.vertical, 10)
+            .overlay(alignment: .bottom) {
+                if on { Rectangle().fill(DashboardStyle.accent).frame(height: 2) }
             }
             .contentShape(Rectangle())   // 整块可点：off tab 背景透明，否则只有图标/文字命中 → 切不回去
-        }.buttonStyle(.plain)
+        }.buttonStyle(.plain).accessibilityAddTraits(on ? [.isSelected] : [])
     }
 
     // MARK: 主内容滚动容器（量自然高 → 上报主壳做高度自适应；超屏才滚动）
     private var mainScroll: some View {
-        let content = VStack(spacing: 10) {
-            header.reveal(delay: 0)
-            if showUpdate { updateBar }
-            tabbar.reveal(delay: 0.03)
-            tabContent
-        }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .top)
-        .background(GeometryReader { g in
-            Color.clear.preference(key: ContentHeightKey.self, value: g.size.height)
-        })
+        let content = tabContent
+            .id(tab)
+            .padding(.horizontal, 22)
+            .padding(.vertical, 12)
+            .background(GeometryReader { geo in
+                Color.clear.preference(key: ContentHeightKey.self, value: geo.size.height)
+            })
 
-        return Group {
+        return VStack(spacing: 0) {
+            VStack(spacing: 4) {
+                header
+                if showUpdate { updateBar }
+                tabbar
+                Rectangle().fill(Theme.ink.opacity(0.07)).frame(height: 1)
+                    .accessibilityHidden(true)
+            }
+            .padding(.horizontal, 22)
+            .padding(.top, 18)
+            .fixedSize(horizontal: false, vertical: true)
+            .background(GeometryReader { geo in
+                Color.clear.preference(key: ContentHeightKey.self, value: geo.size.height)
+            })
             if previewMode { content }
-            else { ScrollView { content }.scrollIndicators(.hidden) }
+            else {
+                ScrollView {
+                    content.frame(maxWidth: .infinity, alignment: .leading)
+                        .background(PanelInputRegion(.scrollBody))
+                }.scrollIndicators(.hidden)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .onPreferenceChange(ContentHeightKey.self) { onContentHeight($0) }
@@ -378,17 +414,45 @@ public struct AgentDeckRootView: View {
                 quotaSelectionID: store.quotaSelectionID,
                 onSelectQuota: { store.selectQuotaPage($0, notifyMenubar: true) },
                 onQuotaRotationPauseChange: { store.setQuotaRotationPaused($0) },
-                onFocusActive: focusActive, onFocusDone: focusDone)
-        } else {
+                onFocusActive: focusActive, onFocusDone: focusDone,
+                onViewUsage: { tab = "usage" })
+        } else if tab == "sessions" {
             sessionsCard
+        } else if tab == "projects" {
+            ProjectsView(agents: dashboardAgents,
+                         isActive: store.panelVisible && !showSettings,
+                         showActive: store.showActive, refreshSeconds: store.settings["refresh_interval"]?.intVal ?? 30,
+                         previewProjects: previewMode ? PreviewRender.dashboardProjects : nil,
+                         previewSessions: previewMode ? store.sessions : nil,
+                         onOpen: focusActive, onResume: resume)
+        } else if tab == "usage" {
+            UsageDashboardView(usage: store.usage, agents: usageAgents) { span in
+                do {
+                    let response = try await APIClient.shared.postJSON("/api/data", body: [
+                        "action": "export", "days": span, "agents": usageAgents.sorted()
+                    ])
+                    showToast(response["ok"] as? Bool == true ? L("v3.exported", ["n": "\(span)"]) : L("common.opFailed"))
+                } catch { showToast(L("common.opFailed")) }
+            }
         }
+    }
+
+    private var dashboardAgents: Set<String> {
+        Set([store.agentOn("claude", fallbackHidden: store.quota?.claude?.hidden) ? "claude" : nil,
+             store.agentOn("codex", fallbackHidden: store.quota?.codex?.hidden) ? "codex" : nil,
+             store.agentOn("qoder", fallbackHidden: store.quota?.qoder?.hidden) ? "qoder" : nil].compactMap { $0 })
+    }
+
+    private var usageAgents: Set<String> {
+        dashboardAgents.union(store.agentOn("qoder_cn", fallbackHidden: store.quota?.qoderCn?.hidden) ? ["qoder_cn"] : [])
     }
 
     private var sessionsCard: some View {
         VStack(alignment: .leading, spacing: 9) {
             // scrollable:false → 会话列表按自然高展开，由外层 ScrollView 统一滚动（避免嵌套滚动）
             SessionsView(
-                sessions: store.sessionsShown, scrollable: false,
+                sessions: store.sessionsShown, active: store.showActive ? store.activeShown : [],
+                onOpenActive: focusActive, scrollable: false,
                 query: store.sessionQuery, filter: store.sessionFilter,
                 total: store.sessionsTotal, hasMore: store.sessionsHasMore,
                 page: store.sessionPage, pageCount: store.sessionPageCount,
@@ -404,17 +468,13 @@ public struct AgentDeckRootView: View {
                 onNextPage: { store.nextSessionPage() },
                 onPageSize: { store.setSessionPageSize($0) })
         }
-        .padding(.horizontal, 14).padding(.vertical, 12)
         .frame(maxWidth: .infinity, alignment: .top)
-        .glassCard()
         .reveal(delay: 0.05)
     }
 
     // MARK: 设置浮层
     private var settingsOverlay: some View {
         ZStack(alignment: .top) {
-            Rectangle().fill(Color(hex: 0x07070c).opacity(0.66)).ignoresSafeArea()
-                .background(.ultraThinMaterial)
             VStack(spacing: 10) {
                 HStack(spacing: 8) {
                     IconButton(system: "chevron.left", weight: .semibold, fontSize: 15) {
@@ -434,7 +494,7 @@ public struct AgentDeckRootView: View {
                     onResetColors: { store.resetColors(); showToast(L("set.colorsReset")) },
                     version: version)
             }
-            .padding(14)
+            .padding(.horizontal, 22).padding(.vertical, 16)
         }
     }
 
@@ -450,6 +510,9 @@ public struct AgentDeckRootView: View {
                     Text(L("info.title")).font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.ink)
                     Spacer()
                     IconButton(system: "xmark", weight: .semibold, fontSize: 11, size: 22) { info = nil }
+                        .accessibilityLabel(L("common.close"))
+                        .focused($infoCloseFocused)
+                        .onAppear { infoCloseFocused = true }
                 }
                 .padding(.bottom, 9)
                 ForEach(Array(infoRows(kind).enumerated()), id: \.offset) { idx, row in
@@ -464,14 +527,12 @@ public struct AgentDeckRootView: View {
                 Text(infoNote).font(.system(size: 9.5)).foregroundStyle(Theme.ink3).lineSpacing(1.5)
                     .padding(.top, 8)
             }
-            .padding(EdgeInsets(top: 15, leading: 17, bottom: 13, trailing: 17))
+            .padding(16)
             .frame(width: 322)
             .background {
-                RoundedRectangle(cornerRadius: 20, style: .continuous)
-                    .fill(LinearGradient(colors: [Color(hex: 0x2c2c3a).opacity(0.94), Color(hex: 0x1a1a24).opacity(0.96)],
-                                         startPoint: .top, endPoint: .bottom))
-                    .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous)
-                        .strokeBorder(Color.white.opacity(0.15)))
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(DashboardStyle.background)
+                    .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Theme.edge))
                     .shadow(color: .black.opacity(0.55), radius: 32, y: 14)
             }
             .transition(.scale(scale: 0.93).combined(with: .opacity))   // ipin：缩放弹入（.93→1）
@@ -490,6 +551,16 @@ public struct AgentDeckRootView: View {
             ]
             if let fams = todayFamsText { rows.append((L("info.detailTerm"), fams)) }
             return rows
+        case .range(let span):
+            guard let usage = store.usage else { return [] }
+            let summary = UsageRangeSummary(usage: usage, span: span, visible: usageAgents)
+            var rows = [(L("v3.range", ["n": "\(span)"]), Fmt.tokens(summary.total)),
+                        (L("v3.cost"), summary.cost.map { String(format: "$%.2f", $0) } ?? L("v3.unavailable"))]
+            rows += summary.agents.map { (Brand(rawValue: $0.0)?.name ?? $0.0, Fmt.tokens($0.1)) }
+            if dashboardAgents.contains("codex"), let missing = usage.coverage?.codexMissingUsageFiles, missing > 0 {
+                rows.append(("Codex", L("usage.incomplete", ["count": "\(missing)"])))
+            }
+            return rows
         case .usage(let mode):
             let first: (String, String) = {
                 switch mode {
@@ -506,9 +577,9 @@ public struct AgentDeckRootView: View {
 
     private var todayFamsText: String? {
         guard let t = store.today else { return nil }
-        let parts = TodaySummary.Family.allCases.compactMap { f -> String? in
-            let v = t.byFamily[f] ?? 0
-            return v > 0 ? "\(f.rawValue) \(Fmt.tokens(v))" : nil
+        let parts = Brand.allCases.compactMap { brand -> String? in
+            let v = t.byAgent[brand] ?? 0
+            return v > 0 ? "\(brand.name) \(Fmt.tokens(v))" : nil
         }
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
@@ -730,7 +801,7 @@ public struct AgentDeckWidgetRootView: View {
     public var body: some View {
         ScaledContainer(scale: fontScale) {
             ZStack(alignment: .top) {
-                // 小组件顶部 grip 提示（弱化，更接近原生小组件的干净表面）
+                DashboardStyle.background.opacity(0.93).ignoresSafeArea()
                 Capsule().fill(Color.white.opacity(0.16)).frame(width: 28, height: 3.5)
                     .padding(.top, 7).frame(maxWidth: .infinity, alignment: .center)
                 WidgetView(

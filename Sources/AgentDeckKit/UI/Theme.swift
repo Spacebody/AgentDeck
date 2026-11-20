@@ -56,15 +56,27 @@ enum Theme {
 
 // MARK: - 品牌（Claude / Codex）配色。accent 为用户可在设置中自定义的主色（--claude/--codex），
 // 此处给默认值；接入 store 后由设置覆盖。deep 为渐变深端，tint 为卡片辉光底色。
+final class AgentColors: ObservableObject {
+    static let shared = AgentColors()
+    @Published private(set) var overrides: [Brand: Color] = [:]
+    func replace(_ colors: [Brand: Color]) {
+        if colors != overrides { overrides = colors }
+    }
+}
+
+public func customAgentInk(_ tool: String) -> NSColor? {
+    Brand(rawValue: tool.lowercased()).flatMap { AgentColors.shared.overrides[$0] }.map { NSColor($0) }
+}
+
 enum Brand: String, CaseIterable {
     case claude, codex, qoder
     case qoderCn = "qoder_cn"
+    var name: String { self == .qoderCn ? "Qoder CN" : rawValue.capitalized }
 
     // 默认主色（--claude #ff9d7a / --codex #8be9e2）
     /// 用户自定义主色覆盖（设置 color_claude/color_codex；AppStore.applyCustomColors 写入）。
-    static var customAccents: [Brand: Color?] = [:]
     var accent: Color {
-        if let c = Brand.customAccents[self] ?? nil { return c }
+        if let c = AgentColors.shared.overrides[self] { return c }
         switch self {
         case .claude: return Color(hex: 0xff9d7a)
         case .codex: return Color(hex: 0x8be9e2)
@@ -74,6 +86,9 @@ enum Brand: String, CaseIterable {
     }
     // 渐变深端（--claude-deep #e8744f / --codex-deep #4fd1c5）
     var deep: Color {
+        if let c = customAgentInk(rawValue)?.usingColorSpace(.sRGB) {
+            return Color(.sRGB, red: c.redComponent * 0.8, green: c.greenComponent * 0.8, blue: c.blueComponent * 0.8)
+        }
         switch self {
         case .claude: return Color(hex: 0xe8744f)
         case .codex: return Color(hex: 0x4fd1c5)
@@ -83,6 +98,7 @@ enum Brand: String, CaseIterable {
     }
     // 卡片右上角辉光（qcard::before：claude .22 / codex .18 透明度）
     var tint: Color {
+        if AgentColors.shared.overrides[self] != nil { return deep.opacity(0.20) }
         switch self {
         case .claude: return Color(hex: 0xe8744f).opacity(0.22)
         case .codex: return Color(hex: 0x4fd1c5).opacity(0.18)
@@ -142,10 +158,7 @@ struct GlassCard: ViewModifier {
 
     func body(content: Content) -> some View {
         if flat {
-            // 小组件：扁平轻磨砂分组（薄白底 + 细描边，无深色块/无投影），浮在小组件磨砂表面上。
-            content
-                .background(RoundedRectangle(cornerRadius: radius, style: .continuous).fill(Color.white.opacity(0.05)))
-                .overlay(RoundedRectangle(cornerRadius: radius, style: .continuous).strokeBorder(Color.white.opacity(0.10)))
+            content.overlay(alignment: .top) { Divider() }
         } else {
             full(content)
         }
@@ -301,6 +314,7 @@ struct Pulse: ViewModifier {
                 .opacity(dim ? 0.35 : 1.0)   // 对应 pulse{50%{opacity:.35}}
                 .animation(.easeInOut(duration: period / 2).repeatForever(autoreverses: true), value: dim)
                 .onAppear { dim = true }
+                .onDisappear { dim = false }
         } else {
             content
         }

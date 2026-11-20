@@ -9,9 +9,12 @@ struct UsageResponse: Decodable {
     let codexDaily: [String: Double]              // codex_daily: 日 → token
     let qoderDaily: [String: Double]?              // qoder_daily: 日 → token（旧 daemon 可缺失）
     let costDaily: [String: Double]               // cost_daily: 日 → 等值美元
+    var qoderCnDaily: [String: Double]? = nil
     let hourly: [HourBucket]                       // 覆盖 48h，每小时 c=claude x=codex q=qoder
     let projects7d: [ProjectUsage]?               // projects_7d
     var projectsAll7d: [ProjectUsage]? = nil
+    var projectsAll30d: [ProjectUsage]? = nil
+    var costsByAgentDaily: [String: [String: Double?]]? = nil
     // 成本汇总（用量卡头部 + 口径弹层拆分）
     let cost7d: Double?
     let cost30d: Double?
@@ -27,6 +30,7 @@ struct HourBucket: Decodable {
     let c: Double
     let x: Double
     let q: Double?
+    var qcn: Double? = nil
 }
 struct ProjectUsage: Decodable {
     let name: String
@@ -49,6 +53,9 @@ struct ActiveSession: Decodable {
     let project: String?
     let host: String?           // "app" 时显示 App 标
     var source: String? = nil   // qoder_app 等需要专用聚焦路径的来源
+    var indexedRowKey: String? = nil
+    var title: String? = nil
+    var indexedSession: SessionItem? = nil
     let runtimeSecs: Double?    // runtime_secs（优先）
     let runtime: String?        // 后端预格式化兜底
     let status: String?         // busy / idle / ""
@@ -71,6 +78,7 @@ struct DoneEvent: Decodable {
 struct TodaySummary {
     enum Family: String, CaseIterable { case opus, sonnet, haiku, other, codex, qoder }
     var byFamily: [Family: Double] = [:]
+    var byAgent: [Brand: Double] = [:]
     var totalTokens: Double = 0
     var costUSD: Double = 0
     var deltaPercent: Int?     // 近24h vs 前24h；nil=无对比基准
@@ -88,7 +96,7 @@ struct TodaySummary {
     }
 
     init?(from u: UsageResponse, now: Date = Date(),
-          visibleAgents: Set<String> = ["claude", "codex", "qoder"]) {
+          visibleAgents: Set<String> = Set(Brand.allCases.map(\.rawValue))) {
         guard let today = u.days.last else { return nil }
         var fams: [Family: Double] = [:]
         if visibleAgents.contains("claude") {
@@ -104,7 +112,11 @@ struct TodaySummary {
         if visibleAgents.contains("qoder") {
             fams[.qoder, default: 0] += u.qoderDaily?[today] ?? 0
         }
-        let tok = fams.values.reduce(0, +)
+        let cn = visibleAgents.contains("qoder_cn") ? u.qoderCnDaily?[today] ?? 0 : 0
+        byAgent = [.codex: fams[.codex] ?? 0, .qoder: fams[.qoder] ?? 0, .qoderCn: cn,
+                   .claude: [.opus, .sonnet, .haiku, .other].reduce(0) { $0 + (fams[$1] ?? 0) }]
+        fams[.qoder, default: 0] += cn
+        let tok = byAgent.values.reduce(0, +)
         guard tok > 0 else { return nil }
         // 环比：hourly 覆盖 48h，近 24h vs 前 24h
         let nowSec = now.timeIntervalSince1970
@@ -113,7 +125,8 @@ struct TodaySummary {
             let total = (visibleAgents.contains("claude") ? h.c : 0)
                 + (visibleAgents.contains("codex") ? h.x : 0)
                 + (visibleAgents.contains("qoder") ? h.q ?? 0 : 0)
-            if h.ts >= nowSec - 86400 { cur += total } else { prev += total }
+            let cnTotal = visibleAgents.contains("qoder_cn") ? h.qcn ?? 0 : 0
+            if h.ts >= nowSec - 86400 { cur += total + cnTotal } else { prev += total + cnTotal }
         }
         byFamily = fams
         totalTokens = tok
