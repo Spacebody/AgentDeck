@@ -125,6 +125,10 @@ struct QuotaSnapshotGate {
 
 @MainActor
 public final class AppStore: ObservableObject {
+    @Published public var gatewayRestart: GatewayRestartStatus = .idle
+    public var gatewayInstallInProgress: Bool { updateInstall?.running == true }
+    public var canRestartGateway: Bool { gatewayRestart != .restarting && !gatewayInstallInProgress }
+    var canInstallUpdate: Bool { updateAvailable && canRestartGateway }
     // 仅初始化默认值，无需主线程隔离 → nonisolated，便于主壳在属性声明处直接构造。
     public nonisolated init() { api = .shared }
 
@@ -634,12 +638,15 @@ public final class AppStore: ObservableObject {
     }
 
     /// 自定义主色 → Brand 全局覆盖（额度环/进度条/用量图同步）。
+    public var onAgentPaletteChanged: (() -> Void)?
     private func applyCustomColors() {
         var colors: [Brand: Color] = [:]
         for agent in AgentSettingsCatalog.all {
             colors[agent.brand] = Color(hexString: settings[agent.colorKey]?.stringVal ?? "")
         }
+        guard AgentColors.shared.overrides != colors else { return }
         AgentColors.shared.replace(colors)
+        onAgentPaletteChanged?()
     }
 
     // MARK: 动作
@@ -701,6 +708,20 @@ public final class AppStore: ObservableObject {
     }
 
     // MARK: 会话索引 / 搜索 / 分页
+    func visitSessionList() {
+        guard !sessionsLoading, sessionPageCursors.indices.contains(sessionPage - 1) else { return }
+        sessionRequestGeneration += 1
+        let generation = sessionRequestGeneration
+        let page = sessionPage
+        let cursor = sessionPageCursors[page - 1]
+        sessionIndexRetryTask?.cancel()
+        sessionsLoading = true
+        searchTask = Task { [weak self] in
+            await self?.loadSessionPage(cursor: cursor, targetPage: page, resetHistory: page == 1,
+                                        generation: generation, interactive: true)
+        }
+    }
+
     func search(_ q: String) {
         sessionQuery = q
         sessionRequestGeneration += 1
@@ -711,14 +732,14 @@ public final class AppStore: ObservableObject {
         let query = q.trimmingCharacters(in: .whitespacesAndNewlines)
         if query.isEmpty {
             searchTask = Task { [weak self] in
-                await self?.loadSessionPage(reset: true, generation: generation)
+                await self?.loadSessionPage(reset: true, generation: generation, interactive: true)
             }
             return
         }
         searchTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 250_000_000)
             if Task.isCancelled { return }
-            await self?.loadSessionPage(reset: true, generation: generation)
+            await self?.loadSessionPage(reset: true, generation: generation, interactive: true)
         }
     }
 
@@ -732,7 +753,7 @@ public final class AppStore: ObservableObject {
         sessionIndexRetryTask?.cancel()
         invalidateSessionNavigation()
         searchTask = Task { [weak self] in
-            await self?.loadSessionPage(reset: true, generation: generation)
+            await self?.loadSessionPage(reset: true, generation: generation, interactive: true)
         }
     }
 
@@ -746,7 +767,7 @@ public final class AppStore: ObservableObject {
         searchTask = Task { [weak self] in
             await self?.loadSessionPage(
                 cursor: cursor, targetPage: targetPage,
-                resetHistory: false, generation: generation)
+                resetHistory: false, generation: generation, interactive: true)
         }
     }
 
@@ -762,7 +783,7 @@ public final class AppStore: ObservableObject {
         searchTask = Task { [weak self] in
             await self?.loadSessionPage(
                 cursor: cursor, targetPage: targetPage,
-                resetHistory: false, generation: generation)
+                resetHistory: false, generation: generation, interactive: true)
         }
     }
 
@@ -801,15 +822,15 @@ public final class AppStore: ObservableObject {
         return params
     }
 
-    private func loadSessionPage(reset: Bool, generation: Int) async {
+    private func loadSessionPage(reset: Bool, generation: Int, interactive: Bool = false) async {
         await loadSessionPage(
             cursor: nil, targetPage: 1,
-            resetHistory: reset, generation: generation)
+            resetHistory: reset, generation: generation, interactive: interactive)
     }
 
     private func loadSessionPage(
         cursor: String?, targetPage: Int,
-        resetHistory: Bool, generation: Int
+        resetHistory: Bool, generation: Int, interactive: Bool = false
     ) async {
         guard generation == sessionRequestGeneration, !Task.isCancelled else { return }
         if sessionFilter == "all" && !agentOn("claude") && !agentOn("codex") && !agentOn("qoder") {
@@ -821,8 +842,9 @@ public final class AppStore: ObservableObject {
         sessionsLoading = true
         sessionsLoadFailed = false
         do {
-            let response: SessionsResponse = try await api.get(
-                "/api/sessions", query: sessionRequestParams(cursor: cursor))
+            var params = sessionRequestParams(cursor: cursor)
+            if interactive { params["interactive"] = "1" }
+            let response: SessionsResponse = try await api.get("/api/sessions", query: params)
             guard generation == sessionRequestGeneration, !Task.isCancelled else { return }
             let cursorStale = response.cursorStale ?? false
             applySessionPage(
@@ -888,7 +910,7 @@ public final class AppStore: ObservableObject {
     }
 
     func startUpdateInstall() async {
-        guard !Task.isCancelled, let up = update else { return }
+        guard !Task.isCancelled, canInstallUpdate, let up = update else { return }
         let generation = backendGeneration
         updateInstall = UpdateInstallStatus(
             ok: true, running: true, id: nil, stage: "queued",

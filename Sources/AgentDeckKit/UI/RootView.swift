@@ -117,6 +117,7 @@ public struct AgentDeckRootView: View {
     @ObservedObject var store: AppStore
     var version: String
     var onQuit: () -> Void
+    var onRestartBackend: () -> Void = {}
     var onOpenExternal: (String) -> Void
     var onPasteEnter: (String, Int) -> Void
     var onHidePanel: () -> Void
@@ -129,6 +130,7 @@ public struct AgentDeckRootView: View {
 
     public init(store: AppStore, version: String = "dev",
                 onQuit: @escaping () -> Void = {},
+                onRestartBackend: @escaping () -> Void = {},
                 onOpenExternal: @escaping (String) -> Void = { _ in },
                 onPasteEnter: @escaping (String, Int) -> Void = { _, _ in },
                 onHidePanel: @escaping () -> Void = {},
@@ -136,6 +138,7 @@ public struct AgentDeckRootView: View {
                 onContentHeight: @escaping (CGFloat) -> Void = { _ in }) {
         self.store = store; self.version = version
         self.onQuit = onQuit; self.onOpenExternal = onOpenExternal
+        self.onRestartBackend = onRestartBackend
         self.onPasteEnter = onPasteEnter; self.onHidePanel = onHidePanel
         self.onScale = onScale; self.onContentHeight = onContentHeight
         self.previewMode = false
@@ -158,14 +161,14 @@ public struct AgentDeckRootView: View {
     @State private var info: InfoKind?
     @State private var infoResponder: NSResponder?
     @FocusState private var infoCloseFocused: Bool
-    @State private var updateDismissed = false
+    @State private var dismissedUpdateVersion: String?
     @State private var spinning = false
     @State private var toastMsg: String?
     @State private var toastSeq = 0
 
     private var minimal: Bool { store.settings["minimal_mode"]?.boolVal ?? false }
     private var dim: Double { Double(store.settings["glass_dim"]?.intVal ?? 68) / 100 }
-    private var showUpdate: Bool { store.updateAvailable && !updateDismissed }
+    private var showUpdate: Bool { store.updateAvailable && store.update?.latest != dismissedUpdateVersion }
     private var fontScale: CGFloat {
         min(max(CGFloat(store.settings["font_scale"]?.intVal ?? 100) / 100, 0.8), 1.6)
     }
@@ -199,6 +202,9 @@ public struct AgentDeckRootView: View {
         .preferredColorScheme(.dark)
         .environment(\.colorScheme, .dark)
         .foregroundStyle(Theme.ink)
+        .onChange(of: store.gatewayRestart) { status in
+            if status != .idle { showToast(L(restartLabel)) }
+        }
         .onExitCommand {
             if info != nil { info = nil }
             else if showSettings && settingsPage == .agents { settingsPage = .main }
@@ -246,7 +252,17 @@ public struct AgentDeckRootView: View {
                 settingsPage = .main
                 showSettings = true
             }
+            .help(L("header.settings"))
+            .accessibilityLabel(L("header.settings"))
             IconButton(system: "arrow.clockwise", weight: .semibold, fontSize: 15, spinning: spinning, customRefresh: true) { manualRefresh() }
+                .help(L("header.refresh"))
+                .accessibilityLabel(L("header.refresh"))
+            IconButton(system: store.gatewayRestart == .failed || store.gatewayRestart == .foreign
+                       ? "exclamationmark.triangle" : "arrow.triangle.2.circlepath",
+                       spinning: store.gatewayRestart == .restarting, action: onRestartBackend)
+                .disabled(!store.canRestartGateway)
+                .help(L(restartButtonLabel))
+                .accessibilityLabel(L(restartButtonLabel))
             IconButton(system: "power", danger: true, action: onQuit)
                 .help(L("header.quit"))
                 .accessibilityLabel(L("header.quit"))
@@ -311,8 +327,8 @@ public struct AgentDeckRootView: View {
                     .padding(.horizontal, 12).padding(.vertical, 4)
                     .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.10)))
                     .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Theme.edge))
-            }.buttonStyle(.plain).hoverLift().disabled(installing)
-            Button { updateDismissed = true } label: {
+            }.buttonStyle(.plain).hoverLift().disabled(!store.canInstallUpdate)
+            Button { dismissedUpdateVersion = store.update?.latest } label: {
                 Image(systemName: "xmark").font(.system(size: 11)).foregroundStyle(Theme.ink3)
             }.buttonStyle(.plain)
         }
@@ -468,6 +484,9 @@ public struct AgentDeckRootView: View {
                 onNextPage: { store.nextSessionPage() },
                 onPageSize: { store.setSessionPageSize($0) })
         }
+        .task(id: store.panelVisible && !showSettings) {
+            if store.panelVisible && !showSettings && !previewMode { store.visitSessionList() }
+        }
         .frame(maxWidth: .infinity, alignment: .top)
         .reveal(delay: 0.05)
     }
@@ -603,6 +622,23 @@ public struct AgentDeckRootView: View {
                 .padding(.bottom, 18)
         }
         .transition(.move(edge: .bottom).combined(with: .opacity))
+    }
+
+    private var restartLabel: String {
+        switch store.gatewayRestart {
+        case .idle: return "header.restartGateway"
+        case .restarting: return "gateway.restarting"
+        case .failed: return "gateway.failed"
+        case .foreign: return "gateway.foreign"
+        case .restarted: return "gateway.restarted"
+        case .recovered: return "gateway.recovered"
+        }
+    }
+    private var restartButtonLabel: String {
+        switch store.gatewayRestart {
+        case .failed, .foreign, .restarting: return restartLabel
+        default: return "header.restartGateway"
+        }
     }
 
     private func showToast(_ msg: String) {
@@ -756,7 +792,8 @@ public struct AgentDeckRootView: View {
             Task {
                 await store.checkUpdate()
                 if store.updateAvailable {
-                    updateDismissed = false
+                    dismissedUpdateVersion = nil
+                    showSettings = false
                     showToast(L("update.available", ["v": "v\(store.update?.latest ?? "")"]))
                 } else {
                     showToast(L(store.update == nil || store.update?.error == true

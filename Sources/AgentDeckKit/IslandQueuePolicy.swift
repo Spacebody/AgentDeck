@@ -9,10 +9,16 @@ package struct IslandEvent: Equatable {
     package let kind: String
     package let level: String
     package let dedupeKey: String
+    package let timestamp: TimeInterval
+
+    package static func isFresh(_ timestamp: TimeInterval, now: TimeInterval) -> Bool {
+        (0...60).contains(now - timestamp)
+    }
 
     package init(
         tool: String, title: String, project: String, session: String, cwd: String,
-        kind: String, level: String, dedupeKey: String
+        kind: String, level: String, dedupeKey: String,
+        timestamp: TimeInterval = Date().timeIntervalSince1970
     ) {
         self.tool = tool
         self.title = title
@@ -22,6 +28,7 @@ package struct IslandEvent: Equatable {
         self.kind = kind
         self.level = level
         self.dedupeKey = dedupeKey
+        self.timestamp = timestamp
     }
 }
 
@@ -47,7 +54,8 @@ package struct IslandEventQueue {
         }
     }
 
-    package mutating func popFirst() -> IslandEvent? {
+    package mutating func popFirst(now: TimeInterval = Date().timeIntervalSince1970) -> IslandEvent? {
+        events.removeAll { !IslandEvent.isFresh($0.timestamp, now: now) }
         guard !events.isEmpty else { return nil }
         return events.removeFirst()
     }

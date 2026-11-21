@@ -6,7 +6,7 @@
 #   ./build.sh uninstall   完整卸载（App + 登录项 + 数据目录可选保留）
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DIST="$ROOT/dist"
 APP="$DIST/AgentDeck.app"
 VERSION="$(tr -d '[:space:]' < "$ROOT/VERSION")"
@@ -160,17 +160,151 @@ stop_running() {
   done
 }
 
+swap_apps() {
+  # Darwin RENAME_SWAP exchanges two nonempty bundles without a missing-app window.
+  python3 - "$1" "$2" <<'PY'
+import ctypes, os, sys
+swap = ctypes.CDLL(None, use_errno=True).renamex_np
+if swap(os.fsencode(sys.argv[1]), os.fsencode(sys.argv[2]), 2):
+    sys.exit(os.strerror(ctypes.get_errno()))
+PY
+}
+
+launch_app() {
+  open "$1" || return 1
+  # LaunchServices can accept the request even when the executable exits at startup.
+  osascript -l JavaScript - "$1" "$BUNDLE_ID" "${2:-keep}" <<'JXA'
+ObjC.import('AppKit')
+function run([path, id, onTimeout]) {
+  function instances() {
+    const apps = $.NSRunningApplication.runningApplicationsWithBundleIdentifier(id)
+    const matches = []
+    for (let i = 0; i < apps.count; i++) {
+      const app = apps.objectAtIndex(i)
+      if (!app.terminated && ObjC.unwrap(app.bundleURL.path) === path) matches.push(app)
+    }
+    return matches
+  }
+  for (let attempt = 0; attempt < 50; attempt++) {
+    const ready = instances().find(app => app.finishedLaunching)
+    if (ready) return ready.processIdentifier
+    delay(0.2)
+  }
+  if (onTimeout === 'stop') {
+    const stuck = instances()
+    const pids = stuck.map(app => app.processIdentifier)
+    for (const app of stuck) app.forceTerminate
+    function stillRunning() { return instances().some(app => pids.includes(app.processIdentifier)) }
+    for (let i = 0; i < 50 && stillRunning(); i++) delay(0.1)
+    if (stillRunning()) throw Error("New process did not exit: " + path)
+  }
+  throw Error("App did not finish launching: " + path)
+}
+JXA
+}
+
+fetch_install_health() {
+  curl --noproxy '*' -fsS --max-time 2 http://127.0.0.1:7777/api/health
+}
+
+install_backend_ready() {
+  local script="$1/Contents/Resources/agentdeckd.py" version="$2" app_pid="$3" daemon_pid command
+  [[ "$app_pid" =~ ^[1-9][0-9]*$ ]] || return 1
+  daemon_pid="$(pgrep -P "$app_pid" -f '/agentdeckd[.]py$')" || return 1
+  [[ "$daemon_pid" =~ ^[1-9][0-9]*$ ]] || return 1
+  command="$(ps -ww -p "$daemon_pid" -o command=)" || return 1
+  [[ "$command" == *" $script" ]] || return 1
+  fetch_install_health | python3 -c '
+import json, os, sys
+version, parent, daemon, script = sys.argv[1:]
+data = json.load(sys.stdin)
+ok = (data.get("ok") is True and data.get("version") == version
+      and data.get("parent_pid") == int(parent) and data.get("pid") == int(daemon)
+      and isinstance(data.get("script_path"), str)
+      and os.path.realpath(data["script_path"]) == os.path.realpath(script))
+sys.exit(0 if ok else 1)
+' "$version" "$app_pid" "$daemon_pid" "$script"
+}
+
+wait_install_health() {
+  local deadline=$((SECONDS + 30))
+  while (( SECONDS < deadline )); do
+    install_backend_ready "$@" 2>/dev/null && return 0
+    sleep 0.25
+  done
+  echo "✗ /api/health 未匹配安装版本 $2、App PID $3 或目标 daemon" >&2
+  return 1
+}
+
+install_app() (
+  set -e
+  # EXIT may run after bash unwinds the function's locals. These variables
+  # belong to the transaction subshell and cannot leak into the caller.
+  dest="$1" previous="" restart=0 app_pid=""
+  work="$(mktemp -d "$(dirname "$dest")/.agentdeck-install.XXXXXXXX")"
+  staged="$work/AgentDeck.app"
+  finish_install() {
+    local status=$? current stopped=1
+    trap - EXIT
+    trap '' HUP INT TERM
+    if [ "$status" -ne 0 ] && [ "$restart" = 1 ]; then
+      if [ -e "$dest" ]; then
+        current="$(stat -f %i "$dest")" || { echo "✗ 无法确认安装状态，保留 $work" >&2; exit 1; }
+      elif [ -n "$previous" ] || [ ! -e "$staged" ]; then
+        echo "✗ 无法确认安装状态，保留 $work" >&2; exit 1
+      else
+        current=""
+      fi
+      if [ "$current" = "$inode" ]; then
+        if [ -n "$app_pid" ]; then stop_running || stopped=0; fi
+        if [ -e "$staged" ]; then
+          swap_apps "$staged" "$dest" || { echo "✗ 回滚失败，旧版保留在 $staged" >&2; exit 1; }
+        else
+          mv "$dest" "$staged" || exit 1
+        fi
+      elif [ "$current" != "$previous" ]; then
+        echo "✗ 安装目标已变更，保留 $work" >&2; exit 1
+      fi
+      if [ -d "$dest" ]; then
+        if [ "$stopped" = 1 ]; then
+          launch_app "$dest" >/dev/null || echo "✗ 旧版保留在 $dest，但未确认启动" >&2
+        else
+          echo "✗ 旧版已还原到 $dest，新版进程未退出，请手动重启" >&2
+        fi
+      fi
+    fi
+    rm -rf "$work"
+    exit "$status"
+  }
+  trap finish_install EXIT
+  trap 'exit 1' HUP INT TERM
+  ditto "$APP" "$staged"
+  codesign --verify --strict "$staged"
+  version="$(plutil -extract CFBundleShortVersionString raw "$staged/Contents/Info.plist")"
+  inode="$(stat -f %i "$staged")"
+  if [ -e "$dest" ] || [ -L "$dest" ]; then
+    [[ -d "$dest" && ! -L "$dest" ]] || exit 1
+    previous="$(stat -f %i "$dest")"
+    restart=1
+    stop_running
+    swap_apps "$staged" "$dest"
+  else
+    restart=1
+    mv "$staged" "$dest"
+  fi
+  app_pid="$(launch_app "$dest" stop)"
+  wait_install_health "$dest" "$version" "$app_pid"
+)
+
+[[ "${BASH_SOURCE[0]}" == "$0" ]] || return 0
 case "${1:-build}" in
   build)
     build
     ;;
   install)
     build
-    stop_running
     echo "▸ 安装到 /Applications…"
-    rm -rf "/Applications/AgentDeck.app"
-    cp -R "$APP" /Applications/
-    open "/Applications/AgentDeck.app"
+    install_app "/Applications/AgentDeck.app"
     echo "✓ 已安装并启动。首次启动会自动注册「登录项」开机自启"
     echo "  （系统设置 → 通用 → 登录项 可见；右键菜单栏图标也可切换）"
     ;;
@@ -238,7 +372,7 @@ EOF
   uninstall)
     stop_running
     # 干净还原我们对 ~/.claude / ~/.codex 的配置改动（只删带标记的那部分）
-    python3 "$ROOT/agentdeckd.py" --remove-integration 2>/dev/null || true
+    python3 "$ROOT/agentdeckd.py" --remove-integration
     rm -rf "/Applications/AgentDeck.app" "$DIST"
     echo "✓ 已卸载 App。数据目录保留在:"
     echo "    ~/Library/Application Support/AgentDeck"

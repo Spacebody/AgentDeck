@@ -16,7 +16,17 @@ struct ProjectsResponse: Decodable {
 }
 
 @MainActor final class ProjectStore: ObservableObject {
-    @Published private(set) var projects: [ProjectItem] = []
+    @Published private var discovered: [ProjectItem]
+    @Published private(set) var imported: [String]
+    private let defaults: UserDefaults
+    private static let directoryKey = "importedProjectDirectories"
+    var projects: [ProjectItem] {
+        let known = Set(discovered.map(\.cwd))
+        return discovered + imported.filter { !known.contains($0) }.map {
+            ProjectItem(cwd: $0, name: URL(fileURLWithPath: $0).lastPathComponent,
+                        mtime: 0, count: 0, active: [])
+        }
+    }
     @Published private(set) var loading = false
     @Published private(set) var failed = false
     @Published private(set) var indexing = false
@@ -24,20 +34,43 @@ struct ProjectsResponse: Decodable {
     private var scope: Set<String>?
     private let api: APIClient
 
-    init(projects: [ProjectItem] = [], api: APIClient = .shared) { self.projects = projects; self.api = api }
+    init(projects: [ProjectItem] = [], api: APIClient = .shared, defaults: UserDefaults = .standard,
+         loadImported: Bool = true) {
+        self.discovered = projects; self.api = api; self.defaults = defaults
+        imported = loadImported ? defaults.stringArray(forKey: Self.directoryKey) ?? [] : []
+    }
 
-    func refresh(agents: Set<String>) async {
-        if scope != agents { projects = []; indexing = false; scope = agents }
+    func importDirectories(_ urls: [URL]) {
+        var paths = imported
+        for url in urls where url.isFileURL {
+            let path = url.standardizedFileURL.resolvingSymlinksInPath().path
+            var directory: ObjCBool = false
+            if FileManager.default.fileExists(atPath: path, isDirectory: &directory),
+               directory.boolValue, !paths.contains(path) { paths.append(path) }
+        }
+        imported = paths
+        defaults.set(paths, forKey: Self.directoryKey)
+    }
+
+    func forgetDirectory(_ path: String) {
+        imported.removeAll { $0 == path }
+        defaults.set(imported, forKey: Self.directoryKey)
+    }
+
+    func refresh(agents: Set<String>, interactive: Bool = true) async {
+        if scope != agents { discovered = []; indexing = false; scope = agents }
         generation += 1
         let request = generation
         loading = true
         defer { if request == generation { loading = false } }
         failed = false
-        guard !agents.isEmpty else { projects = []; loading = false; indexing = false; return }
+        guard !agents.isEmpty else { discovered = []; loading = false; indexing = false; return }
         do {
-            let response: ProjectsResponse = try await api.get("/api/projects", query: ["tool": agents.sorted().joined(separator: ",")])
+            var params = ["tool": agents.sorted().joined(separator: ",")]
+            if interactive { params["interactive"] = "1" }
+            let response: ProjectsResponse = try await api.get("/api/projects", query: params)
             guard !Task.isCancelled, request == generation else { return }
-            projects = response.projects
+            discovered = response.projects
             indexing = response.indexing
         } catch {
             guard !Task.isCancelled, request == generation else { return }
@@ -75,9 +108,11 @@ struct ProjectsResponse: Decodable {
         loading = true; failed = false
         defer { if request == generation { loading = false } }
         do {
-            let response: SessionsResponse = try await api.get("/api/projects", query: [
+            var params = [
                 "cwd": cwd, "tool": agents.sorted().joined(separator: ","), "cursor": cursors[target - 1]
-            ])
+            ]
+            if !refreshCurrent { params["interactive"] = "1" }
+            let response: SessionsResponse = try await api.get("/api/projects", query: params)
             guard !Task.isCancelled, request == generation else { return }
             if response.cursorStale == true { cursors = [""]; target = 1 }
             sessions = response.sessions

@@ -64,6 +64,33 @@ private final class AuditHeldRequest {
 }
 
 final class AppStoreAPIAuditTests: XCTestCase {
+    @MainActor func testIndexDemandAppearsOnlyOnInteractiveRequests() async {
+        let list = expectation(description: "user visited session list")
+        let poll = expectation(description: "background session poll")
+        let client = api { request in
+            let url = request.request.url!
+            let params = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            let demand = params.first { $0.name == "interactive" }?.value
+            if url.path == "/api/projects" {
+                let tool = params.first { $0.name == "tool" }?.value
+                XCTAssertEqual(demand, tool == "codex" ? "1" : nil)
+                request.respond(#"{"projects":[],"indexing":false}"#)
+            } else if url.path == "/api/sessions" {
+                if demand == "1" { list.fulfill() } else { XCTAssertNil(demand); poll.fulfill() }
+                request.respond(#"{"sessions":[]}"#)
+            } else { request.respond("{}") }
+        }
+        let projects = ProjectStore(api: client)
+        await projects.refresh(agents: ["codex"])
+        await projects.refresh(agents: ["claude"], interactive: false)
+        let store = AppStore(api: client)
+        defer { store.stop() }
+        await store.refresh()
+        await fulfillment(of: [poll], timeout: 2)
+        store.visitSessionList()
+        await fulfillment(of: [list], timeout: 2)
+    }
+
     @MainActor func testProjectsDiscardHiddenScopeEvenWhenRefreshFails() async {
         let client = api { request in
             let tool = URLComponents(url: request.request.url!, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "tool" }?.value
@@ -415,9 +442,15 @@ final class AppStoreAPIAuditTests: XCTestCase {
             _ = held.holdFirst(request)
             started.fulfill()
         })
-        store.update = try? JSONDecoder().decode(UpdateInfo.self, from: Data(#"{"latest":"new"}"#.utf8))
+        store.update = try? JSONDecoder().decode(UpdateInfo.self, from: Data(#"{"latest":"new","available":true}"#.utf8))
+        store.gatewayRestart = .restarting
+        XCTAssertFalse(store.canInstallUpdate)
+        await store.startUpdateInstall()
+        XCTAssertNil(store.updateInstall)
+        store.gatewayRestart = .idle
         let install = Task { await store.startUpdateInstall() }
         await fulfillment(of: [started], timeout: 2)
+        XCTAssertFalse(store.canRestartGateway)
         store.stop()
         store.updateInstall = nil
         held.respond(#"{"ok":true,"running":true,"stage":"downloading"}"#)
@@ -531,9 +564,11 @@ final class AppStoreAPIAuditTests: XCTestCase {
                 secondPageRequests += 1
                 let count = secondPageRequests
                 lock.unlock()
+                XCTAssertEqual(query?.first { $0.name == "interactive" }?.value, count == 1 ? "1" : nil)
                 request.respond("{\"sessions\":[],\"total\":40,\"indexing\":\(count == 1)}")
                 (count == 1 ? second : retry).fulfill()
             } else {
+                XCTAssertEqual(query?.first { $0.name == "interactive" }?.value, "1")
                 request.respond(#"{"sessions":[],"total":40,"has_more":true,"next_cursor":"page-2"}"#)
                 first.fulfill()
             }

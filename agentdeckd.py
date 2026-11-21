@@ -1154,12 +1154,13 @@ cleanup
 
 
 def _update_install_worker(job_id, dmg_url, version):
-    tmp = Path(tempfile.mkdtemp(prefix="agentdeck-update-"))
-    dmg_path = tmp / f"AgentDeck-{version or 'latest'}.dmg"
-    mount = tmp / "mnt"
-    stage = tmp / "stage"
+    tmp = None
     mounted = False
     try:
+        tmp = Path(tempfile.mkdtemp(prefix="agentdeck-update-"))
+        dmg_path = tmp / f"AgentDeck-{version or 'latest'}.dmg"
+        mount = tmp / "mnt"
+        stage = tmp / "stage"
         _append_update_log(f"starting AgentDeck {version} update job {job_id}")
         _download_update_dmg(dmg_url, dmg_path)
 
@@ -1186,7 +1187,6 @@ def _update_install_worker(job_id, dmg_url, version):
             helper,
             _update_install_script(tmp, stage, mount, version, transaction),
             mode=0o755)
-        _set_update_job(stage="installing", progress=0.95, message="installing")
         update_log = Path.home() / "Library" / "Logs" / "AgentDeckUpdate.log"
         update_log.parent.mkdir(parents=True, exist_ok=True)
         with open(update_log, "a", encoding="utf-8") as log:
@@ -1196,17 +1196,24 @@ def _update_install_worker(job_id, dmg_url, version):
             subprocess.Popen(
                 ["/bin/sh", str(helper)], stdout=log,
                 stderr=subprocess.STDOUT, start_new_session=True)
+        _set_update_job(stage="installing", progress=0.95, message="installing")
     except Exception as exc:
-        if mounted:
-            subprocess.run(["hdiutil", "detach", str(mount)], stdout=subprocess.DEVNULL,
-                           stderr=subprocess.DEVNULL, timeout=20)
-        try:
-            import shutil
-            shutil.rmtree(tmp)
-        except OSError:
-            pass
         _set_update_job(running=False, stage="error", progress=0.0,
                         error=str(exc)[:500], message="error")
+        if mounted:
+            try:
+                subprocess.run(["hdiutil", "detach", str(mount)], stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, timeout=20, check=True)
+            except (OSError, subprocess.SubprocessError) as detach_error:
+                # Never recursively remove a directory containing a live mount.
+                _append_update_log(f"AgentDeck {version} update failed: {exc}; detach failed: {detach_error}")
+                return
+        try:
+            import shutil
+            if tmp is not None:
+                shutil.rmtree(tmp)
+        except OSError:
+            pass
         _append_update_log(f"AgentDeck {version} update failed before handoff: {exc}")
 
 
@@ -3232,10 +3239,13 @@ def _clean_title(text):
 
 _SESSION_INDEX_SCHEMA = 2
 _SESSION_INDEX_INTERVAL = 30
+_SESSION_INDEX_BATCH = 50
+_SESSION_INDEX_MAX_INTERVAL = 300
 _SESSION_PAGE_MAX = 200
 _session_schema_lock = threading.Lock()
 _session_schema_paths = set()
 _session_index_write_lock = threading.Lock()
+_session_index_scan_lock = threading.Lock()
 _session_index_start_lock = threading.Lock()
 _session_index_state_lock = threading.Lock()
 _session_index_wake = threading.Event()
@@ -3747,8 +3757,6 @@ def _session_source_files():
                     "size": st.st_size, "mtime": st.st_mtime,
                 })
     entries.extend(_qoder_app_session_entries())
-    # 首次建库先产出最近会话，前端可在后台索引未完成时逐步得到可用结果。
-    entries.sort(key=lambda e: e["mtime"], reverse=True)
     return entries
 
 
@@ -3779,35 +3787,33 @@ def _session_file_state_upsert(conn, entry, status, info):
                              info.get("branch", ""))))
 
 
-def _rebuild_session_rows(conn):
-    """每个复合身份只展示 mtime 最新的文件；旧副本仍留在 file_state 供回退。"""
-    conn.execute("DELETE FROM session_index WHERE source_present=1")
-    conn.execute("""
-        INSERT INTO session_index (
-            tool, account_id, account, session_id, path, inode, size, mtime,
-            title, cwd, project, branch, title_folded, project_folded,
-            search_text, source_present
-        )
-        SELECT tool, account_id, account, session_id, path, inode, size, mtime,
-               title, cwd, project, branch, title_folded, project_folded,
-               search_text, 1
-        FROM (
-            SELECT *, ROW_NUMBER() OVER (
-                PARTITION BY tool, account_id, session_id
-                ORDER BY mtime DESC, path DESC
-            ) AS row_num
-            FROM session_file_state
-            WHERE status='indexed' AND session_id<>''
-        )
-        WHERE row_num=1
-        ON CONFLICT(tool, account_id, session_id) DO UPDATE SET
-            account=excluded.account, path=excluded.path, inode=excluded.inode,
-            size=excluded.size, mtime=excluded.mtime, title=excluded.title,
-            cwd=excluded.cwd, project=excluded.project, branch=excluded.branch,
-            title_folded=excluded.title_folded,
-            project_folded=excluded.project_folded,
-            search_text=excluded.search_text, source_present=1
-    """)
+def _rebuild_session_rows(conn, affected):
+    columns = ("tool, account_id, session_id, account, path, size, mtime, title, "
+               "cwd, project, branch, title_folded, project_folded, search_text, inode")
+    identity = "tool=? AND account_id=? AND session_id=?"
+    inserts = []
+    changed = False
+    for key in affected:
+        winner = conn.execute(
+            f"SELECT {columns} FROM session_file_state WHERE {identity} "
+            "AND status='indexed' ORDER BY mtime DESC, path DESC LIMIT 1", key).fetchone()
+        old = conn.execute(
+            f"SELECT {columns} FROM session_index WHERE {identity} AND source_present=1",
+            key).fetchone()
+        if old == winner:
+            continue
+        if old and winner and old[:-1] == winner[:-1]:
+            conn.execute(f"UPDATE session_index SET inode=? WHERE {identity}",
+                         (winner["inode"], *key))
+            continue
+        changed = True
+        conn.execute(f"DELETE FROM session_index WHERE {identity}", key)
+        if winner:
+            inserts.append(tuple(winner))
+    # Release all old UNIQUE paths before inserting (two files can swap identities).
+    conn.executemany(f"INSERT INTO session_index ({columns}) VALUES "
+                     "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", inserts)
+    return changed
 
 
 def _pin_key(tool, account_id, sid):
@@ -3831,11 +3837,12 @@ def _save_pins(pins):
     _atomic_write_text(PINS_FILE, json.dumps(pins, ensure_ascii=False, indent=1))
 
 
-def _sync_pins_to_db(conn):
+def _sync_pins_to_db(conn, migrate_legacy=False, keys=None):
     """pins.json 是用户状态真源；SQLite 只镜像，删库重建也不会丢收藏。"""
     with _pins_lock:
         raw = _load_pins()
         canonical = {}
+        deferred = set()
         for old_key, value in raw.items():
             if not isinstance(value, dict):
                 continue
@@ -3849,6 +3856,9 @@ def _sync_pins_to_db(conn):
             if len(parts) == 3 and parts[0] == tool and parts[2] == sid:
                 account_id = parts[1] or account_id
             if not account_id:
+                if not migrate_legacy:
+                    deferred.add((tool, sid))
+                    continue
                 row = conn.execute(
                     "SELECT account_id, account FROM session_index "
                     "WHERE tool=? AND session_id=? AND source_present=1 "
@@ -3858,12 +3868,23 @@ def _sync_pins_to_db(conn):
                     snap["account"] = row["account"]
             if not re.fullmatch(r"[a-z0-9-]{1,120}", account_id):
                 account_id = "default"
+            if keys is not None and (tool, account_id, sid) not in keys:
+                continue
             snap.update(tool=tool, id=sid, account_id=account_id)
             canonical[_pin_key(tool, account_id, sid)] = snap
-        if canonical != raw:
+        if migrate_legacy and canonical != raw:
             _save_pins(canonical)
 
-    conn.execute("UPDATE session_index SET pinned=0 WHERE pinned<>0")
+    before = conn.total_changes
+    pinned = "SELECT tool,account_id,session_id,source_present FROM session_index WHERE pinned=1"
+    rows = (conn.execute(pinned).fetchall() if keys is None else
+            [row for key in keys for row in conn.execute(
+                pinned + " AND (tool,account_id,session_id)=(?,?,?)", key)])
+    for row in rows:
+        key = row[:3]
+        if _pin_key(*key) not in canonical and (key[0], key[2]) not in deferred:
+            action = "UPDATE session_index SET pinned=0" if row["source_present"] else "DELETE FROM session_index"
+            conn.execute(f"{action} WHERE tool=? AND account_id=? AND session_id=?", key)
     for snap in canonical.values():
         tool, account_id, sid = snap["tool"], snap["account_id"], snap["id"]
         found = conn.execute(
@@ -3871,7 +3892,7 @@ def _sync_pins_to_db(conn):
             (tool, account_id, sid)).fetchone()
         if found:
             conn.execute(
-                "UPDATE session_index SET pinned=1 WHERE tool=? AND account_id=? AND session_id=?",
+                "UPDATE session_index SET pinned=1 WHERE tool=? AND account_id=? AND session_id=? AND pinned=0",
                 (tool, account_id, sid))
             continue
         title = str(snap.get("title") or "")
@@ -3895,23 +3916,99 @@ def _sync_pins_to_db(conn):
         """, (tool, account_id, account, sid, synthetic, mtime, title, cwd,
               project, branch, title.casefold(), project.casefold(),
               _fold_session_text(title, cwd, project, branch)))
-    conn.execute("DELETE FROM session_index WHERE source_present=0 AND pinned=0")
+    return conn.total_changes != before
+
+
+def _publish_session_batch(conn, *, stats=(), parsed=(), removed=(), reconcile=None,
+                           finished=None):
+    with _session_index_write_lock, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        affected = set()
+        displaced = set()
+
+        def mark(row):
+            if row and row["session_id"]:
+                affected.add((row["tool"], row["account_id"], row["session_id"]))
+
+        if reconcile:
+            affected.update(reconcile)
+            # A stale row outside this page may still own a repaired winner's UNIQUE path.
+            for key in reconcile:
+                displaced.update(map(tuple, conn.execute("""
+                    DELETE FROM session_index WHERE (tool,account_id,session_id)<>(?,?,?)
+                    AND path=(SELECT path FROM session_file_state
+                              WHERE (tool,account_id,session_id)=(?,?,?) AND status='indexed'
+                              ORDER BY mtime DESC,path DESC LIMIT 1)
+                    RETURNING tool,account_id,session_id
+                """, (*key, *key))))
+        for entry, old in stats:
+            conn.execute("UPDATE session_file_state SET size=?, mtime=?, account=? WHERE path=?",
+                         (entry["size"], entry["mtime"], entry["account"], str(entry["path"])))
+            mark(old)
+        for entry, old, status, info in parsed:
+            _session_file_state_upsert(conn, entry, status, info)
+            mark(old)
+            if info and info.get("session_id"):
+                affected.add((entry["tool"], entry["account_id"], info["session_id"]))
+        for old in removed:
+            conn.execute("DELETE FROM session_file_state WHERE path=?", (old["path"],))
+            mark(old)
+        changed = bool(affected) and _rebuild_session_rows(conn, affected)
+        pin_keys = None if finished is not None else affected | displaced
+        if finished is not None or pin_keys:
+            changed |= _sync_pins_to_db(conn, migrate_legacy=finished is not None, keys=pin_keys)
+        if changed:
+            _bump_session_revision(conn)
+        if reconcile:
+            conn.execute("INSERT OR REPLACE INTO session_meta VALUES('publication_cursor', ?)",
+                         (json.dumps(reconcile[-1]),))
+        elif reconcile is not None:
+            conn.execute("INSERT OR REPLACE INTO session_meta VALUES('batch_publication_v1', '1')")
+            conn.execute("DELETE FROM session_meta WHERE key='publication_cursor'")
+        if finished is not None:
+            conn.execute("INSERT OR REPLACE INTO session_meta VALUES('indexed_at', ?)",
+                         (str(finished),))
+    return bool(stats or parsed or removed or changed)
+
+
+def _reconcile_session_batches(conn):
+    if conn.execute("SELECT 1 FROM session_meta WHERE key='batch_publication_v1'").fetchone():
+        return False
+    row = conn.execute("SELECT value FROM session_meta WHERE key='publication_cursor'").fetchone()
+    cursor = json.loads(row[0]) if row else ("", "", "")
+    changed = False
+    while True:
+        # Page both identity indexes outside the write transaction; include index-only ghosts.
+        keys = set()
+        for table, predicate in (("session_file_state", "status='indexed' AND session_id<>''"),
+                                 ("session_index", "source_present=1")):
+            keys.update(map(tuple, conn.execute(f"""
+                SELECT DISTINCT tool,account_id,session_id FROM {table}
+                WHERE (tool,account_id,session_id)>(?,?,?) AND {predicate}
+                ORDER BY tool,account_id,session_id LIMIT ?
+            """, (*cursor, _SESSION_INDEX_BATCH))))
+        page = sorted(keys)[:_SESSION_INDEX_BATCH]
+        changed |= _publish_session_batch(conn, reconcile=page)
+        if not page:
+            return changed
+        cursor = page[-1]
 
 
 def _session_index_scan():
     """枚举文件只在后台发生；已完成元数据的增长文件仅更新 stat，不重复读 JSONL。"""
-    with _session_index_write_lock:
+    with _session_index_scan_lock:
         _session_state(indexing=True, error="", processed_files=0)
         conn = None
         try:
             conn = _session_db_connect()
+            changed = _reconcile_session_batches(conn)
             entries = _session_source_files()
             _session_state(total_files=len(entries))
             existing = {row["path"]: row for row in conn.execute(
                 "SELECT path, tool, account_id, account, inode, size, mtime, status, "
                 "session_id, title, cwd, project, branch "
                 "FROM session_file_state")}
-            seen, writes, committed_writes, fast_processed = set(), 0, 0, 0
+            seen, stats, fast_processed = set(), [], 0
             parse_jobs = []
             for entry in entries:
                 path = str(entry["path"])
@@ -3942,17 +4039,10 @@ def _session_index_scan():
                                       or unchanged_incomplete):
                     if (old["size"] != entry["size"] or old["mtime"] != entry["mtime"]
                             or old["account"] != entry["account"]):
-                        conn.execute(
-                            "UPDATE session_file_state SET size=?, mtime=?, account=? "
-                            "WHERE path=?",
-                            (entry["size"], entry["mtime"], entry["account"], path))
-                        writes += 1
+                        stats.append((entry, old))
                     fast_processed += 1
                 else:
                     parse_jobs.append((entry, old))
-                if writes and writes % 50 == 0 and writes != committed_writes:
-                    conn.commit()
-                    committed_writes = writes
                 if fast_processed and fast_processed % 25 == 0:
                     _session_state(processed_files=fast_processed)
 
@@ -3964,53 +4054,49 @@ def _session_index_scan():
                     status, info = _session_file_info(entry["tool"], entry["path"])
                 return entry, old, status, info
 
+            for start in range(0, len(stats), _SESSION_INDEX_BATCH):
+                changed |= _publish_session_batch(conn, stats=stats[start:start + _SESSION_INDEX_BATCH])
+
             if parse_jobs:
+                parse_jobs.sort(key=lambda job: job[0]["mtime"], reverse=True)
                 workers = min(4, len(parse_jobs))
                 with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-                    for offset, (entry, old, status, info) in enumerate(
-                            pool.map(parse, parse_jobs), 1):
-                        _session_file_state_upsert(conn, entry, status, info)
-                        writes += 1
-                        if writes % 50 == 0 and writes != committed_writes:
-                            _rebuild_session_rows(conn)
-                            _sync_pins_to_db(conn)
-                            _update_session_revision_if_changed(conn)
-                            conn.commit()
-                            committed_writes = writes
-                        if offset % 25 == 0:
-                            _session_state(processed_files=fast_processed + offset)
+                    for start in range(0, len(parse_jobs), _SESSION_INDEX_BATCH):
+                        jobs = parse_jobs[start:start + _SESSION_INDEX_BATCH]
+                        parsed = list(pool.map(parse, jobs))
+                        changed |= _publish_session_batch(conn, parsed=parsed)
+                        _session_state(processed_files=fast_processed + start + len(parsed))
 
-            for path in existing.keys() - seen:
-                if (path.startswith("qoder-app://")
-                        and not _qoder_app_scan_authoritative):
-                    continue
-                conn.execute("DELETE FROM session_file_state WHERE path=?", (path,))
-                writes += 1
-            if writes:
-                _rebuild_session_rows(conn)
-            _sync_pins_to_db(conn)
-            _update_session_revision_if_changed(conn)
+            removed = [existing[path] for path in existing.keys() - seen
+                       if not path.startswith("qoder-app://") or _qoder_app_scan_authoritative]
+            for start in range(0, len(removed), _SESSION_INDEX_BATCH):
+                changed |= _publish_session_batch(conn, removed=removed[start:start + _SESSION_INDEX_BATCH])
             now = time.time()
-            conn.execute(
-                "INSERT OR REPLACE INTO session_meta(key, value) VALUES('indexed_at', ?)",
-                (str(now),))
-            conn.commit()
+            changed |= _publish_session_batch(conn, finished=now)
             _session_state(indexing=False, indexed_at=now,
                            processed_files=len(entries), error="")
+            return changed
         except Exception as exc:
             if conn:
                 conn.rollback()
             _session_state(indexing=False, error=str(exc)[:240])
+            return None
         finally:
             if conn:
                 conn.close()
 
 
 def _session_index_loop():
+    interval = _SESSION_INDEX_INTERVAL
     while True:
-        _session_index_scan()
-        _session_index_wake.wait(_SESSION_INDEX_INTERVAL)
         _session_index_wake.clear()
+        changed = _session_index_scan()
+        if changed is not False:
+            interval = _SESSION_INDEX_INTERVAL
+        if _session_index_wake.wait(interval):
+            interval = _SESSION_INDEX_INTERVAL
+        elif changed is False:
+            interval = min(interval * 2, _SESSION_INDEX_MAX_INTERVAL)
 
 
 def _ensure_session_index_started():
@@ -4053,30 +4139,6 @@ def _bump_session_revision(conn):
         INSERT INTO session_meta(key, value) VALUES('revision', '1')
         ON CONFLICT(key) DO UPDATE SET value=CAST(value AS INTEGER) + 1
     """)
-
-
-def _update_session_revision_if_changed(conn):
-    """索引内容真正变化时才推进 revision；后台空扫描不能让正在浏览的游标失效。"""
-    digest = hashlib.sha256()
-    for row in conn.execute("""
-        SELECT tool, account_id, account, session_id, path, size, mtime, title,
-               cwd, project, branch, pinned, source_present
-        FROM session_index
-        ORDER BY tool, account_id, session_id
-    """):
-        digest.update(json.dumps(
-            list(row), ensure_ascii=False, separators=(",", ":")).encode())
-        digest.update(b"\n")
-    value = digest.hexdigest()
-    previous = conn.execute(
-        "SELECT value FROM session_meta WHERE key='snapshot_digest'").fetchone()
-    if previous and previous["value"] == value:
-        return False
-    conn.execute(
-        "INSERT OR REPLACE INTO session_meta(key, value) "
-        "VALUES('snapshot_digest', ?)", (value,))
-    _bump_session_revision(conn)
-    return True
 
 
 def _cursor_scope(query, tool):
@@ -4249,22 +4311,36 @@ def api_pin(body):
     with _session_index_write_lock:
         conn = _session_db_connect()
         try:
-            _sync_pins_to_db(conn)
-            _update_session_revision_if_changed(conn)
+            if _sync_pins_to_db(conn):
+                _bump_session_revision(conn)
             conn.commit()
         finally:
             conn.close()
     return {"ok": True, "pinned": bool(body.get("pinned"))}
 
 
-def api_sessions(query=None, tool="all", limit=None, cursor=""):
+def _wake_stale_session_index():
+    now = time.monotonic()
+    with _session_index_state_lock:
+        state = _session_index_state
+        if (not state["indexing"] and time.time() - state["indexed_at"] >= _SESSION_INDEX_INTERVAL
+                and now >= state.get("next_ui_wake", 0)):
+            state["next_ui_wake"] = now + _SESSION_INDEX_INTERVAL
+            _request_session_index_scan()
+
+
+def api_sessions(query=None, tool="all", limit=None, cursor="", interactive=False):
     _ensure_session_index_started()
+    if interactive:
+        _wake_stale_session_index()
     return _query_session_index(query, tool, limit, cursor)
 
 
 def api_projects(query):
     """Group indexed metadata, never the current page or decoded transcripts."""
     _ensure_session_index_started()
+    if query.get("interactive") == ["1"]:
+        _wake_stale_session_index()
     requested = str(query.get('tool', ['all'])[0])
     tools = list(AGENT_IDS) if requested == 'all' else [t for t in requested.split(',') if t in AGENT_IDS]
     with _path_mappings_lock:
@@ -5944,23 +6020,31 @@ def _remove_codex_notify(config=None, wrapper=None,
     config = Path(config) if config is not None else _CODEX_CONFIG
     wrapper_path = Path(wrapper) if wrapper is not None else _CODEX_WRAPPER
     st = _integration_state()
-    if config.exists():
+    try:
+        text = config.read_text()
+    except FileNotFoundError:
+        text = None
+    except (OSError, ValueError):
+        return False
+    if text is not None:
         try:
-            text = config.read_text()
             cur = _codex_read_notify(text)
             if _codex_notify_direct_is_ours(cur):
-                updated = _codex_set_notify(text, st.get(state_key))
+                updated = _codex_set_notify(text, _codex_notify_without_ours(st.get(state_key)))
                 _atomic_write_text(config, updated)
             elif _codex_notify_is_ours(cur):
                 # 外部 owner 的链中只摘掉 AgentDeck，保留 owner 及其它 previous notify。
                 updated = _codex_set_notify(text, _codex_notify_without_ours(cur))
                 _atomic_write_text(config, updated)
+            if _codex_notify_is_ours(_codex_read_notify(config.read_text())):
+                return False
         except (OSError, ValueError):
-            pass
+            return False
     try:
-        wrapper_path.unlink()
+        wrapper_path.unlink(missing_ok=True)
     except OSError:
-        pass
+        return False
+    return True
 
 
 def _codex_notify_targets():
@@ -6103,10 +6187,13 @@ def install_integration():
         current_configs = {os.path.realpath(target["config"]) for target in targets}
         st = _integration_state()
         stale_state_keys = []
+        retry_targets = []
         for target in _saved_codex_notify_targets(st):
             if os.path.realpath(target["config"]) not in current_configs:
-                _remove_codex_notify(**target)
-                stale_state_keys.append(target["state_key"])
+                if _remove_codex_notify(**target):
+                    stale_state_keys.append(target["state_key"])
+                else:
+                    retry_targets.append(target)
         changed = False
         for target in targets:
             changed = _install_codex_notify(**target) or changed
@@ -6115,7 +6202,7 @@ def install_integration():
             st.pop(state_key, None)
         st["codex_notify_targets"] = [
             {key: str(target[key]) for key in ("config", "wrapper", "state_key")}
-            for target in targets
+            for target in targets + retry_targets
         ]
         if changed:
             st["codex_notify"] = True
@@ -6135,21 +6222,31 @@ def remove_integration():
             _remove_qoder_hook(path)
         targets = _saved_codex_notify_targets(st) + _codex_notify_targets()
         seen = set()
+        failed = []
         for target in targets:
             key = os.path.realpath(target["config"])
             if key in seen:
                 continue
             seen.add(key)
-            _remove_codex_notify(**target)
+            if not _remove_codex_notify(**target):
+                failed.append(target)
         # 升级自旧版 integration.json 时没有 target 列表，仍还原默认槽。
         if os.path.realpath(_CODEX_CONFIG) not in seen:
-            _remove_codex_notify()
+            if not _remove_codex_notify():
+                failed.append(dict(config=_CODEX_CONFIG, wrapper=_CODEX_WRAPPER,
+                                   state_key="codex_prev_notify"))
         _remove_legacy_codex_stop_hook()
-        for f in (_HOOK_WRAPPER, _QODER_HOOK_WRAPPER, INTEGRATION_FILE):
+        if failed:
+            st["codex_notify_targets"] = [
+                {k: str(target[k]) for k in ("config", "wrapper", "state_key")}
+                for target in failed]
+            _integration_state_save(st)
+        for f in (_HOOK_WRAPPER, _QODER_HOOK_WRAPPER) + (() if failed else (INTEGRATION_FILE,)):
             try:
                 f.unlink()
             except OSError:
                 pass
+        return not failed
 
 
 def _events_load():
@@ -7964,7 +8061,8 @@ class Handler(BaseHTTPRequestHandler):
                     query.get("q", [""])[0],
                     tool=query.get("tool", ["all"])[0],
                     limit=query.get("limit", [None])[0],
-                    cursor=query.get("cursor", [""])[0]))
+                    cursor=query.get("cursor", [""])[0],
+                    interactive=query.get("interactive") == ["1"]))
             elif path == "/api/projects":
                 self._send(200, api_projects(query))
             elif path == "/api/usage":
@@ -8176,7 +8274,8 @@ def main():
 if __name__ == "__main__":
     # 卸载用：build.sh uninstall 调 `agentdeckd.py --remove-integration` 干净还原我们的配置改动
     if "--remove-integration" in sys.argv:
-        remove_integration()
+        if not remove_integration():
+            sys.exit("Could not restore Codex notify; forwarding scripts and backups retained. Retry after checking config permissions.")
         print("integration removed")
     elif "--install-integration" in sys.argv:
         install_integration()

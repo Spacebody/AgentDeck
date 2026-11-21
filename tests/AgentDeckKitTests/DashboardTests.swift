@@ -1,7 +1,65 @@
 import XCTest
+import SwiftUI
 @testable import AgentDeckKit
 
 final class DashboardTests: XCTestCase {
+    @MainActor func testIslandTextMeetsContrastForAgentColors() {
+        let colors = Brand.allCases.map { agentAccentInk($0.rawValue) } +
+            [NSColor.black, .darkGray, .gray, .blue, .red, .white]
+        for accent in colors {
+            let palette = IslandPalette(accent: accent)
+            let base = IslandPalette.luminance(palette.background) + 0.05
+            XCTAssertGreaterThanOrEqual((IslandPalette.luminance(palette.ink) + 0.05) / base, 7)
+            XCTAssertGreaterThanOrEqual((IslandPalette.luminance(IslandPalette.subtitle) + 0.05) / base, 4.5)
+            let original = accent.usingColorSpace(.sRGB)!
+            if (IslandPalette.luminance(original) + 0.05) / base >= 7 {
+                XCTAssertEqual(palette.ink, original)
+            }
+        }
+    }
+
+    @MainActor func testIslandAccentTracksPanelIncludingResetForEveryAgent() {
+        let palette = AgentColors.shared
+        let saved = palette.overrides
+        defer { palette.replace(saved) }
+        for overrides: [Brand: Color] in [[:], [.claude: .green, .codex: .orange,
+                                               .qoder: .pink, .qoderCn: .indigo], [:]] {
+            palette.replace(overrides)
+            for brand in Brand.allCases {
+                let actual = IslandPalette(tool: brand.rawValue.uppercased())
+                let expected = IslandPalette(accent: NSColor(brand.accent))
+                XCTAssertEqual(actual.ink, expected.ink)
+                XCTAssertEqual(actual.background, expected.background)
+            }
+        }
+    }
+
+    @MainActor func testImportedFolderSurvivesRefreshAndForgetKeepsFiles() async throws {
+        let suite = UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(suite)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer {
+            defaults.removePersistentDomain(forName: suite)
+            try? FileManager.default.removeItem(at: folder)
+        }
+        let file = folder.appendingPathComponent("file")
+        try Data().write(to: file)
+        let cwd = folder.standardizedFileURL.resolvingSymlinksInPath().path
+        let existing = ProjectItem(cwd: cwd, name: suite, mtime: 1, count: 3, active: [])
+        let store = ProjectStore(projects: [existing], defaults: defaults)
+        store.importDirectories([folder, file, folder])
+        XCTAssertEqual(store.imported, [cwd])
+        XCTAssertEqual(store.projects.map(\.count), [3])
+        await store.refresh(agents: [])
+        XCTAssertEqual(store.projects.map(\.cwd), [cwd])
+        let reopened = ProjectStore(defaults: defaults)
+        XCTAssertEqual(reopened.projects.map(\.cwd), [cwd])
+        reopened.forgetDirectory(cwd)
+        XCTAssertTrue(ProjectStore(defaults: defaults).projects.isEmpty)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: file.path))
+    }
+
     private func fixture(_ override: [String: Any] = [:]) throws -> UsageResponse {
         var fields: [String: Any] = [
             "days": (1...30).map { String(format: "2026-11-%02d", $0) },

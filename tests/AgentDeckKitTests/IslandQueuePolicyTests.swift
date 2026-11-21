@@ -2,6 +2,17 @@ import XCTest
 @testable import AgentDeckKit
 
 final class IslandQueuePolicyTests: XCTestCase {
+    func testStaleBacklogIsSkippedWithoutDroppingFreshEvent() {
+        var queue = IslandEventQueue()
+        for timestamp in [100.0, 159.0] {
+            queue.enqueue(IslandEvent(tool: "codex", title: "", project: "", session: "",
+                                      cwd: "", kind: "", level: "", dedupeKey: "", timestamp: timestamp))
+        }
+        XCTAssertTrue(IslandEvent.isFresh(100, now: 160))
+        XCTAssertEqual(queue.popFirst(now: 161)?.timestamp, 159)
+        XCTAssertTrue(queue.isEmpty)
+    }
+
     private func event(
         _ index: Int, kind: String = "", key: String = "", title: String? = nil
     ) -> IslandEvent {

@@ -20,7 +20,7 @@ struct ProjectsView: View {
         self.previewSessions = previewSessions
         self.showActive = showActive
         self.refreshSeconds = min(600, max(5, refreshSeconds))
-        _model = StateObject(wrappedValue: ProjectStore(projects: previewProjects ?? []))
+        _model = StateObject(wrappedValue: ProjectStore(projects: previewProjects ?? [], loadImported: previewProjects == nil))
         _expanded = State(initialValue: Set(previewProjects?.prefix(1).map(\.id) ?? []))
     }
 
@@ -28,6 +28,16 @@ struct ProjectsView: View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
                 DashboardHeading(text: L("tab.projects"), count: model.projects.count)
+                Button {
+                    let picker = NSOpenPanel()
+                    picker.title = L("v3.importFolders")
+                    picker.canChooseFiles = false
+                    picker.canChooseDirectories = true
+                    picker.allowsMultipleSelection = true
+                    picker.canCreateDirectories = false
+                    if picker.runModal() == .OK { model.importDirectories(picker.urls) }
+                } label: { Image(systemName: "folder.badge.plus") }
+                .buttonStyle(.plain).help(L("v3.importFolders")).accessibilityLabel(L("v3.importFolders"))
                 Button { Task { await model.refresh(agents: agents) } } label: {
                     Image(systemName: "arrow.clockwise")
                 }.buttonStyle(.plain).help(L("header.refresh")).disabled(model.loading)
@@ -53,8 +63,10 @@ struct ProjectsView: View {
                                     HStack {
                                         Text(project.name).font(.system(size: 13, weight: .semibold)).lineLimit(1)
                                         Spacer(minLength: 0)
-                                        Text(Fmt.relative(Date(timeIntervalSince1970: project.mtime)))
-                                            .font(.system(size: 10)).foregroundStyle(Theme.ink3)
+                                        if project.mtime > 0 {
+                                            Text(Fmt.relative(Date(timeIntervalSince1970: project.mtime)))
+                                                .font(.system(size: 10)).foregroundStyle(Theme.ink3)
+                                        }
                                     }
                                     Text(project.cwd).font(.system(size: 10)).foregroundStyle(Theme.ink3)
                                         .lineLimit(1).truncationMode(.middle).help(project.cwd)
@@ -67,11 +79,20 @@ struct ProjectsView: View {
                                     .font(.system(size: 10)).foregroundStyle(Theme.ink3)
                             }.padding(.vertical, 16).contentShape(Rectangle())
                         }.buttonStyle(.plain)
+                        .contextMenu {
+                            if model.imported.contains(project.cwd) {
+                                Button(L("v3.forgetFolder")) { model.forgetDirectory(project.cwd) }
+                            }
+                        }
                         if expanded.contains(project.id) {
-                            ProjectSessionsView(project: project, agents: agents, showActive: showActive,
+                            if project.count == 0 && project.active.isEmpty {
+                                Text(L("v3.noProjectSessions")).foregroundStyle(Theme.ink3).padding(.bottom, 12)
+                            } else {
+                                ProjectSessionsView(project: project, agents: agents, showActive: showActive,
                                                 previewSessions: previewSessions?.filter { $0.cwd == project.cwd },
                                                 onOpen: onOpen, onResume: onResume)
                                 .padding(.leading, 32).padding(.bottom, 15)
+                            }
                         }
                     }
                     Divider().opacity(0.4)
@@ -83,7 +104,7 @@ struct ProjectsView: View {
                 await model.refresh(agents: agents)
                 while !Task.isCancelled {
                     do { try await Task.sleep(nanoseconds: UInt64(refreshSeconds) * 1_000_000_000) } catch { return }
-                    await model.refresh(agents: agents)
+                    await model.refresh(agents: agents, interactive: false)
                 }
             }
     }

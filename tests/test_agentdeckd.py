@@ -20,6 +20,46 @@ def _jsonl(path, events):
     path.write_text("".join(json.dumps(event) + "\n" for event in events))
 
 
+class HandoffFailureTests(unittest.TestCase):
+    def test_installer_launch_failure_stays_retryable(self):
+        with tempfile.TemporaryDirectory() as root:
+            job = Path(root) / "job"
+            job.mkdir()
+            def command(args, **kwargs):
+                if args[0] == "hdiutil":
+                    (job / "mnt" / "AgentDeck.app").mkdir()
+            with mock.patch.object(daemon.tempfile, "mkdtemp", return_value=str(job)), \
+                 mock.patch.object(Path, "home", return_value=Path(root)), \
+                 mock.patch.object(daemon, "_run_checked", side_effect=command), \
+                 mock.patch.object(daemon, "_download_update_dmg"), \
+                 mock.patch.object(daemon, "_verify_update_app"), \
+                 mock.patch.object(subprocess, "run"), \
+                 mock.patch.object(subprocess, "Popen", side_effect=OSError("handoff failed")), \
+                 mock.patch.object(daemon, "_set_update_job") as status:
+                daemon._update_install_worker("test", "unused", "3.1.0")
+            stages = [call.kwargs.get("stage") for call in status.call_args_list]
+            self.assertNotIn("installing", stages)
+            self.assertEqual(stages[-1], "error")
+            self.assertFalse(status.call_args.kwargs["running"])
+            self.assertFalse(job.exists())
+
+    def test_notify_restore_failure_preserves_wrapper_for_retry(self):
+        with tempfile.TemporaryDirectory() as root:
+            wrapper = Path(root) / "codex-notify.sh"
+            config = Path(root) / "config.toml"
+            wrapper.touch()
+            config.write_text(daemon._codex_set_notify("", [str(wrapper)]))
+            with mock.patch.object(daemon, "DATA_DIR", Path(root)), \
+                 mock.patch.object(daemon, "_integration_state", return_value={"prev": ["original"]}):
+                with mock.patch.object(daemon, "_atomic_write_text", side_effect=PermissionError()):
+                    self.assertFalse(daemon._remove_codex_notify(config, wrapper, "prev"))
+                self.assertTrue(wrapper.exists())
+                self.assertEqual(daemon._codex_read_notify(config.read_text()), [str(wrapper)])
+                self.assertTrue(daemon._remove_codex_notify(config, wrapper, "prev"))
+                self.assertFalse(wrapper.exists())
+                self.assertEqual(daemon._codex_read_notify(config.read_text()), ["original"])
+
+
 class HTTPBoundaryTests(unittest.TestCase):
     def test_update_get_cannot_force_network_when_automatic_check_is_disabled(self):
         handler = object.__new__(daemon.Handler)
@@ -595,6 +635,8 @@ model = "gpt-5"
             with mock.patch.multiple(
                     daemon, DATA_DIR=data, INTEGRATION_FILE=integration,
                     _CODEX_CONFIG=default_home / "config.toml",
+                    _HOOK_WRAPPER=data / "claude-stop-hook.sh",
+                    _QODER_HOOK_WRAPPER=data / "qoder-stop-hook.sh",
                     _CODEX_WRAPPER=default_wrapper), \
                     mock.patch.object(daemon, "codex_sources", return_value=sources), \
                     mock.patch.object(daemon, "qoder_sources", return_value=[]), \
@@ -613,7 +655,18 @@ model = "gpt-5"
                 state = json.loads(integration.read_text())
                 self.assertEqual(len(state["codex_notify_targets"]), 2)
 
-                daemon.remove_integration()
+                write = daemon._atomic_write_text
+                def reject_work_config(path, *args, **kwargs):
+                    if path == work_home / "config.toml":
+                        raise PermissionError("read-only config")
+                    return write(path, *args, **kwargs)
+                with mock.patch.object(daemon, "_atomic_write_text", side_effect=reject_work_config):
+                    self.assertFalse(daemon.remove_integration())
+                pending = json.loads(integration.read_text())["codex_notify_targets"]
+                self.assertEqual([item["config"] for item in pending], [str(work_home / "config.toml")])
+                self.assertTrue(Path(work_notify[0]).is_file())
+                self.assertFalse(default_wrapper.exists())
+                self.assertTrue(daemon.remove_integration())
                 self.assertEqual(daemon._codex_read_notify(
                     (default_home / "config.toml").read_text()), original_default)
                 self.assertEqual(daemon._codex_read_notify(

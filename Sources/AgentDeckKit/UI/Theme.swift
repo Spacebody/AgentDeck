@@ -68,6 +68,11 @@ public func customAgentInk(_ tool: String) -> NSColor? {
     Brand(rawValue: tool.lowercased()).flatMap { AgentColors.shared.overrides[$0] }.map { NSColor($0) }
 }
 
+public func agentAccentInk(_ tool: String) -> NSColor {
+    NSColor((Brand(rawValue: tool.lowercased()) ?? .claude).accent)
+        .usingColorSpace(.sRGB) ?? NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 1)
+}
+
 enum Brand: String, CaseIterable {
     case claude, codex, qoder
     case qoderCn = "qoder_cn"

@@ -10,6 +10,7 @@ let kBase = "http://127.0.0.1:\(kPort)"          // 原生请求 / 浏览器打�
 
 struct BackendHealth {
     let alive: Bool
+    let connectionRefused: Bool
     let version: String?
     let pid: pid_t?
     let parentPID: pid_t?
@@ -324,6 +325,8 @@ final class IslandController {
     private var showing = false
     private var window: KeyPanel?
     private var current: Event?
+    private weak var headline: NSTextField?
+    private weak var glyph: NSImageView?
     private var shownAt: Date?
     private var scheduledDismissAt: Date?
     private var dismissWorkItem: DispatchWorkItem?
@@ -387,14 +390,12 @@ final class IslandController {
         return img
     }
 
-    private func brandColor(for tool: String) -> NSColor {
-        if let custom = customAgentInk(tool) { return custom }
-        switch tool.lowercased() {
-        case "codex": return NSColor(calibratedRed: 0.55, green: 0.91, blue: 0.89, alpha: 1)
-        case "qoder": return NSColor(calibratedRed: 0.65, green: 0.55, blue: 0.98, alpha: 1)
-        case "qoder_cn": return NSColor(calibratedRed: 0.51, green: 0.55, blue: 0.97, alpha: 1)
-        default: return NSColor(calibratedRed: 1.00, green: 0.62, blue: 0.48, alpha: 1)
-        }
+    func refreshTint() {
+        guard let tool = current?.tool, let layer = window?.contentView?.layer else { return }
+        let palette = IslandPalette(tool: tool)
+        headline?.textColor = palette.ink
+        glyph?.contentTintColor = palette.ink
+        layer.backgroundColor = palette.fill
     }
 
     private func display(_ e: Event) {
@@ -402,19 +403,17 @@ final class IslandController {
         guard let screen = NSScreen.main else { showing = false; return }
         let H: CGFloat = 46
 
-        // 文案（kind=alert：额度告警，标题用级别本地化词 + 级别配色；否则会话完成）
+        // The headline conveys alert severity independently of the agent tint.
         let isAlert = e.kind == "alert"
         let headText = isAlert
             ? L("alert.\(["warn", "crit", "reset"].contains(e.level) ? e.level : "warn")")
             : "\(e.project.isEmpty ? e.tool.capitalized : e.project) · \(L("island.done"))"
         let head = NSTextField(labelWithString: headText)
         head.font = .systemFont(ofSize: 12.5, weight: .semibold)
-        let accent = quotaAlertColor(e.level)
-        head.textColor = isAlert ? accent : NSColor(srgbRed: 0.61, green: 0.89, blue: 0.80, alpha: 1)
         let sub = NSTextField(labelWithString: isAlert ? e.title
                                                        : (e.title.isEmpty ? L("island.taskDone") : e.title))
-        sub.font = .systemFont(ofSize: 10.5)
-        sub.textColor = .secondaryLabelColor
+        sub.font = .systemFont(ofSize: 11.5)
+        sub.textColor = IslandPalette.subtitle
         sub.lineBreakMode = .byTruncatingTail
         head.sizeToFit(); sub.sizeToFit()
         let textW = min(max(160, max(head.frame.width, sub.frame.width)), 250)
@@ -430,13 +429,11 @@ final class IslandController {
         effect.layer?.cornerRadius = H / 2
         effect.layer?.cornerCurve = .continuous
         effect.layer?.masksToBounds = true
-        effect.layer?.backgroundColor = NSColor(srgbRed: 0.06, green: 0.075, blue: 0.08, alpha: 0.94).cgColor
 
         let iconView = NSImageView(frame: NSRect(x: 14, y: (H - 26) / 2, width: 26, height: 26))
         iconView.image = brandIcon(for: e.tool)
-        iconView.contentTintColor = brandColor(for: e.tool)
         head.frame = NSRect(x: 50, y: H / 2 + 1, width: textW, height: 15)
-        sub.frame = NSRect(x: 50, y: H / 2 - 15, width: textW, height: 13)
+        sub.frame = NSRect(x: 50, y: H / 2 - 17, width: textW, height: max(15, sub.frame.height))
         effect.addSubview(iconView); effect.addSubview(head); effect.addSubview(sub)
         let click = NSClickGestureRecognizer(target: self, action: #selector(tapped))
         effect.addGestureRecognizer(click)
@@ -454,6 +451,9 @@ final class IslandController {
         p.appearance = NSAppearance(named: .darkAqua)
         p.contentView = effect
         window = p
+        headline = head
+        glyph = iconView
+        refreshTint()
 
         // 动画：菜单栏下方小胶囊弹性展开 → 停留 → 收缩淡出
         let topY = screen.visibleFrame.maxY - H - 6
@@ -551,9 +551,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         panel?.minSize = NSSize(width: kPanelW * s, height: 200)
         if let p = panel, p.isVisible {          // 面板：锚定顶边中心重排
             let w = savedPanelW() * s
-            let h = savedPanelH() * s
             let f = p.frame
-            animate(p, NSRect(x: f.midX - w / 2, y: f.maxY - h, width: w, height: h))
+            let visible = p.screen?.visibleFrame ?? f
+            let h = min(savedPanelH() * s, max(1, f.maxY - visible.minY - 8))
+            let x = max(visible.minX + 8, min(f.midX - w / 2, visible.maxX - w - 8))
+            p.setFrame(NSRect(x: x, y: f.maxY - h, width: w, height: h), display: true)
         }
         if let wp = widgetPanel {                // 小组件：锚定左上角
             let d = UserDefaults.standard
@@ -612,7 +614,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var panelHost: HostController?
     var widgetHost: HostController?
     var backend: Process?
-    var backendTransitioning = false
+    private var transition = GatewayTransition()
+    private var retryAutomaticHandoff = false
+    private var manualRestart = GatewayRestartAttempt()
     var backendReadyWaiters: [BackendReadyCallback] = []
     var restartStoreAfterBackendTransition = false
     var storeStarted = false
@@ -641,6 +645,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         AgentDeckRootView(
             store: store, version: appVersion,
             onQuit: { NSApp.terminate(nil) },
+            onRestartBackend: { [weak self] in self?.restartBackend() },
             onOpenExternal: { [weak self] in self?.openExternal($0) },
             onPasteEnter: { autoPasteEnter(terminal: $0, clipboard: $1) },
             onHidePanel: { [weak self] in self?.hidePanel() },
@@ -650,8 +655,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     /// 面板高度自适应内容：窗口高 = 内容自然高×缩放，钳到 [最小, 屏幕可用]，锚定顶边（菜单栏下）。
     /// 消除内容不足时底部的空隙；内容超屏则封顶到屏幕高、由内部 ScrollView 滚动。
-    private var lastFitH: CGFloat = 0
+    private var preparingPanel = false
+    private var openingContentHeight: CGFloat?
     func fitPanelHeight(_ contentH: CGFloat) {
+        if preparingPanel {
+            if contentH > 1 { openingContentHeight = contentH }
+            return
+        }
         guard let p = panel, p.isVisible, contentH > 1,
               let screen = p.screen ?? NSScreen.main else { return }
         let target = (contentH * uiScale).rounded()
@@ -661,11 +671,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // 数据加载前的短暂空态不能把主面板压矮并持久化；正常屏幕至少维持默认高度，
         // 小屏幕仍由 maxH 封顶，超出内容继续交给内部 ScrollView。
         let h = min(max(target, kPanelH * uiScale), maxH)
+        rememberContentHeight(contentH)
         guard abs(h - f.height) > 2 else { return }    // 抖动抑制
-        lastFitH = h
         p.setFrame(NSRect(x: f.minX, y: f.maxY - h, width: f.width, height: h), display: true)
         p.invalidateShadow()
-        UserDefaults.standard.set(Double(h / uiScale), forKey: "panelH")  // 记住，下次开就近、少闪
+    }
+
+    private func rememberContentHeight(_ height: CGFloat) {
+        let natural = max(kPanelH, height.rounded())
+        if abs(savedPanelH() - natural) > 2 {
+            UserDefaults.standard.set(Double(natural), forKey: "panelH")
+        }
     }
 
     /// 桌面小组件根视图（点击开主面板）。
@@ -739,6 +755,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
 
         // 设置变更 → 即时重绘菜单栏（语言/常显用量/告警阈值等，等价 v1 "sync" 桥消息）
+        store.onAgentPaletteChanged = { IslandController.shared.refreshTint() }
         store.onSettingsChanged = { [weak self] in self?.updateIconState() }
         store.onQuotaChanged = { [weak self] in self?.updateIconState() }
         store.onQuotaSelectionChanged = { [weak self] id in
@@ -769,7 +786,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // 省电：菜单栏图标刷新 15→20s + 大 tolerance，让系统合并唤醒（避免进「能耗显著」列表）。
         pollTimer = Timer.scheduledTimer(withTimeInterval: 20, repeats: true) { [weak self] _ in
             Task { @MainActor in
-                self?.ensureBackend {}
+                self?.pollBackend()
                 self?.updateIconState()
             }
         }
@@ -862,6 +879,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         for ev in events {
             guard let id = ev["id"] as? Int, id > lastEventId else { continue }
             lastEventId = id
+            guard let timestamp = ev["ts"] as? Double,
+                  IslandEvent.isFresh(timestamp, now: Date().timeIntervalSince1970) else { continue }
             let kind = ev["kind"] as? String ?? ""
             if kind == "alert", ev["sound"] as? Bool ?? false {
                 NSSound(named: "Glass")?.play()
@@ -874,7 +893,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 cwd: ev["cwd"] as? String ?? "",
                 kind: kind,
                 level: ev["level"] as? String ?? "",
-                dedupeKey: ev["dedupe_key"] as? String ?? ""))
+                dedupeKey: ev["dedupe_key"] as? String ?? "", timestamp: timestamp))
         }
         if let last = json["last"] as? Int { lastEventId = max(lastEventId, last) }
         persistEventCursor()
@@ -1193,9 +1212,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func showPanel() {
-        if panel == nil { panel = makePanel() }
-        guard let p = panel, let button = statusItem.button,
+        if let p = panel, p.isVisible {
+            p.makeKeyAndOrderFront(nil)
+            return
+        }
+        guard let button = statusItem.button,
               let bw = button.window else { return }
+        preparingPanel = true
+        openingContentHeight = nil
+        if panel == nil { panel = makePanel() }
+        guard let p = panel else { preparingPanel = false; return }
         // hidePanel 时把承载视图摘下了（停离屏 display link 省电）；重开先 reattach 回玻璃层底部
         // （rim/边缘光标是后加的覆盖层，须在其下），保持 @State 与原始 z 序。
         if let host = panelHost, host.view.superview == nil,
@@ -1221,6 +1247,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let y = bFrame.minY - 6 - h
         p.setFrame(NSRect(x: x, y: y, width: w, height: h), display: false)
         p.contentView?.layoutSubtreeIfNeeded()
+        if let measured = openingContentHeight {
+            rememberContentHeight(measured)
+            let fitted = min(max((measured * uiScale).rounded(), kPanelH * uiScale), maxH)
+            if abs(fitted - h) > 2 {
+                p.setFrame(NSRect(x: x, y: bFrame.minY - 6 - fitted, width: w, height: fitted), display: false)
+                p.contentView?.layoutSubtreeIfNeeded()
+            }
+        }
+        preparingPanel = false
         p.contentView?.displayIfNeeded()
         NSApp.activate(ignoringOtherApps: true)
         p.makeKeyAndOrderFront(nil)
@@ -1407,8 +1442,109 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc func openBrowser() { NSWorkspace.shared.open(URL(string: kBase)!) }
 
     @objc func restartBackend() {
-        guard !backendTransitioning else { return }
-        ensureBackend(forceRestart: true) {}
+        guard store.canRestartGateway else { return }
+        if retryAutomaticHandoff {
+            guard transition.phase == .idle else { return }
+            store.gatewayRestart = .restarting
+            ensureBackend()
+            return
+        }
+        guard transition.begin(manual: true) else { return }
+        store.gatewayRestart = .restarting
+        manualRestart = GatewayRestartAttempt()
+        prepareForBackendReplacement()
+        armBackendTimeout()
+        advanceRestart()
+    }
+
+    private func advanceRestart() {
+        healthCheck { [weak self] health in
+            guard let self else { return }
+            let owned = self.isCurrentBackend(health)
+            let action = self.manualRestart.next(running: self.backend?.isRunning == true,
+                                                 ownedHealth: owned, foreignHealth: health.alive && !owned)
+            switch action {
+            case .timedOut: self.failRestart(.failed); return
+            case .stopOwned: self.backend?.terminate()
+            case .launch: self.spawnBackend()
+            case .wait: break
+            case .ready:
+                self.store.gatewayRestart = .restarted
+                self.finishBackendTransition()
+                return
+            case .foreign:
+                self.failRestart(.foreign)
+                if self.canShare(health) { self.finishBackendTransition() }
+                return
+            }
+            self.backendAfter(.now() + 0.25) { self.advanceRestart() }
+        }
+    }
+
+    private func isCurrentBackend(_ health: BackendHealth) -> Bool {
+        health.belongs(to: ProcessInfo.processInfo.processIdentifier, version: appVersion,
+                       updateTransaction: updateTransaction, ownerToken: backendOwnerToken)
+    }
+
+    private func failRestart(_ status: GatewayRestartStatus) {
+        retryAutomaticHandoff = transition.phase == .checking || transition.phase == .handoff
+        transition.end()
+        store.gatewayRestart = status
+    }
+
+    private func pollBackend() {
+        guard transition.phase == .idle, !store.gatewayInstallInProgress else { return }
+        if store.gatewayRestart == .failed || store.gatewayRestart == .foreign {
+            healthCheck { [weak self] health in
+                guard let self, !self.store.gatewayInstallInProgress else { return }
+                if self.isCurrentBackend(health) || self.canShare(health) {
+                    self.store.gatewayRestart = .recovered
+                    self.finishBackendTransition()
+                } else if self.transition.beginRecovery(refused: health.connectionRefused,
+                                                        childRunning: self.backend?.isRunning == true,
+                                                        installing: self.store.gatewayInstallInProgress) {
+                    self.store.gatewayRestart = .restarting
+                    self.armBackendTimeout()
+                    self.prepareForBackendReplacement()
+                    self.spawnAndWait()
+                }
+            }
+        } else {
+            ensureBackend()
+        }
+    }
+
+    private func backendAfter(_ deadline: DispatchTime, _ work: @escaping BackendReadyCallback) {
+        let epoch = transition.epoch
+        DispatchQueue.main.asyncAfter(deadline: deadline) { [weak self] in
+            guard self?.acceptBackendCallback(epoch) == true else { return }
+            work()
+        }
+    }
+
+    private func armBackendTimeout() {
+        guard let deadline = transition.deadline else { return }
+        backendAfter(deadline) { self.timeoutBackendTransition() }
+    }
+
+    private func acceptBackendCallback(_ epoch: Int) -> Bool {
+        let callback = transition.callback(for: epoch)
+        guard callback != .stale else { return false }
+        // Installation may start while an ordinary read-only health probe is in flight.
+        if transition.phase == .checking && store.gatewayInstallInProgress {
+            transition.end()
+            return false
+        }
+        if callback == .expired {
+            timeoutBackendTransition()
+            return false
+        }
+        return true
+    }
+
+    private func timeoutBackendTransition() {
+        prepareForBackendReplacement()
+        failRestart(.failed)
     }
 
     @objc func quit() { NSApp.terminate(nil) }
@@ -1430,18 +1566,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func ensureBackend(
-        forceRestart: Bool = false, then done: @escaping BackendReadyCallback
+        then done: BackendReadyCallback? = nil
     ) {
-        backendReadyWaiters.append(done)
-        guard !backendTransitioning else { return }
-        backendTransitioning = true
+        if let done { backendReadyWaiters.append(done) }
+        guard !store.gatewayInstallInProgress, transition.begin(manual: false) else { return }
+        armBackendTimeout()
         let mine = appVersion
         let appPID = ProcessInfo.processInfo.processIdentifier
         healthCheck { [weak self] health in
             guard let self else { return }
             // 同版本不等于同实例：快速重开时旧 daemon 仍会短暂健康，随后因旧父
             // App 消失而退出。只有 parent_pid 明确指向当前 App 才允许复用。
-            if !forceRestart, health.belongs(
+            if health.belongs(
                 to: appPID, version: mine,
                 updateTransaction: self.updateTransaction,
                 ownerToken: self.backendOwnerToken
@@ -1450,14 +1586,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 return
             }
             if BackendOwnerPolicy.shouldWaitForOwnedBackend(
-                forceRestart: forceRestart,
+                forceRestart: false,
                 healthAlive: health.alive,
                 ownedProcessRunning: self.backend?.isRunning == true
             ) {
                 // A large first session scan can briefly hold Python's GIL after
                 // startup. The daemon still belongs to this App, so tolerate the
                 // transient health miss instead of creating a terminate/spawn loop.
-                self.waitHealthy(retries: 20, transitionPrepared: false)
+                self.waitHealthy(retries: 6, transitionPrepared: false)
+                return
+            }
+            if self.backend?.isRunning != true, self.canShare(health) {
+                self.finishBackendTransition()
                 return
             }
             self.replaceBackend(health)
@@ -1465,6 +1605,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func prepareForBackendReplacement() {
+        transition.prepareHandoff()
+        if transition.phase == .handoff { store.gatewayRestart = .restarting }
         menubarRequestID += 1
         menubarAppliedRequestID = menubarRequestID
         eventTask?.cancel()
@@ -1495,7 +1637,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func spawnAndWait() {
-        spawnBackend()
+        if backend?.isRunning != true { spawnBackend() }
         waitHealthy(retries: 20, transitionPrepared: true)
     }
 
@@ -1512,6 +1654,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 self.finishBackendTransition()
                 return
             }
+            if self.transition.phase == .recovery && health.alive {
+                if self.canShare(health) { self.finishBackendTransition() }
+                else { self.failRestart(.foreign) }
+                return
+            }
             if health.alive, let instanceID = health.instanceID {
                 if !transitionPrepared {
                     self.prepareForBackendReplacement()
@@ -1521,29 +1668,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
             if retries <= 0 {
                 NSLog("AgentDeck: backend did not become healthy")
-                if transitionPrepared {
-                    self.store.markBackendUnavailable()
-                } else {
-                    // The optimistic wait started outside a replacement
-                    // transition. Prepare the store/event lifecycle before the
-                    // timeout path actually terminates and respawns the daemon.
-                    self.prepareForBackendReplacement()
-                }
-                // The update installer treats this App as healthy only after its
-                // transaction-bound daemon owns the port. Keep recovering instead
-                // of allowing the UI to consume a stale or unrelated service.
-                if let process = self.backend, process.isRunning {
-                    self.stopOwnedBackend(process) { [weak self] in
-                        self?.spawnAndWait()
-                    }
-                } else {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
-                        self.spawnAndWait()
-                    }
-                }
+                if transitionPrepared { self.failRestart(.failed) }
+                else { self.replaceBackend(health) }
                 return
             }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            self.backendAfter(.now() + 0.5) {
                 self.waitHealthy(retries: retries - 1,
                                  transitionPrepared: transitionPrepared)
             }
@@ -1551,7 +1680,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func finishBackendTransition() {
-        backendTransitioning = false
+        if store.gatewayRestart == .restarting { store.gatewayRestart = .recovered }
+        transition.end()
+        retryAutomaticHandoff = false
         if restartStoreAfterBackendTransition {
             restartStoreAfterBackendTransition = false
             store.start(forceInitialRefresh: true)
@@ -1567,17 +1698,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func healthCheck(_ cb: @escaping (BackendHealth) -> Void) {
+        let epoch = transition.epoch
         var req = URLRequest(url: URL(string: "\(kBase)/api/health")!)
         req.timeoutInterval = 2
-        kDirectSession.dataTask(with: req) { data, response, _ in
+        kDirectSession.dataTask(with: req) { data, response, error in
             // 校验响应身份：端口被其他进程占用时不能误当作后端
             let body = (response as? HTTPURLResponse)?.statusCode == 200 ? data : nil
             let obj = body.flatMap {
                 try? JSONSerialization.jsonObject(with: $0) as? [String: Any]
             }
             DispatchQueue.main.async {
+                guard self.acceptBackendCallback(epoch) else { return }
                 cb(BackendHealth(
                     alive: obj?["ok"] as? Bool ?? false,
+                    connectionRefused: response == nil && (error as? URLError)?.code == .cannotConnectToHost,
                     version: obj?["version"] as? String,
                     pid: (obj?["pid"] as? NSNumber)?.int32Value,
                     parentPID: (obj?["parent_pid"] as? NSNumber)?.int32Value,
@@ -1589,19 +1723,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }.resume()
     }
 
-    private func handleForeignBackend(_ health: BackendHealth, instanceID: String) {
+    private func canShare(_ health: BackendHealth) -> Bool {
+        guard health.alive, health.instanceID != nil else { return false }
         let ownerIsAlive = health.parentPID.map { Darwin.kill($0, 0) == 0 } ?? false
         let transactionMatches = updateTransaction == nil
             || health.updateTransaction == updateTransaction
         // 所有 App 对 owner 使用同一排序：高版本优先；同版本优先 /Applications，
         // 其余路径稳定排序。这样旧 App 会共享新版 daemon，跨 bundle 也不会互相抢占。
-        if transactionMatches && BackendOwnerPolicy.shouldShare(
+        return transactionMatches && BackendOwnerPolicy.shouldShare(
             currentVersion: appVersion,
             currentScript: backendScript(),
             remoteVersion: health.version,
             remoteScript: health.scriptPath,
             remoteOwnerIsAlive: ownerIsAlive
-        ) {
+        )
+    }
+
+    private func handleForeignBackend(_ health: BackendHealth, instanceID: String) {
+        if canShare(health) {
             finishBackendTransition()
             return
         }
@@ -1620,15 +1759,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         req.httpBody = try? JSONSerialization.data(withJSONObject: [
             "instance_id": instanceID
         ])
+        let epoch = transition.epoch
         kDirectSession.dataTask(with: req) { _, _, _ in
-            DispatchQueue.main.async(execute: done)
+            DispatchQueue.main.async {
+                guard self.acceptBackendCallback(epoch) else { return }
+                done()
+            }
         }.resume()
     }
 
     private func waitForForeignBackendExit(instanceID: String?, retries: Int) {
         healthCheck { [weak self] health in
             guard let self else { return }
-            if !health.alive {
+            if health.connectionRefused {
                 self.spawnAndWait()
                 return
             }
@@ -1650,22 +1793,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
             if retries <= 0 {
                 NSLog("AgentDeck: foreign backend did not exit (instance \(instanceID ?? "legacy"))")
-                self.store.markBackendUnavailable()
-                // Never mark a foreign daemon ready: the replacement UI would keep
-                // reading old code and cache. Keep retrying with the instance token.
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
-                    if let instanceID {
-                        self.requestBackendShutdown(instanceID: instanceID) {
-                            self.waitForForeignBackendExit(
-                                instanceID: instanceID, retries: 20)
-                        }
-                    } else {
-                        self.waitForForeignBackendExit(instanceID: nil, retries: 20)
-                    }
-                }
+                self.failRestart(.failed)
                 return
             }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            self.backendAfter(.now() + 0.5) {
                 self.waitForForeignBackendExit(instanceID: instanceID,
                                                retries: retries - 1)
             }
@@ -1691,12 +1822,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // 不对纯数值 PID 强杀；daemon 的 TERM handler 正常应在此窗口内收尾，
             // 若未退出则留给后续轮询继续恢复，避免 PID 复用误伤。
             NSLog("AgentDeck: owned backend did not exit after terminate")
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
-                self?.waitForOwnedProcessExit(process, retries: 50, then: done)
-            }
+            failRestart(.failed)
             return
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+        backendAfter(.now() + 0.1) { [weak self] in
             self?.waitForOwnedProcessExit(process, retries: retries - 1, then: done)
         }
     }
