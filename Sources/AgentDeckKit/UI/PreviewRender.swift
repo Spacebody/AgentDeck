@@ -395,11 +395,12 @@ public enum PreviewRender {
         let width = min(600, max(260, Double(ProcessInfo.processInfo.environment["AD_PREVIEW_WIDTH"] ?? "420") ?? 420))
         let scrolled = tab == "scrolled"
         let settings = tab == "settings"
-        let height: CGFloat = (scrolled || settings ? 650 : 1040) * fontScale
+        let viewportHeight = ProcessInfo.processInfo.environment["AD_PREVIEW_HEIGHT"].flatMap(Double.init)
+        let height: CGFloat = min(1600, max(360, viewportHeight ?? (scrolled || settings ? 650 : 1040))) * fontScale
         let view = ScrollViewReader { proxy in
             AgentDeckRootView(previewStore: store, version: "v3-dev",
                               initialTab: scrolled || settings ? "overview" : tab,
-                              settingsOpen: settings, liveLayout: settings || scrolled)
+                              settingsOpen: settings, liveLayout: settings || scrolled || viewportHeight != nil)
                 .onAppear {
                     if scrolled {
                         DispatchQueue.main.async { proxy.scrollTo("overview", anchor: .bottom) }
