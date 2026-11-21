@@ -4,6 +4,35 @@ import XCTest
 @testable import AgentDeckKit
 
 final class PanelInputTests: XCTestCase {
+    @MainActor func testHeaderHintClearsButtonAndStaysRightAligned() throws {
+        struct Probe: NSViewRepresentable {
+            let view: NSView
+            func makeNSView(context: Context) -> NSView { view }
+            func updateNSView(_ nsView: NSView, context: Context) {}
+        }
+        for height: CGFloat in [22, 56] {
+            let button = NSView(), hint = NSView()
+            let content = Color.clear.frame(width: 32, height: 32)
+                .background(Probe(view: button))
+                .overlay {
+                    HeaderHintPlacement {
+                        Color.clear.frame(width: 180, height: height).background(Probe(view: hint))
+                    }
+                }
+                .frame(width: 420, height: 200)
+            let window = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 420, height: 200),
+                                  styleMask: [.borderless], backing: .buffered, defer: false)
+            let host = NSHostingView(rootView: content)
+            window.contentView = host
+            host.layoutSubtreeIfNeeded()
+            XCTAssertNotNil(hint.window)
+            let b = button.convert(button.bounds, to: nil), h = hint.convert(hint.bounds, to: nil)
+            XCTAssertEqual(b.minY - h.maxY, 8, accuracy: 0.5)
+            XCTAssertEqual(b.maxX, h.maxX, accuracy: 0.5)
+            XCTAssertFalse(b.intersects(h))
+        }
+    }
+
     @MainActor func testSettingsDimmingChangesTheVisibleBackdrop() throws {
         let store = AppStore()
         let root = AgentDeckRootView(previewStore: store, version: "test", settingsOpen: true, liveLayout: true)

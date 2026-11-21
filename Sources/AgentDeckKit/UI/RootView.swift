@@ -112,6 +112,48 @@ struct IconButton: View {
     }
 }
 
+struct HeaderHintPlacement<Hint: View>: View {
+    @ViewBuilder let hint: () -> Hint
+
+    var body: some View {
+        GeometryReader { button in
+            hint()
+                .fixedSize()
+                .frame(width: button.size.width, alignment: .trailing)
+                .offset(y: button.size.height + 8)
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+}
+
+private struct HeaderHint: ViewModifier {
+    let text: String
+    var wraps = false
+    @State private var hovered = false
+
+    func body(content: Content) -> some View {
+        content
+            .contentShape(Rectangle())
+            .onHover { hovered = $0 }
+            .onDisappear { hovered = false }
+            .overlay {
+                if hovered {
+                    HeaderHintPlacement {
+                    Text(verbatim: text)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Theme.ink)
+                        .fixedSize(horizontal: !wraps, vertical: true)
+                        .frame(width: wraps ? 190 : nil, alignment: .leading)
+                        .padding(.horizontal, 8).padding(.vertical, 4)
+                        .background(RoundedRectangle(cornerRadius: 5).fill(Color(hex: 0x222529)))
+                        .overlay(RoundedRectangle(cornerRadius: 5).strokeBorder(Theme.edgeHi))
+                    }
+                }
+            }
+    }
+}
+
 // MARK: - 应用根视图（主面板）
 public struct AgentDeckRootView: View {
     @ObservedObject var store: AppStore
@@ -252,19 +294,19 @@ public struct AgentDeckRootView: View {
                 settingsPage = .main
                 showSettings = true
             }
-            .help(L("header.settings"))
+            .modifier(HeaderHint(text: L("header.settings")))
             .accessibilityLabel(L("header.settings"))
             IconButton(system: "arrow.clockwise", weight: .semibold, fontSize: 15, spinning: spinning, customRefresh: true) { manualRefresh() }
-                .help(L("header.refresh"))
+                .modifier(HeaderHint(text: L("header.refresh")))
                 .accessibilityLabel(L("header.refresh"))
             IconButton(system: store.gatewayRestart == .failed || store.gatewayRestart == .foreign
                        ? "exclamationmark.triangle" : "arrow.triangle.2.circlepath",
                        spinning: store.gatewayRestart == .restarting, action: onRestartBackend)
                 .disabled(!store.canRestartGateway)
-                .help(L(restartButtonLabel))
+                .modifier(HeaderHint(text: L(restartButtonLabel), wraps: restartButtonLabel != "header.restartGateway"))
                 .accessibilityLabel(L(restartButtonLabel))
             IconButton(system: "power", danger: true, action: onQuit)
-                .help(L("header.quit"))
+                .modifier(HeaderHint(text: L("header.quit")))
                 .accessibilityLabel(L("header.quit"))
         }
     }
@@ -386,7 +428,7 @@ public struct AgentDeckRootView: View {
 
         return VStack(spacing: 0) {
             VStack(spacing: 4) {
-                header
+                header.zIndex(1)
                 if showUpdate { updateBar }
                 tabbar
                 Rectangle().fill(Theme.ink.opacity(0.07)).frame(height: 1)
