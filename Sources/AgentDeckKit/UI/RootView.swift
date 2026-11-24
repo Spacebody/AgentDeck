@@ -198,6 +198,8 @@ public struct AgentDeckRootView: View {
     }
 
     @State private var tab = "overview"
+    @State private var analyticsDays = 7
+    @State private var analyticsRefresh = 0
     @State private var showSettings = false
     @State private var settingsPage: SettingsPage = .main
     @State private var info: InfoKind?
@@ -265,6 +267,9 @@ public struct AgentDeckRootView: View {
         .onChange(of: tab) { store.performanceShowsSessions = $0 == "sessions" && !showSettings }
         .onChange(of: showSettings) { store.performanceShowsSessions = !$0 && tab == "sessions" }
         .environment(\.sessionPerformanceStore, previewMode ? nil : store.performance)
+        .environment(\.analyticsFixture, previewMode ? .preview : nil)
+        .environment(\.analyticsLive, store.panelVisible && !showSettings && !previewMode)
+        .environment(\.analyticsRefresh, analyticsRefresh)
     }
 
     // MARK: 背景（native：系统玻璃之上叠暗化 scrim + 弱 aurora；精简模式去 aurora）
@@ -313,6 +318,7 @@ public struct AgentDeckRootView: View {
 
     private func manualRefresh() {
         guard !spinning else { return }
+        analyticsRefresh += 1
         spinning = true
         Task {
             await store.refresh(force: true)   // 手动刷新强制重采额度（绕过缓存，对应 v1 force=1）
@@ -470,29 +476,23 @@ public struct AgentDeckRootView: View {
                     && !store.menubarRotationActive,
                 quotaRotateSecs: store.settings["quota_rotate_secs"]?.intVal ?? 6,
                 carouselActive: tab == "overview" && !showSettings,
+                analyticsActive: store.panelVisible && !showSettings && !previewMode,
                 quotaSelectionID: store.quotaSelectionID,
                 onSelectQuota: { store.selectQuotaPage($0, notifyMenubar: true) },
                 onQuotaRotationPauseChange: { store.setQuotaRotationPaused($0) },
                 onFocusActive: focusActive, onFocusDone: focusDone,
-                onViewUsage: { tab = "usage" })
+                onViewUsage: { analyticsDays = 1; tab = "usage" })
         } else if tab == "sessions" {
             sessionsCard
         } else if tab == "projects" {
-            ProjectsView(agents: dashboardAgents,
+            ProjectsView(agents: dashboardAgents, analyticsAgents: usageAgents,
                          isActive: store.panelVisible && !showSettings,
                          showActive: store.showActive, refreshSeconds: store.settings["refresh_interval"]?.intVal ?? 30,
                          previewProjects: previewMode ? PreviewRender.dashboardProjects : nil,
                          previewSessions: previewMode ? store.sessions : nil,
                          onOpen: focusActive, onResume: resume)
         } else if tab == "usage" {
-            UsageDashboardView(usage: store.usage, agents: usageAgents) { span in
-                do {
-                    let response = try await APIClient.shared.postJSON("/api/data", body: [
-                        "action": "export", "days": span, "agents": usageAgents.sorted()
-                    ])
-                    showToast(response["ok"] as? Bool == true ? L("v3.exported", ["n": "\(span)"]) : L("common.opFailed"))
-                } catch { showToast(L("common.opFailed")) }
-            }
+            AnalyticsDashboard(agents: usageAgents, fixture: previewMode ? .preview : nil, days: $analyticsDays)
         }
     }
 

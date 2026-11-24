@@ -56,6 +56,7 @@ struct OverviewView: View {
     var quotaAutoRotate: Bool = true
     var quotaRotateSecs: Int = 6
     var carouselActive: Bool = true
+    var analyticsActive: Bool = true
     var quotaSelectionID: String? = nil
     var onSelectQuota: (String) -> Void = { _ in }
     var onQuotaRotationPauseChange: (Bool) -> Void = { _ in }
@@ -65,32 +66,8 @@ struct OverviewView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 24) {
-            HStack(alignment: .top, spacing: 20) {
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack(spacing: 8) {
-                        AgentUsageDonut(summary: today)
-                        Text(L("info.todayTerm")).font(.system(size: 12, weight: .semibold))
-                        InfoButton { showInfo(.today) }.accessibilityLabel(L("info.title"))
-                    }
-                    HStack(alignment: .firstTextBaseline, spacing: 5) {
-                        Text(todayTokenText)
-                            .font(.system(size: 34, weight: .semibold)).monospacedDigit()
-                            .lineLimit(1).minimumScaleFactor(0.6)
-                        Text("tokens").font(.system(size: 10)).foregroundStyle(Theme.ink3)
-                    }
-                    HStack(spacing: 10) {
-                        Text(todayCost).font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.ink2)
-                            .fixedSize(horizontal: false, vertical: true)
-                        if let delta = today?.deltaPercent {
-                            Label("\(abs(delta))%", systemImage: delta >= 0 ? "arrow.up.right" : "arrow.down.right")
-                                .font(.system(size: 10)).foregroundStyle(delta > 0 ? Theme.warn : DashboardStyle.accent)
-                                .fixedSize()
-                        }
-                    }
-                }.frame(maxWidth: .infinity, alignment: .leading)
-                Rectangle().fill(Color.white.opacity(0.1)).frame(width: 1)
-                quotaSection.frame(maxWidth: .infinity, alignment: .top)
-            }.fixedSize(horizontal: false, vertical: true)
+            AnalyticsOverview(agents: visibleAgents, active: analyticsActive, open: onViewUsage) { quotaSection }
+                .id(visibleAgents)
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
                     DashboardHeading(text: L("usage.tabCurve"))
@@ -102,7 +79,7 @@ struct OverviewView: View {
                 if let usage {
                     DashboardTrend(hourly: usage.hourly, agents: visibleAgents).frame(height: 95)
                     if visibleAgents.count > 1 {
-                        TrendLegendLayout() {
+                        TrendLegendLayout {
                             ForEach(Brand.allCases.filter { visibleAgents.contains($0.rawValue) }, id: \.self) { brand in
                                 HStack(spacing: 4) {
                                     Circle().fill(brand.accent).frame(width: 7, height: 7)

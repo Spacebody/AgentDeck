@@ -6,6 +6,7 @@ API:
   GET  /api/quota     Claude 官方额度(OAuth) + Codex app-server/rollout 实时额度
   GET  /api/sessions  双端最近会话合并列表
   GET  /api/usage     近 7/30 天 token 用量 + 成本估算
+  GET  /api/analytics 结构化用量分析；/api/analytics/export 返回相同口径的 CSV
   POST /api/resume    在终端中恢复指定会话
 """
 
@@ -8234,6 +8235,60 @@ def api_resume(body):
 _LOCAL_HTTP_HOSTS = {f"127.0.0.1:{PORT}", f"localhost:{PORT}"}
 _quota_wait_slots = threading.BoundedSemaphore(4)
 _event_wait_slots = threading.BoundedSemaphore(4)
+_analytics_read_slots = threading.BoundedSemaphore(3)
+_analytics_store = None
+
+
+def _analytics_loop(shutdown):
+    global _analytics_store
+    import antigravity_generations
+    import qoder_usage_provider
+    import usage_claude_codex
+    from v4_analytics import AnalyticsStore
+
+    providers = [
+        usage_claude_codex.Provider("claude", claude_sources),
+        usage_claude_codex.Provider("codex", codex_sources),
+        qoder_usage_provider.Provider(qoder_sources, qoder_cn_sources, HOME),
+        antigravity_generations,
+    ]
+    store = AnalyticsStore(DATA_DIR / "usage_v4.sqlite3", providers)
+    _analytics_store = store
+    try:
+        while not shutdown.is_set():
+            store.request_scan()
+            shutdown.wait(45)
+    finally:
+        _analytics_store = None
+        store.close()
+
+
+def _analytics_response(query, *, export=False):
+    from v4_analytics import GenerationConflict, StoreNotReady
+
+    json_type = "application/json; charset=utf-8"
+    if len(query) > 20 or any(len(v) != 1 or len(v[0]) > 4096 for v in query.values()):
+        return 400, {"error": "invalid analytics parameters"}, json_type
+    store = _analytics_store
+    if store is None:
+        return 503, {"error": "index starting"}, json_type
+    if not _analytics_read_slots.acquire(blocking=False):
+        return 429, {"error": "too many concurrent analytics reads"}, json_type
+    try:
+        params = {k: v[0] for k, v in query.items()}
+        if export:
+            return 200, store.export_csv(params).encode("utf-8"), "text/csv; charset=utf-8"
+        return 200, store.query(params), json_type
+    except GenerationConflict:
+        return 409, {"error": "index changed; restart pagination"}, json_type
+    except StoreNotReady:
+        return 503, {"error": "index starting"}, json_type
+    except ValueError as exc:
+        if export and str(exc) == "export too large":
+            return 413, {"error": "export too large; narrow the selection"}, json_type
+        return 400, {"error": "invalid analytics parameters"}, json_type
+    finally:
+        _analytics_read_slots.release()
 
 
 def _local_http_host(headers):
@@ -8281,7 +8336,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(403, {"error": "forbidden"})
         try:
             if path == "/api/health":
+                analytics = _analytics_store
                 self._send(200, {"ok": True, "pid": os.getpid(),
+                                 "analytics": analytics.health() if analytics else {"status": "starting"},
                                  "parent_pid": os.getppid(),
                                  "instance_id": _DAEMON_INSTANCE_ID,
                                  "started_at": _DAEMON_STARTED_AT,
@@ -8321,6 +8378,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, api_projects(query))
             elif path == "/api/usage":
                 self._send(200, api_usage())
+            elif path in ("/api/analytics", "/api/analytics/export"):
+                if not _local_long_poll_request(self.headers):
+                    return self._send(403, {"error": "forbidden"})
+                self._send(*_analytics_response(query, export=path.endswith("/export")))
             elif path == "/api/session-performance":
                 if not _local_long_poll_request(self.headers):
                     return self._send(403, {"error": "forbidden"})
@@ -8508,6 +8569,10 @@ def main():
                      daemon=True, name="agentdeck-integration-startup").start()
     _codex_quota_manager.start()
     _performance.start()
+    threading.Thread(target=_run_delayed_loop,
+                     args=(4, shutdown_requested, lambda: _run_startup_task(
+                         "analytics", lambda: _analytics_loop(shutdown_requested))),
+                     daemon=True, name="agentdeck-analytics-startup").start()
     threading.Thread(target=_parent_watchdog,
                      args=(shutdown_requested,), daemon=True).start()
     # Both loops may inspect large rollout files while holding Python's GIL. On

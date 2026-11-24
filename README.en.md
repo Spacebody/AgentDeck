@@ -31,6 +31,8 @@
 
 AgentDeck integrates quota monitoring, session management, and usage analytics for multiple agents into a single menu-bar panel. The backend is a pure standard-library Python daemon, and the macOS client is a native AppKit + SwiftUI app in a SwiftPM package.
 
+The local `v4` preview adds usage analytics from native client records. Public downloads remain on the stable release. See the [analytics notes](docs/v4-analytics.md) for source coverage and measurement boundaries.
+
 ## Design principles
 
 - **Zero third-party dependencies** — stdlib Python + native SwiftPM AppKit / SwiftUI; no Node, Electron, or bundlers

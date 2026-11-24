@@ -1015,6 +1015,7 @@ class SessionIndexTests(unittest.TestCase):
         self.codex_sources = []
         self.qoder_sources = []
         self.patches = [
+            mock.patch.object(daemon, "HOME", self.root),
             mock.patch.object(daemon, "SESSION_INDEX_FILE", self.db),
             mock.patch.object(daemon, "PINS_FILE", self.pins),
             mock.patch.object(daemon, "claude_sources",

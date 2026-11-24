@@ -3,6 +3,7 @@ import SwiftUI
 struct ProjectsView: View {
     @StateObject private var model: ProjectStore
     let agents: Set<String>
+    let analyticsAgents: Set<String>
     let isActive: Bool
     let showActive: Bool
     let refreshSeconds: Int
@@ -12,12 +13,13 @@ struct ProjectsView: View {
     @State private var expanded: Set<String> = []
     private var scope: String { agents.sorted().joined(separator: ",") }
 
-    init(agents: Set<String>, isActive: Bool = true, showActive: Bool = true, refreshSeconds: Int = 30,
+    init(agents: Set<String>, analyticsAgents: Set<String>? = nil, isActive: Bool = true, showActive: Bool = true, refreshSeconds: Int = 30,
          previewProjects: [ProjectItem]? = nil,
          previewSessions: [SessionItem]? = nil,
          onOpen: @escaping (ActiveSession) -> Void, onResume: @escaping (SessionItem) -> Void) {
         self.agents = agents; self.isActive = isActive; self.onOpen = onOpen; self.onResume = onResume
         self.previewSessions = previewSessions
+        self.analyticsAgents = analyticsAgents ?? agents
         self.showActive = showActive
         self.refreshSeconds = min(600, max(5, refreshSeconds))
         _model = StateObject(wrappedValue: ProjectStore(projects: previewProjects ?? [], loadImported: previewProjects == nil))
@@ -86,6 +88,8 @@ struct ProjectsView: View {
                             }
                         }
                         if expanded.contains(project.id) {
+                            AnalyticsDetailLink(scope: .project(project.cwd), title: project.name, agents: analyticsAgents)
+                                .frame(maxWidth: .infinity, alignment: .leading).padding(.leading, 32)
                             if project.count == 0 && project.active.isEmpty {
                                 Text(L("v3.noProjectSessions")).foregroundStyle(Theme.ink3).padding(.bottom, 12)
                             } else {
@@ -137,6 +141,8 @@ private struct ProjectSessionsView: View {
                             .compactMap { $0 }.joined(separator: " · "))
                             .font(.system(size: 10)).foregroundStyle(Theme.ink3)
                     }.frame(maxWidth: .infinity, alignment: .leading)
+                    AnalyticsDetailLink(scope: AnalyticsScope(session), title: session.title ?? session.id,
+                                        agents: [session.tool], iconOnly: true)
                     Button { onResume(session) } label: {
                         Image(systemName: "arrow.up.right").frame(width: 28, height: 28)
                     }.buttonStyle(.plain).foregroundStyle(DashboardStyle.accent).help(L("session.resume"))

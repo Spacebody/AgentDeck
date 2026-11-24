@@ -74,6 +74,16 @@ actor APIClient {
     }()
 
     // MARK: GET
+    func analyticsCSV(query: [String: String]) async throws -> Data {
+        let url = try Self.makeURL("/api/analytics/export", query: query)
+        var request = URLRequest(url: url)
+        request.setValue("text/csv", forHTTPHeaderField: "Accept")
+        let (data, response) = try await session.data(for: request, delegate: requestDelegate)
+        try Self.check(response)
+        guard response.mimeType?.lowercased() == "text/csv" else { throw APIError.noData }
+        return data
+    }
+
     func get<T: Decodable>(_ path: String, query: [String: String] = [:]) async throws -> T {
         let url = try Self.makeURL(path, query: query)
         var request = URLRequest(url: url)

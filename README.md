@@ -31,6 +31,8 @@
 
 AgentDeck 将多个 Agent 的额度监控、会话管理和用量统计集成在一个菜单栏面板中。后端为纯标准库 Python daemon，macOS 客户端为 SwiftPM 工程中的原生 AppKit + SwiftUI 应用，仍保持零第三方运行时依赖、无 Electron / 打包器、无运行时下载。
 
+本地开发分支 `v4` 增加了基于原始记录的用量分析。公开下载仍使用稳定版；预览版的采集范围、计量口径与验收步骤见[用量分析说明](docs/v4-analytics.md)。
+
 ## 设计原则
 
 - **零第三方依赖** — 标准库 Python + SwiftPM 原生 AppKit / SwiftUI；不引入 Node、Electron 或任何打包器

@@ -398,6 +398,9 @@ private struct SessionRow: View {
             .onTapGesture { onToggle() }
 
             if expanded {
+                AnalyticsDetailLink(scope: AnalyticsScope(session), title: session.title ?? session.id,
+                                    agents: [session.tool])
+                    .frame(maxWidth: .infinity, alignment: .leading).padding(.leading, 35)
                 SessionSpeedView(request: session.performanceRequest, expanded: true)
                     .padding(.leading, 35).padding(.trailing, 9)
                 previewBox.padding(.leading, 35).padding(.trailing, 4).padding(.bottom, 6)

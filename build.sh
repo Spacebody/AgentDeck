@@ -106,6 +106,8 @@ build() {
   # 自包含：后端 + UI + 图标全部入包
   cp "$ROOT/agentdeckd.py" "$APP/Contents/Resources/"
   cp "$ROOT/session_performance.py" "$ROOT/antigravity_usage.py" "$ROOT/scripts/antigravity-hook.py" "$APP/Contents/Resources/"
+  cp "$ROOT/v4_analytics.py" "$ROOT/v4_pricing.py" "$ROOT/usage_claude_codex.py" \
+    "$ROOT/qoder_usage_provider.py" "$ROOT/antigravity_generations.py" "$APP/Contents/Resources/"
   cp "$ROOT/VERSION" "$APP/Contents/Resources/"
   cp -R "$ROOT/static" "$APP/Contents/Resources/static"
   [ -f "$ROOT/assets/AgentDeck.icns" ] || {
