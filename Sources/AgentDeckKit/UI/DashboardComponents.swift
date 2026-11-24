@@ -45,7 +45,7 @@ struct DashboardActiveList: View {
             ForEach(Array(sessions.enumerated()), id: \.offset) { _, session in
                 Button { onOpen(session) } label: {
                     HStack(spacing: 10) {
-                        BrandBadge(brand: Brand(rawValue: session.tool) ?? .codex, size: 28)
+                        SessionIcon(tool: session.tool, badgeSize: 28)
                         VStack(alignment: .leading, spacing: 5) {
                             Text(session.title ?? session.project ?? session.cwd ?? session.tool)
                                 .font(.system(size: 12, weight: .medium)).lineLimit(1)
@@ -58,9 +58,12 @@ struct DashboardActiveList: View {
                             }
                             SessionSpeedView(request: session.performanceRequest)
                         }
-                        Image(systemName: "arrow.up.right").font(.system(size: 11)).foregroundStyle(Theme.ink3)
+                        if SessionTools.canFocus(session.tool) {
+                            Image(systemName: "arrow.up.right").font(.system(size: 11)).foregroundStyle(Theme.ink3)
+                        }
                     }.padding(.vertical, 9).contentShape(Rectangle())
-                }.buttonStyle(.plain).help(L("v3.open"))
+                }.buttonStyle(.plain).disabled(!SessionTools.canFocus(session.tool))
+                    .help(SessionTools.canFocus(session.tool) ? L("v3.open") : "")
             }
         }
     }
@@ -95,17 +98,35 @@ struct DashboardDoneList: View {
                     ForEach(Array((expanded.contains(path) ? items : Array(items.prefix(1))).enumerated()), id: \.offset) { _, event in
                         Button { onOpen(event) } label: {
                             HStack(spacing: 8) {
-                                BrandGlyph(brand: Brand(rawValue: event.tool) ?? .codex)
+                                SessionIcon(tool: event.tool)
                                 Text(event.title ?? "").font(.system(size: 11)).lineLimit(1)
                                 Spacer(minLength: 0)
                                 Text(Fmt.relative(Date(timeIntervalSince1970: event.ts)))
                                     .font(.system(size: 10)).foregroundStyle(Theme.ink3)
                             }.padding(.vertical, 7).padding(.leading, 22).contentShape(Rectangle())
-                        }.buttonStyle(.plain)
+                        }.buttonStyle(.plain).disabled(!SessionTools.canFocus(event.tool))
                     }
                 }
                 Divider().opacity(0.4)
             }
+        }
+    }
+}
+
+struct QuotaAmountRows: View {
+    let amounts: [QuotaAmount]
+    var body: some View {
+        ForEach(amounts) { item in
+            VStack(alignment: .leading, spacing: 3) {
+                HStack {
+                    Text(item.label ?? item.id)
+                    Spacer(minLength: 4)
+                    Text(L("quota.amountRemaining", ["n": item.remaining.formatted()])).monospacedDigit()
+                }
+                if let date = item.resetsAt?.date {
+                    Text(Fmt.countdown(date)).foregroundStyle(Theme.ink3)
+                }
+            }.font(.system(size: 11))
         }
     }
 }
@@ -118,7 +139,7 @@ struct DashboardQuota: View {
     var body: some View {
         VStack(alignment: .leading, spacing: compact ? 4 : 10) {
             HStack(spacing: 6) {
-                BrandGlyph(brand: brand, glyph: 14)
+                BrandGlyph(brand: brand, glyph: compact ? 14 : MiniDonut.defaultDiameter)
                 Text(brand.rawValue == "qoder_cn" ? "Qoder CN" : brand.rawValue.capitalized)
                     .font(.system(size: 12, weight: .semibold))
                 Spacer(minLength: 0)
@@ -148,10 +169,11 @@ struct DashboardQuota: View {
                     }
                 }
             }
-            if node.displayWindows.isEmpty {
-                Text(L(node.hidden == true ? "quota.loading" : node.noQuota == true ? "quota.noQuota" : node.ok == true ? "quota.noOther" : "quota.fetchFailed"))
+            QuotaAmountRows(amounts: node.remainingAmounts ?? [])
+            if node.displayWindows.isEmpty && (node.remainingAmounts ?? []).isEmpty {
+                Text(L(node.hidden == true ? "quota.loading" : node.noQuota == true ? (brand == .antigravity ? "quota.noAntigravitySample" : "quota.noQuota") : node.ok == true ? "quota.noOther" : "quota.fetchFailed"))
                     .font(.system(size: 11)).foregroundStyle(Theme.ink3)
-                if node.hidden != true, let error = node.error, !error.isEmpty {
+                if node.hidden != true, !(brand == .antigravity && node.noQuota == true), let error = node.error, !error.isEmpty {
                     Text(error).font(.system(size: 11)).foregroundStyle(Theme.warn)
                         .lineLimit(3).help(error)
                 }

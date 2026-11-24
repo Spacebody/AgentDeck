@@ -64,7 +64,8 @@ class AuditBoundaryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / 'settings.json'
             path.write_text('[]')
-            with mock.patch.object(daemon, 'SETTINGS_FILE', path), \
+            with mock.patch.object(daemon, 'HOME', Path(td)), \
+                    mock.patch.object(daemon, 'SETTINGS_FILE', path), \
                     mock.patch.object(daemon, '_settings_cache', None):
                 self.assertEqual(daemon.get_settings(), daemon.DEFAULT_SETTINGS)
                 daemon.api_settings_save({'font_scale': 120})

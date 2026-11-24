@@ -7,7 +7,7 @@ struct SessionPreviewRequest: Equatable {
     let mtime: Double
 
     static func expanded(_ key: String?, in sessions: [SessionItem]) -> Self? {
-        guard let session = sessions.first(where: { $0.rowKey == key }) else { return nil }
+        guard let session = sessions.first(where: { $0.rowKey == key }), session.tool != "antigravity" else { return nil }
         return Self(key: session.rowKey, mtime: session.mtime)
     }
 }
@@ -19,6 +19,7 @@ struct SessionsView: View {
     var scrollable: Bool = true
     var query: String = ""
     var filter: String = "all"
+    var showAntigravity = true
     var total: Int = 0
     var hasMore: Bool = false
     var page: Int = 1
@@ -55,7 +56,7 @@ struct SessionsView: View {
 
     init(sessions: [SessionItem], active: [ActiveSession] = [],
          onOpenActive: @escaping (ActiveSession) -> Void = { _ in }, scrollable: Bool = true,
-         query: String = "", filter: String = "all", total: Int = 0,
+         query: String = "", filter: String = "all", showAntigravity: Bool = true, total: Int = 0,
          hasMore: Bool = false, page: Int = 1, pageCount: Int = 1,
          pageSize: Int = 20, loading: Bool = false,
          indexing: Bool = false, loadFailed: Bool = false,
@@ -74,6 +75,7 @@ struct SessionsView: View {
         self.sessions = sessions; self.scrollable = scrollable
         self.active = active; self.onOpenActive = onOpenActive
         self.query = query; self.filter = filter; self.total = total
+        self.showAntigravity = showAntigravity
         self.hasMore = hasMore; self.loading = loading
         self.page = page; self.pageCount = pageCount; self.pageSize = pageSize
         self.indexing = indexing; self.loadFailed = loadFailed
@@ -99,7 +101,7 @@ struct SessionsView: View {
                     DashboardHeading(text: L("active.running", ["n": "\(filteredActive.count)"]))
                     ForEach(Array(filteredActive.enumerated()), id: \.offset) { _, active in
                         if let session = previewSessions.first(where: { $0.rowKey == active.indexedRowKey }) {
-                            sessionRow(session, onOpen: { onOpenActive(active) })
+                            sessionRow(session, onOpen: SessionTools.canFocus(active.tool) ? { onOpenActive(active) } : nil)
                         } else {
                             DashboardActiveList(sessions: [active], showsHeading: false, onOpen: onOpenActive)
                         }
@@ -307,7 +309,7 @@ struct SessionsView: View {
         HStack(spacing: 10) {
             searchField
             loadingIndicator
-            let agents = ["all", "claude", "codex", "qoder"]
+            let agents = ["all"] + SessionTools.indexed.filter { showAntigravity || $0 != "antigravity" }
             PanelChoiceMenu(title: filter == "all" ? L("session.all") : filter.capitalized,
                             selected: filter, choices: agents.map {
                 .init(id: $0, title: $0 == "all" ? L("session.all") : $0.capitalized)
@@ -323,16 +325,6 @@ struct SessionsView: View {
             if total > 0 {
                 Text("\(total)").font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.ink2)
                     .monospacedDigit()
-            }
-        }
-    }
-
-    private var filterChips: some View {
-        HStack(spacing: 7) {
-            ForEach(["all", "claude", "codex", "qoder"], id: \.self) { f in
-                Chip(text: f == "all" ? L("session.all") :
-                     (f == "claude" ? "Claude" : f == "codex" ? "Codex" : "Qoder"),
-                     on: filter == f) { onFilter(f) }
             }
         }
     }
@@ -384,13 +376,12 @@ private struct SessionRow: View {
     var onOpen: (() -> Void)? = nil
 
     @State private var hovering = false
-    private var brand: Brand { Brand(rawValue: session.tool) ?? .claude }
     private var live: Bool { Date().timeIntervalSince1970 - session.mtime < 120 }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 9) {
-                BrandBadge(brand: brand, size: 26)
+                SessionIcon(tool: session.tool, fallback: .claude, badgeSize: 26)
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 4) {
                         if live { Circle().fill(Theme.ok).frame(width: 5, height: 5).shadow(color: Theme.ok, radius: 3).pulse(1.6) }   // .livedot 呼吸
@@ -418,9 +409,9 @@ private struct SessionRow: View {
         .onHover { hovering = $0 }
         .contextMenu {
             if let onOpen { Button(L("v3.open"), action: onOpen) }
-            Button(L("session.resume"), action: onResume)
-            if session.source != "qoder_app" { Button(L("session.copyCmd"), action: onCopy) }
-            if session.cwd?.isEmpty == false {
+            if session.canResume { Button(L("session.resume"), action: onResume) }
+            if session.canCopyCommand { Button(L("session.copyCmd"), action: onCopy) }
+            if session.canResume && session.cwd?.isEmpty == false {
                 Button(action: onRelocate) {
                     Label(L("session.relocate"), systemImage: "folder.badge.gearshape")
                 }
@@ -433,8 +424,11 @@ private struct SessionRow: View {
 
     private var meta: String {
         var s = session.project?.isEmpty == false ? session.project! : "—"
+        if let source = session.sourceLabel { s = source + " · " + s }
         if let b = session.branch, !b.isEmpty, b != "HEAD" { s += " · " + b }
-        s += " · " + Fmt.relative(Date(timeIntervalSince1970: session.mtime))
+        if session.tool != "antigravity" || session.mtime > 0 {
+            s += " · " + Fmt.relative(Date(timeIntervalSince1970: session.mtime))
+        }
         return s
     }
 
@@ -445,14 +439,16 @@ private struct SessionRow: View {
                     .font(.system(size: 11))
                     .foregroundStyle(session.pinned == true ? Color(hex: 0xffd479) : Theme.ink2)
             }.buttonStyle(.plain)
-            Button(action: onOpen ?? onResume) {
-                Text(L(onOpen != nil ? "v3.open" : session.source == "qoder_app" ? "session.open" : "session.resume"))
-                    .font(.system(size: 9.5, weight: .semibold)).foregroundStyle(Theme.ink)
-                    .padding(.horizontal, 11).frame(height: 25)
-                    .background(Capsule().fill(Color.white.opacity(0.10)))
-                    .overlay(Capsule().strokeBorder(Theme.edgeHi))
-            }.buttonStyle(.plain)
-            if session.source != "qoder_app" {
+            if onOpen != nil || session.canResume {
+                Button(action: onOpen ?? onResume) {
+                    Text(L(onOpen != nil ? "v3.open" : session.source == "qoder_app" ? "session.open" : "session.resume"))
+                        .font(.system(size: 9.5, weight: .semibold)).foregroundStyle(Theme.ink)
+                        .padding(.horizontal, 11).frame(height: 25)
+                        .background(Capsule().fill(Color.white.opacity(0.10)))
+                        .overlay(Capsule().strokeBorder(Theme.edgeHi))
+                }.buttonStyle(.plain)
+            }
+            if session.canCopyCommand {
                 Button(action: onCopy) {
                     Image(systemName: "doc.on.doc").font(.system(size: 10)).foregroundStyle(Theme.ink2)
                 }.buttonStyle(.plain)
@@ -464,7 +460,10 @@ private struct SessionRow: View {
     }
 
     @ViewBuilder private var previewBox: some View {
-        if let msgs = preview {   // 已加载：有内容→渲染；空→无预览
+        if session.tool == "antigravity" {
+            Text(L(session.source == "antigravity_app" ? "session.antigravityImport" : "session.noPreview"))
+                .font(.system(size: 9.5)).foregroundStyle(Theme.ink3)
+        } else if let msgs = preview {   // 已加载：有内容→渲染；空→无预览
             if msgs.isEmpty {
                 Text(L("session.noPreview")).font(.system(size: 9.5)).foregroundStyle(Theme.ink3)
             } else {

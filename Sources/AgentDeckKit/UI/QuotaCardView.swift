@@ -129,7 +129,7 @@ struct BrandGlyph: View {
                     .foregroundStyle(brand.accent)
             } else {   // 资源缺失兜底
                 Image(systemName: brand == .claude ? "sparkle"
-                      : brand == .codex ? "apple.terminal" : "q.square")
+                      : brand == .codex ? "apple.terminal" : brand == .antigravity ? "arrow.up.forward.circle" : "q.square")
                     .font(.system(size: glyph, weight: .regular))
                     .foregroundStyle(brand.accent)
             }
@@ -605,12 +605,7 @@ struct QuotaCardView: View {
     var fillsHeight = false
 
     private var name: String {
-        switch brand {
-        case .claude: return "Claude"
-        case .codex: return "Codex"
-        case .qoder: return "Qoder"
-        case .qoderCn: return "Qoder CN"
-        }
+        brand.name
     }
     private var compact: Bool { presentation.isWidget }
     private var narrow: Bool { presentation.isDualPanel }
@@ -653,17 +648,18 @@ struct QuotaCardView: View {
                     IndexedQuotaWindow(id: $0, window: windows[$0])
                 }
                 multiWindowBody(main: main, rest: rest)
-            } else {
+            } else if (node.remainingAmounts ?? []).isEmpty {
                 Text(L("quota.noOther"))
                     .font(.system(size: compact ? 9 : 10.5)).foregroundStyle(Theme.ink3)
                     .padding(.vertical, compact ? 5 : 7)
             }
+            QuotaAmountRows(amounts: node.remainingAmounts ?? [])
         } else {
             // 错误/无额度态
             VStack(alignment: .leading, spacing: 3) {
                 Text(node?.hidden == true ? L("quota.loading")
-                     : (node?.noQuota == true ? L("quota.noQuota") : L("quota.fetchFailed")))
-                if node?.hidden != true, let detail = node?.error, !detail.isEmpty {
+                     : (node?.noQuota == true ? L(brand == .antigravity ? "quota.noAntigravitySample" : "quota.noQuota") : L("quota.fetchFailed")))
+                if node?.hidden != true, !(brand == .antigravity && node?.noQuota == true), let detail = node?.error, !detail.isEmpty {
                     Text(detail).font(.system(size: 9.5)).foregroundStyle(Theme.ink3.opacity(0.8))
                         .lineLimit(2)
                 }

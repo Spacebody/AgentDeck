@@ -9,6 +9,7 @@ struct UsageResponse: Decodable {
     let codexDaily: [String: Double]              // codex_daily: 日 → token
     let qoderDaily: [String: Double]?              // qoder_daily: 日 → token（旧 daemon 可缺失）
     let costDaily: [String: Double]               // cost_daily: 日 → 等值美元
+    var antigravityDaily: [String: Double]? = nil
     var qoderCnDaily: [String: Double]? = nil
     let hourly: [HourBucket]                       // 覆盖 48h，每小时 c=claude x=codex q=qoder
     let projects7d: [ProjectUsage]?               // projects_7d
@@ -23,6 +24,10 @@ struct UsageResponse: Decodable {
     let codexCost7d: Double?
     let codexCost30d: Double?
     let coverage: UsageCoverage?
+
+    func hasAntigravitySamples(on days: [String]) -> Bool {
+        coverage?.antigravityAvailable != false && days.contains { antigravityDaily?[$0] != nil }
+    }
 }
 
 struct HourBucket: Decodable {
@@ -31,6 +36,7 @@ struct HourBucket: Decodable {
     let x: Double
     let q: Double?
     var qcn: Double? = nil
+    var ag: Double? = nil
 }
 struct ProjectUsage: Decodable {
     let name: String
@@ -43,6 +49,7 @@ struct ProjectUsage: Decodable {
 struct UsageCoverage: Decodable {
     let codexFiles: Int
     let codexMissingUsageFiles: Int
+    var antigravityAvailable: Bool? = nil
 }
 
 // MARK: - /api/active（活跃会话，对应 api_active 行 1244）
@@ -76,11 +83,11 @@ struct DoneEvent: Decodable {
 
 // MARK: - 今日摘要派生（复刻 loadToday：按模型族聚合 + 24h 环比）
 struct TodaySummary {
-    enum Family: String, CaseIterable { case opus, sonnet, haiku, other, codex, qoder }
+    enum Family: String, CaseIterable { case opus, sonnet, haiku, other, codex, qoder, antigravity }
     var byFamily: [Family: Double] = [:]
     var byAgent: [Brand: Double] = [:]
     var totalTokens: Double = 0
-    var costUSD: Double = 0
+    var costUSD: Double?
     var deltaPercent: Int?     // 近24h vs 前24h；nil=无对比基准
 
     /// 家族配色（FAM_COLORS）：opus/sonnet/haiku/other/codex/qoder。
@@ -92,6 +99,7 @@ struct TodaySummary {
         case .other:  return 0x9a9aa5
         case .codex:  return 0x4fd1c5   // var(--codex-deep)
         case .qoder:  return 0x7c3aed
+        case .antigravity: return 0x3683d4
         }
     }
 
@@ -113,8 +121,10 @@ struct TodaySummary {
             fams[.qoder, default: 0] += u.qoderDaily?[today] ?? 0
         }
         let cn = visibleAgents.contains("qoder_cn") ? u.qoderCnDaily?[today] ?? 0 : 0
+        let ag = visibleAgents.contains("antigravity") && u.hasAntigravitySamples(on: [today]) ? u.antigravityDaily?[today] ?? 0 : 0
         byAgent = [.codex: fams[.codex] ?? 0, .qoder: fams[.qoder] ?? 0, .qoderCn: cn,
                    .claude: [.opus, .sonnet, .haiku, .other].reduce(0) { $0 + (fams[$1] ?? 0) }]
+        if ag > 0 { byAgent[.antigravity] = ag; fams[.antigravity] = ag }
         fams[.qoder, default: 0] += cn
         let tok = byAgent.values.reduce(0, +)
         guard tok > 0 else { return nil }
@@ -126,11 +136,12 @@ struct TodaySummary {
                 + (visibleAgents.contains("codex") ? h.x : 0)
                 + (visibleAgents.contains("qoder") ? h.q ?? 0 : 0)
             let cnTotal = visibleAgents.contains("qoder_cn") ? h.qcn ?? 0 : 0
-            if h.ts >= nowSec - 86400 { cur += total + cnTotal } else { prev += total + cnTotal }
+            let agTotal = visibleAgents.contains("antigravity") ? h.ag ?? 0 : 0
+            if h.ts >= nowSec - 86400 { cur += total + cnTotal + agTotal } else { prev += total + cnTotal + agTotal }
         }
         byFamily = fams
         totalTokens = tok
-        costUSD = u.costDaily[today] ?? 0
+        costUSD = UsageRangeSummary(usage: u, span: 1, visible: visibleAgents).cost
         deltaPercent = prev > 0 ? Int(((cur - prev) / prev * 100).rounded()) : nil
     }
 }

@@ -39,6 +39,7 @@ struct EqualHeightQuotaRow: Layout {
 }
 
 struct OverviewView: View {
+    @ObservedObject private var palette = AgentColors.shared
     @Environment(\.adShowInfo) private var showInfo
     let quota: QuotaResponse?
     var usage: UsageResponse? = nil
@@ -51,6 +52,7 @@ struct OverviewView: View {
     var showCodexAgent: Bool? = nil
     var showQoderAgent: Bool? = nil
     var showQoderCNAgent: Bool? = nil
+    var showAntigravityAgent: Bool? = nil
     var quotaAutoRotate: Bool = true
     var quotaRotateSecs: Int = 6
     var carouselActive: Bool = true
@@ -71,7 +73,7 @@ struct OverviewView: View {
                         InfoButton { showInfo(.today) }.accessibilityLabel(L("info.title"))
                     }
                     HStack(alignment: .firstTextBaseline, spacing: 5) {
-                        Text(Fmt.tokens(today?.totalTokens ?? 0))
+                        Text(todayTokenText)
                             .font(.system(size: 34, weight: .semibold)).monospacedDigit()
                             .lineLimit(1).minimumScaleFactor(0.6)
                         Text("tokens").font(.system(size: 10)).foregroundStyle(Theme.ink3)
@@ -99,6 +101,16 @@ struct OverviewView: View {
                 }
                 if let usage {
                     DashboardTrend(hourly: usage.hourly, agents: visibleAgents).frame(height: 95)
+                    if visibleAgents.count > 1 {
+                        TrendLegendLayout() {
+                            ForEach(Brand.allCases.filter { visibleAgents.contains($0.rawValue) }, id: \.self) { brand in
+                                HStack(spacing: 4) {
+                                    Circle().fill(brand.accent).frame(width: 7, height: 7)
+                                    Text(brand.name).font(.caption)
+                                }
+                            }
+                        }
+                    }
                 } else { Text(L("common.loading")).foregroundStyle(Theme.ink3) }
             }
             Divider().opacity(0.4)
@@ -132,7 +144,15 @@ struct OverviewView: View {
 
     private var visibleAgents: Set<String> {
         Set([showClaude ? "claude" : nil, showCodex ? "codex" : nil,
-             showQoder ? "qoder" : nil, showQoderCN ? "qoder_cn" : nil].compactMap { $0 })
+             showQoder ? "qoder" : nil, showQoderCN ? "qoder_cn" : nil,
+             (showAntigravityAgent ?? !(quota?.antigravityPanelHidden ?? true)) ? "antigravity" : nil].compactMap { $0 })
+    }
+
+    private var todayTokenText: String {
+        if visibleAgents == ["antigravity"] {
+            guard let usage, let day = usage.days.last, usage.hasAntigravitySamples(on: [day]) else { return "—" }
+        }
+        return Fmt.tokens(today?.totalTokens ?? 0)
     }
 
     private var todayCost: String {
@@ -144,14 +164,8 @@ struct OverviewView: View {
 
     @ViewBuilder private var quotaSection: some View {
         if let quota {
-            let visible = Set([
-                showClaude ? "claude" : nil,
-                showCodex ? "codex" : nil,
-                showQoder ? "qoder" : nil,
-                showQoderCN ? "qoder_cn" : nil,
-            ].compactMap { $0 })
             FlatQuotaCarousel(
-                pages: quota.flatPages(visibleAgents: visible),
+                pages: quota.flatPages(visibleAgents: visibleAgents),
                 dashboard: true,
                 autoRotate: quotaAutoRotate,
                 interval: quotaRotateSecs,
@@ -164,6 +178,34 @@ struct OverviewView: View {
     }
 }
 
+struct TrendLegendLayout: Layout {
+    static func frames(_ sizes: [CGSize], width: CGFloat) -> [CGRect] {
+        var x: CGFloat = 0, y: CGFloat = 0, rowHeight: CGFloat = 0
+        return sizes.map { size in
+            if x > 0 && x + size.width > width {
+                x = 0; y += rowHeight + 5; rowHeight = 0
+            }
+            let frame = CGRect(origin: CGPoint(x: x, y: y), size: size)
+            x += size.width + 12
+            rowHeight = max(rowHeight, size.height)
+            return frame
+        }
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let frames = Self.frames(subviews.map { $0.sizeThatFits(.unspecified) }, width: proposal.width ?? .infinity)
+        return CGSize(width: proposal.width ?? frames.map(\.maxX).max() ?? 0, height: frames.map(\.maxY).max() ?? 0)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let frames = Self.frames(subviews.map { $0.sizeThatFits(.unspecified) }, width: bounds.width)
+        for (item, frame) in zip(subviews, frames) {
+            item.place(at: CGPoint(x: bounds.minX + frame.minX, y: bounds.minY + frame.minY),
+                       anchor: .topLeading, proposal: ProposedViewSize(frame.size))
+        }
+    }
+}
+
 struct DashboardTrend: View {
     @ObservedObject private var palette = AgentColors.shared
     let hourly: [HourBucket]
@@ -172,43 +214,24 @@ struct DashboardTrend: View {
         Canvas { context, size in
             let now = Date().timeIntervalSince1970
             let end = floor(now / 3600) * 3600
-            let totals = (0..<24).map { index -> Double in
-                let start = end - Double(23 - index) * 3600
-                return hourly.filter { $0.ts >= start && $0.ts < start + 3600 }.reduce(0) {
-                    $0 + (agents.contains("claude") ? $1.c : 0) + (agents.contains("codex") ? $1.x : 0)
-                        + (agents.contains("qoder") ? $1.q ?? 0 : 0)
-                        + (agents.contains("qoder_cn") ? $1.qcn ?? 0 : 0)
-                }
-            }
-            let maxValue = max(totals.max() ?? 0, 1)
+            let series = Self.series(hourly: hourly, agents: agents, end: end)
+            let maxValue = max(series.compactMap { $0.values.compactMap { $0 }.max() }.max() ?? 0, 1)
             let height = max(0, size.height - 20)
-            let points = totals.enumerated().map { i, value in
-                CGPoint(x: size.width * Double(i) / 23, y: height - max(0, height - 3) * value / maxValue)
-            }
-            // Equal hourly spacing: limit tangents to the smaller adjacent change.
-            // This keeps flat hours flat and makes the tangent horizontal at extrema.
-            func tangent(_ i: Int) -> CGFloat {
-                if i == 0 { return points[1].y - points[0].y }
-                if i == points.count - 1 { return points[i].y - points[i - 1].y }
-                let a = points[i].y - points[i - 1].y, b = points[i + 1].y - points[i].y
-                return a * b > 0 ? (a > 0 ? min(a, b) : max(a, b)) : 0
-            }
-            var line = Path()
-            line.move(to: points[0])
-            for i in 1..<points.count {
-                let a = points[i - 1], b = points[i]
-                // Longer tangent handles broaden the shoulders at peaks and troughs.
-                // Below 0.5 the controls stay ordered, even on steep hourly jumps.
-                let reach: CGFloat = 0.48
-                let dx = (b.x - a.x) * reach
-                line.addCurve(to: b, control1: CGPoint(x: a.x + dx, y: a.y + tangent(i - 1) * reach),
-                              control2: CGPoint(x: b.x - dx, y: b.y - tangent(i) * reach))
-            }
-            let ink = agents.count == 1 ? agents.first.flatMap(Brand.init(rawValue:))?.accent : nil
-            context.stroke(line, with: .color(ink ?? DashboardStyle.accent),
-                           style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
             var baseline = Path(); baseline.move(to: CGPoint(x: 0, y: height)); baseline.addLine(to: CGPoint(x: size.width, y: height))
             context.stroke(baseline, with: .color(.white.opacity(0.1)), lineWidth: 1)
+            for (brand, values) in series where values.contains(where: { ($0 ?? 0) > 0 }) {
+                for run in values.indices.split(whereSeparator: { values[$0] == nil }) {
+                    let points = run.compactMap { i in
+                        values[i].map { CGPoint(x: size.width * Double(i) / 23, y: height - max(0, height - 3) * $0 / maxValue) }
+                    }
+                    if points.count == 1, let point = points.first {
+                        context.fill(Path(ellipseIn: CGRect(x: point.x - 2, y: point.y - 2, width: 4, height: 4)), with: .color(brand.accent))
+                    } else {
+                        context.stroke(Self.curve(points), with: .color(brand.accent),
+                                       style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
+                    }
+                }
+            }
             let formatter = DateFormatter(); formatter.dateFormat = "HH:mm"
             for index in [0, 6, 12, 18, 23] {
                 let date = Date(timeIntervalSince1970: end - Double(23 - index) * 3600)
@@ -217,6 +240,49 @@ struct DashboardTrend: View {
                              anchor: index == 0 ? .leading : index == 23 ? .trailing : .center)
             }
         }.accessibilityLabel(L("usage.tabCurve"))
+    }
+
+    static func series(hourly: [HourBucket], agents: Set<String>, end: Double) -> [(brand: Brand, values: [Double?])] {
+        let start = end - 23 * 3600
+        return Brand.allCases.filter { agents.contains($0.rawValue) }.map { brand in
+            var values = Array<Double?>(repeating: brand == .antigravity ? nil : 0, count: 24)
+            for bucket in hourly where bucket.ts >= start && bucket.ts < end + 3600 {
+                let index = Int((bucket.ts - start) / 3600)
+                let sample: Double?
+                switch brand {
+                case .claude: sample = bucket.c
+                case .codex: sample = bucket.x
+                case .qoder: sample = bucket.q
+                case .qoderCn: sample = bucket.qcn
+                case .antigravity: sample = bucket.ag
+                }
+                if let sample { values[index] = (values[index] ?? 0) + sample }
+            }
+            return (brand, values)
+        }
+    }
+
+    private static func curve(_ points: [CGPoint]) -> Path {
+        // Equal hourly spacing: limit tangents to the smaller adjacent change.
+        // This keeps flat hours flat and makes the tangent horizontal at extrema.
+        func tangent(_ i: Int) -> CGFloat {
+            if i == 0 { return points[1].y - points[0].y }
+            if i == points.count - 1 { return points[i].y - points[i - 1].y }
+            let a = points[i].y - points[i - 1].y, b = points[i + 1].y - points[i].y
+            return a * b > 0 ? (a > 0 ? min(a, b) : max(a, b)) : 0
+        }
+        var line = Path()
+        line.move(to: points[0])
+        for i in 1..<points.count {
+            let a = points[i - 1], b = points[i]
+            // Longer tangent handles broaden the shoulders at peaks and troughs.
+            // Below 0.5 the controls stay ordered, even on steep hourly jumps.
+            let reach: CGFloat = 0.48
+            let dx = (b.x - a.x) * reach
+            line.addCurve(to: b, control1: CGPoint(x: a.x + dx, y: a.y + tangent(i - 1) * reach),
+                          control2: CGPoint(x: b.x - dx, y: b.y - tangent(i) * reach))
+        }
+        return line
     }
 }
 

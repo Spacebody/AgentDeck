@@ -4,6 +4,43 @@ import SwiftUI
 @testable import AgentDeckKit
 
 final class SessionsViewTests: XCTestCase {
+    func testAntigravitySourcesShareFilterButNotIdentityOrResume() {
+        func row(_ source: String?, _ account: String) -> SessionItem {
+            SessionItem(tool: "antigravity", id: "same", title: nil, cwd: nil,
+                        project: nil, branch: nil, mtime: 0, account: nil, accountId: account, source: source)
+        }
+        let app = row("antigravity_app", "app"), cli = row("antigravity_cli", "cli")
+        XCTAssertNotEqual(app.rowKey, cli.rowKey)
+        XCTAssertEqual(cli.sourceLabel, "Antigravity CLI")
+        XCTAssertNotEqual(app.sourceLabel, cli.sourceLabel)
+        XCTAssertTrue(cli.canResume && cli.canCopyCommand)
+        for unsupported in [app, row(nil, "cli"), row("antigravity_cli", "app")] {
+            XCTAssertFalse(unsupported.canResume)
+            XCTAssertFalse(unsupported.canCopyCommand)
+        }
+        XCTAssertFalse(SessionTools.canFocus(cli.tool))
+        XCTAssertTrue(SessionTools.indexed.contains(cli.tool))
+        XCTAssertEqual(Brand(rawValue: cli.tool), .antigravity)
+        for item in [app, cli] {
+            XCTAssertNil(SessionPreviewRequest.expanded(item.rowKey, in: [item]))
+        }
+    }
+
+    @MainActor
+    func testAntigravityVisibilityAndLocalizedLabels() {
+        let store = AppStore()
+        XCTAssertFalse(store.agentOn("antigravity"))
+        store.settings["show_antigravity"] = .bool(true)
+        XCTAssertTrue(store.agentOn("antigravity"))
+        store.settings["show_antigravity"] = .bool(false)
+        XCTAssertFalse(store.agentOn("antigravity"))
+        for locale in ["en", "ja", "zh-CN"] {
+            for key in ["session.antigravityImport", "session.antigravityDesktop"] {
+                XCTAssertNotNil(I18N.table[locale]?[key])
+            }
+        }
+    }
+
     private func session(mtime: Double) -> SessionItem {
         SessionItem(tool: "codex", id: "preview", title: "Preview", cwd: nil,
                     project: nil, branch: nil, mtime: mtime,

@@ -22,6 +22,8 @@
   --qoder-deep: #7c3aed;
   --qoder_cn: #818cf8;
   --qoder_cn-deep: #4f46e5;
+  --antigravity: #76baff;
+  --antigravity-deep: #6199d1;
   --ok: #7ee2a8;
   --warn: #ffc46b;
   --danger: #ff7a8a;
@@ -238,6 +240,11 @@ body.wgt #aurora { opacity: .14; }
 .qcard.codex  { --tint: rgba(79,209,197,.18); --ac: var(--codex);  --ac-deep: var(--codex-deep); }
 .qcard.qoder  { --tint: rgba(124,58,237,.20); --ac: var(--qoder);  --ac-deep: var(--qoder-deep); }
 .qcard.qoder_cn { --tint: rgba(79,70,229,.20); --ac: var(--qoder_cn); --ac-deep: var(--qoder_cn-deep); }
+.qcard.antigravity { --ac: var(--antigravity); --ac-deep: var(--antigravity-deep);
+  --tint: color-mix(in srgb, var(--ac) 20%, transparent); }
+.qbadge.antigravity, .sbadge.antigravity, .abadge.antigravity {
+  color: var(--antigravity); background: color-mix(in srgb, currentColor 14%, transparent); }
+.prow.antigravity .pbar i, .cseg.antigravity { background: linear-gradient(90deg, var(--antigravity), var(--antigravity-deep)); }
 /* 多账号 carousel：卡片外壳不变，内容横向滑动切换（scroll-snap 原生触控/触摸板） */
 .qcard.is-carousel { padding-bottom: 8px; }
 .qtrack { display: flex; overflow-x: auto; scroll-snap-type: x mandatory;
@@ -523,6 +530,7 @@ body.wgt #done { display: none !important; }
   padding: 12px 6px 6px 14px; animation-delay: .12s;
 }
 .shead { display: flex; align-items: center; gap: 7px; margin-bottom: 9px; padding-right: 8px; }
+.shead, .shead .chips { flex-wrap: wrap; }
 .stitle { font-size: 12.5px; font-weight: 700; flex: none; }
 .chips { display: flex; gap: 5px; }
 .chip {
@@ -798,6 +806,9 @@ header .iconbtn:hover { background: var(--glass-hi); }
       <stop offset="0" stop-color="var(--qoder-deep)"/>
       <stop offset="1" stop-color="var(--qoder)"/>
     </linearGradient>
+    <linearGradient id="grad-antigravity" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="var(--antigravity)"/><stop offset="1" stop-color="var(--antigravity-deep)"/>
+    </linearGradient>
     <linearGradient id="grad-qoder_cn" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="var(--qoder_cn-deep)"/>
       <stop offset="1" stop-color="var(--qoder_cn)"/>
@@ -902,6 +913,7 @@ header .iconbtn:hover { background: var(--glass-hi); }
         <button type="button" class="chip" data-f="claude">Claude</button>
         <button type="button" class="chip" data-f="codex">Codex</button>
         <button type="button" class="chip" data-f="qoder">Qoder</button>
+        <button type="button" class="chip" data-f="antigravity">Antigravity</button>
       </div>
       <input id="search" placeholder="搜索…" data-i18n-ph="session.search">
     </div>
@@ -965,6 +977,9 @@ const I18N = {
     'win.seven_day_opus': '周限额 · Opus', 'win.seven_day_oauth_apps': '周限额 · OAuth Apps',
     'win.primary': '主窗口', 'win.secondary': '次窗口',
     'usage.tabCurve': '24 小时', 'usage.tabUsage': '近 7 天', 'usage.tabProj': '项目 Top', 'usage.info': '统计口径',
+    'quota.remaining': '剩余',
+    'usage.subtotal': '{agents} 小计',
+    'usage.unknownCost': '费用未知',
     'usage.costEq': 'API 等值 7天 <b>${c7}</b> · 30天 <b>${c30}</b>',
     'usage.costSplit': 'Claude 7天 ${c7} / 30天 ${c30} · Codex 7天 ${x7} / 30天 ${x30}',
     'usage.today': '今天', 'usage.noUsage': '无用量', 'usage.legend24h': '{name} 24h',
@@ -1058,6 +1073,9 @@ const I18N = {
     'win.seven_day_opus': 'Weekly · Opus', 'win.seven_day_oauth_apps': 'Weekly · OAuth Apps',
     'win.primary': 'Primary', 'win.secondary': 'Secondary',
     'usage.tabCurve': '24 h', 'usage.tabUsage': '7 days', 'usage.tabProj': 'Top projects', 'usage.info': 'Methodology',
+    'quota.remaining': 'Remaining',
+    'usage.subtotal': '{agents} subtotal',
+    'usage.unknownCost': 'Cost unknown',
     'usage.costEq': 'API equiv. 7d <b>${c7}</b> · 30d <b>${c30}</b>',
     'usage.costSplit': 'Claude 7d ${c7} / 30d ${c30} · Codex 7d ${x7} / 30d ${x30}',
     'usage.today': 'Today', 'usage.noUsage': 'no usage', 'usage.legend24h': '{name} 24h',
@@ -1151,6 +1169,9 @@ const I18N = {
     'win.seven_day_opus': '週間 · Opus', 'win.seven_day_oauth_apps': '週間 · OAuth Apps',
     'win.primary': '主枠', 'win.secondary': '副枠',
     'usage.tabCurve': '24 時間', 'usage.tabUsage': '7 日間', 'usage.tabProj': 'プロジェクト Top', 'usage.info': '集計基準',
+    'quota.remaining': '残り',
+    'usage.subtotal': '{agents} 小計',
+    'usage.unknownCost': '費用不明',
     'usage.costEq': 'API 換算 7日 <b>${c7}</b> · 30日 <b>${c30}</b>',
     'usage.costSplit': 'Claude 7日 ${c7} / 30日 ${c30} · Codex 7日 ${x7} / 30日 ${x30}',
     'usage.today': '今日', 'usage.noUsage': '使用なし', 'usage.legend24h': '{name} 24h',
@@ -1289,7 +1310,7 @@ function applyStaticI18n(root = document) {
 const badge = (tool, sz = 13) => ['qoder', 'qoder_cn'].includes(tool)
   ? `<span style="font:700 ${Math.max(9, sz - 1)}px 'SF Pro Rounded',sans-serif">Q</span>`
   : `<span class="bglyph" style="width:${sz}px;height:${sz}px;
-     -webkit-mask-size:${tool === 'claude' ? '141%' : 'contain'};
+     -webkit-mask-size:${tool === 'claude' ? '141%' : tool === 'antigravity' ? '146%' : 'contain'};
      -webkit-mask-image:url('/brand/${tool}-tray@2x.png')"></span>`;
 
 /* ---------- 工具 ---------- */
@@ -1379,7 +1400,9 @@ function quotaCardInner(name, data, gradId, accountLabel) {
       <small>${cd(w.resets_at, true)}</small></div>`;
   }).join('');
   return `<div class="qhead"><span class="qbadge ${esc(tool)}">${icon}</span><span class="qname">${esc(name)}</span>${acctTag}</div>
-    ${rows || '<div class="qerr">—</div>'}
+    ${(rows + (data.remaining_amounts || []).filter(w => Number.isFinite(w.remaining)).map(w =>
+      `<div class="wrow"><div class="wlabel"><span>${esc(winLabel(w))}</span>
+       <b>${t('quota.remaining')} ${w.remaining}</b></div><small>${cd(w.resets_at, true)}</small></div>`).join('')) || '<div class="qerr">—</div>'}
     ${foot ? `<div class="qfoot">${foot}</div>` : ''}`;
 }
 
@@ -1445,7 +1468,7 @@ async function loadQuota(force) {
 
 let _quotaFlatID = '', _quotaFlatTimer = null, _quotaFlatPaused = false;
 function renderQuotaFlat(el, data) {
-  const legacy = ['claude', 'codex', 'qoder', 'qoder_cn'].map(id => ({
+  const legacy = AGENT_SETTINGS.map(({id}) => ({
     id, name: id[0].toUpperCase() + id.slice(1), hidden: data[id] && data[id].hidden,
     accounts: ((data.accounts || {})[id]) || (data[id] ? [data[id]] : []),
   }));
@@ -1467,7 +1490,7 @@ function renderQuotaFlat(el, data) {
   }
   if (document.body.classList.contains('wgt')) {
     el.className = 'card qcard widget-quotas';
-    el.innerHTML = pages.slice(0, 2).map(p => `<div>${quotaCardInner(p.name, p.account, '', p.account.account || '')}</div>`).join('');
+    el.innerHTML = pages.slice(0, 2).map(p => `<div style="--ac:var(--${p.tool});--ac-deep:var(--${p.tool}-deep)">${quotaCardInner(p.name, p.account, '', p.account.account || '')}</div>`).join('');
     animateQuota(el);
     return;
   }
@@ -1496,7 +1519,7 @@ function renderQuotaFlat(el, data) {
   };
   const paint = () => {
     _quotaFlatID = pages[index].id;
-    el.classList.remove('claude', 'codex', 'qoder', 'qoder_cn'); el.classList.add(pages[index].tool);
+    el.classList.remove(...AGENT_SETTINGS.map(a => a.id)); el.classList.add(pages[index].tool);
     el.querySelectorAll('.qdot').forEach((dot, i) => dot.classList.toggle('on', i === index));
     const count = el.querySelector('.qcount span'); if (count) count.textContent = index + 1;
   };
@@ -1535,11 +1558,22 @@ function showTip(e, html) {
   tip.style.top = Math.max(6, e.clientY - tip.offsetHeight - 10) + 'px';
 }
 
+const pricedAgents = () => AGENT_SETTINGS.filter(a => ['claude', 'codex'].includes(a.id) && agentOn(a.id));
+function scopedCost(priced, amount) {
+  if (!agentOn('antigravity')) return amount;
+  if (!amount || !priced.length) return t('usage.unknownCost');
+  return t('usage.subtotal', {agents: priced.map(a => a.name).join(' / ')}) + ' · ' + amount;
+}
+
 async function loadUsage() {
   try {
     const d = await (await fetch('/api/usage')).json();
     const showClaude = agentOn('claude'), showCodex = agentOn('codex'), showQoder = agentOn('qoder');
-    $('#cost').innerHTML = t('usage.costEq', {c7: Math.round(d.cost_7d), c30: Math.round(d.cost_30d)});
+    const showAg = agentOn('antigravity') && Object.keys(d.antigravity_daily || {}).length > 0;
+    const priced = pricedAgents();
+    const cost = span => priced.length === 2 ? d['cost_' + span] : d[priced[0]?.id + '_cost_' + span];
+    $('#cost').innerHTML = scopedCost(priced, priced.length && Number.isFinite(cost('7d')) && Number.isFinite(cost('30d'))
+      ? t('usage.costEq', {c7: Math.round(cost('7d')), c30: Math.round(cost('30d'))}) : '');
     _costSplit = t('usage.costSplit', {
       c7: Math.round(d.claude_cost_7d||0), c30: Math.round(d.claude_cost_30d||0),
       x7: Math.round(d.codex_cost_7d||0), x30: Math.round(d.codex_cost_30d||0)});
@@ -1558,7 +1592,8 @@ async function loadUsage() {
       }
       const cx = showCodex ? d.codex_daily[day] || 0 : 0;
       const qo = showQoder ? (d.qoder_daily || {})[day] || 0 : 0;
-      return { day, per, claude: sum, codex: cx, qoder: qo, all: sum + cx + qo };
+      const ag = showAg ? d.antigravity_daily[day] || 0 : 0;
+      return { day, per, claude: sum, codex: cx, qoder: qo, antigravity: ag, all: sum + cx + qo + ag };
     });
     // 纵轴取整到 1/2/2.5/5×10^n 的"漂亮值"
     const maxRaw = Math.max(...totals.map(t => t.all), 1);
@@ -1579,6 +1614,7 @@ async function loadUsage() {
       haiku:  ['#aef0c8', '#5fc78f'], other:  ['#9a9aa5', '#6a6a75'],
       codex:  ['var(--codex)', 'var(--codex-deep)'],   // Codex agent 段跟随主题色
       qoder:  ['var(--qoder)', 'var(--qoder-deep)'],
+      antigravity: ['var(--antigravity)', 'var(--antigravity-deep)'],
     };
     let body = '<defs>' + Object.entries(GRAD).map(([k, [a, b]]) => `
       <linearGradient id="ug-${k}" x1="0" y1="0" x2="0" y2="1">
@@ -1600,8 +1636,8 @@ async function loadUsage() {
       if (td.all > 0) {
         segs += `<clipPath id="ub${i}"><rect x="${x}" y="${(Y0 - Math.max(totalH, 4)).toFixed(1)}"
           width="${BW}" height="${Math.max(totalH, 4).toFixed(1)}" rx="4.5"/></clipPath>`;
-        for (const m of ['opus', 'sonnet', 'haiku', 'other', 'codex', 'qoder']) {
-          const v = m === 'codex' ? td.codex : m === 'qoder' ? td.qoder : (td.per[m] || 0);
+        for (const m of Object.keys(GRAD)) {
+          const v = td[m] || td.per[m];
           if (!v) continue;
           const h = v / niceMax * (Y0 - Y1);
           segs += `<rect x="${x}" y="${(cur - h).toFixed(1)}" width="${BW}" height="${(h + .5).toFixed(1)}"
@@ -1621,6 +1657,7 @@ async function loadUsage() {
         Object.entries(td.per).map(([m, v]) => `${m}: <b>${fmtTokens(v)}</b>`).join('<br>') +
         (td.codex ? `<br>codex: <b>${fmtTokens(td.codex)}</b>` : '') +
         (td.qoder ? `<br>qoder: <b>${fmtTokens(td.qoder)}</b>` : '') +
+        (td.antigravity ? `<br>Antigravity: <b>${fmtTokens(td.antigravity)}</b>` : '') +
         (td.all === 0 ? t('usage.noUsage') : '');
       return `<g class="uday" data-tip="${esc(tipHtml)}">
         <rect x="${X0 + slot * i}" y="${Y1}" width="${slot}" height="${Y0 - Y1 + 22}" fill="transparent"/>
@@ -1637,6 +1674,7 @@ async function loadUsage() {
       showClaude ? '<span><i class="cseg opus"></i>Opus</span><span><i class="cseg sonnet"></i>Sonnet</span><span><i class="cseg haiku"></i>Haiku</span>' : '',
       showCodex ? '<span><i class="cseg codex"></i>Codex</span>' : '',
       showQoder ? '<span><i class="cseg qoder"></i>Qoder</span>' : '',
+      showAg ? '<span><i class="cseg antigravity"></i>Antigravity</span>' : '',
     ].join('');
   } catch (e) {}
 }
@@ -1644,6 +1682,7 @@ async function loadUsage() {
 /* ---------- 会话列表 ---------- */
 // agent 面板可见性：只用其一的用户可在设置里隐藏另一个（默认都显示）
 const agentOn = tool => !settings || settings['show_' + tool] !== false;
+const canResume = s => s.tool !== 'antigravity' || (s.source === 'antigravity_cli' && s.account_id === 'cli');
 
 function renderSessions() {
   // 搜索时用服务端全量结果（searchResults）；否则用周期拉取的最近列表（sessions）。
@@ -1662,7 +1701,7 @@ function renderSessions() {
         <div class="sbadge ${s.tool}">${badge(s.tool, 14)}</div>
         <div class="smain">
           <div class="sname" title="${esc(s.title)}">${now - s.mtime < 120 ? '<span class="livedot"></span>' : ''}${esc(s.title)}</div>
-          <div class="smeta"><b>${esc(s.project || '—')}</b>${s.branch && s.branch !== 'HEAD' ? ' · ' + esc(s.branch) : ''} · ${rel(s.mtime)}</div>
+          <div class="smeta"><b>${esc(s.project || '—')}</b>${s.branch && s.branch !== 'HEAD' ? ' · ' + esc(s.branch) : ''}${s.mtime > 0 ? ' · ' + rel(s.mtime) : ''}</div>
         </div>
         <div class="sacts">
           <button type="button" class="sbtn iconb star ${s.pinned ? 'pinned' : ''}" data-act="pin" title="${s.pinned ? t('session.unpin') : t('session.pin')}">
@@ -1671,8 +1710,8 @@ function renderSessions() {
               <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01z"/>
             </svg>
           </button>
-          <button type="button" class="sbtn" data-act="resume">${s.source === 'qoder_app' ? t('session.open') : t('session.resume')}</button>
-          ${s.source === 'qoder_app' ? '' : `<button type="button" class="sbtn iconb" data-act="copy" title="${t('session.copyCmd')}">
+          ${canResume(s) ? `<button type="button" class="sbtn" data-act="resume">${s.source === 'qoder_app' ? t('session.open') : t('session.resume')}</button>` : ''}
+          ${!canResume(s) || s.source === 'qoder_app' ? '' : `<button type="button" class="sbtn iconb" data-act="copy" title="${t('session.copyCmd')}">
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
               stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <rect x="9" y="9" width="13" height="13" rx="2.5"/>
@@ -1689,6 +1728,7 @@ function renderSessions() {
 
 /* 点击行身展开最近对话预览（懒加载） */
 async function togglePreview(row, s) {
+  if (s.tool === 'antigravity') return;
   if (row.classList.contains('open')) { row.classList.remove('open'); return; }
   document.querySelectorAll('.srow.open').forEach(r => r.classList.remove('open'));
   row.classList.add('open');
@@ -1708,11 +1748,17 @@ async function togglePreview(row, s) {
 }
 
 async function loadSessions() {
+  const q = query, tool = filter;
+  const params = new URLSearchParams();
+  if (q) params.set('q', q);
+  if (tool !== 'all') params.set('tool', tool);
   try {
-    const d = await (await fetch('/api/sessions')).json();
-    sessions = d.sessions || [];
+    const d = await (await fetch('/api/sessions' + (params.toString() ? '?' + params : ''))).json();
+    if (q !== query || tool !== filter) return;
+    if (q) searchResults = d.sessions || [];
+    else { sessions = d.sessions || []; searchResults = null; }
     renderSessions();
-  } catch (e) { $('#slist').innerHTML = `<div class="empty">${t('session.loadFailed')}</div>`; }
+  } catch (e) { if (q === query && tool === filter) $('#slist').innerHTML = `<div class="empty">${t('session.loadFailed')}</div>`; }
 }
 
 $('#slist').addEventListener('click', async e => {
@@ -1735,6 +1781,7 @@ $('#slist').addEventListener('click', async e => {
     } catch { toast(t('common.opFailed')); }
     return;
   }
+  if (!canResume(s)) return;
   const resumeBody = {tool: s.tool, id: s.id, cwd: s.cwd,
     account_id: s.account_id, source: s.source};
   if (btn.dataset.act === 'copy') {
@@ -1787,7 +1834,7 @@ $('#slist').addEventListener('click', async e => {
 
 document.querySelectorAll('.shead .chip').forEach(c => c.onclick = () => {
   document.querySelectorAll('.shead .chip').forEach(x => x.classList.toggle('on', x === c));
-  filter = c.dataset.f; renderSessions();
+  filter = c.dataset.f; renderSessions(); loadSessions();
 });
 /* 用量卡视图切换：24小时 / 近7天 / 项目 Top */
 const usageMode = () => $('#usage').classList.contains('curve') ? 'curve'
@@ -1839,7 +1886,7 @@ async function loadActive() {
 }
 
 async function focusActive(a) {
-  if (!a) return;
+  if (!a || a.tool === 'antigravity') return;
   try {
     const r = await (await fetch('/api/focus', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -1878,7 +1925,7 @@ async function loadCurve() {
     for (let i = 23; i >= 0; i--) {
       const ts = nowH - i * hourMs;
       const h = byTs[ts] || {};
-      buckets.push({ ts: ts + hourMs / 2, c: h.c || 0, x: h.x || 0, q: h.q || 0 });
+      buckets.push({ ts: ts + hourMs / 2, c: h.c || 0, x: h.x || 0, q: h.q || 0, ag: h.ag || 0 });
     }
     // 按容器实际宽高铺满（面板可伸缩，图表弹性生长）；viewBox 跟随实际高度，避免缩放变形
     const VBW = Math.max(280, Math.round(svg.clientWidth) || 364);
@@ -1888,7 +1935,8 @@ async function loadCurve() {
     const t0 = nowH - 23 * hourMs, t1 = nowH + hourMs;
     const px = ts => X0 + (ts - t0) / (t1 - t0) * (X1 - X0);
     const peak = Math.max(1, ...buckets.map(b => Math.max(
-      agentOn('claude') ? b.c : 0, agentOn('codex') ? b.x : 0, agentOn('qoder') ? b.q : 0)));
+      agentOn('claude') ? b.c : 0, agentOn('codex') ? b.x : 0, agentOn('qoder') ? b.q : 0,
+      agentOn('antigravity') ? b.ag : 0)));
     const pow = 10 ** Math.floor(Math.log10(peak));
     const yMax = [1, 2, 2.5, 5, 10].map(m => m * pow).find(v => v >= peak);
     const py = v => Y0 - v / yMax * (Y0 - Y1);
@@ -1928,6 +1976,8 @@ async function loadCurve() {
       {key: 'x', color: 'var(--codex)', name: 'Codex', fill: 'url(#cvf-x)'},
       {key: 'q', color: 'var(--qoder)', name: 'Qoder', fill: 'url(#cvf-q)'},
     ].filter(s => agentOn({c: 'claude', x: 'codex', q: 'qoder'}[s.key]));
+    if (agentOn('antigravity') && (d.hourly || []).some(h => h.ts >= t0 && h.ts < t1 && Number.isFinite(h.ag)))
+      series.push({key: 'ag', color: 'var(--antigravity)', name: 'Antigravity', fill: 'none'});
     const legend = [];
     for (const s of series) {
       const pts = buckets.map(b => [px(b.ts), py(b[s.key])]);
@@ -1993,7 +2043,7 @@ $('#usageinfo').onclick = () => showInfoPop('usage');
 
 /* ---------- 今日摘要条（token / 等值$ / 24h 环比 + 模型分布环） ---------- */
 const FAM_COLORS = {opus: '#e8744f', sonnet: '#5f7de8', haiku: '#5fc78f',
-                    other: '#9a9aa5', codex: 'var(--codex-deep)', qoder: 'var(--qoder-deep)'};
+                    other: '#9a9aa5', codex: 'var(--codex-deep)', qoder: 'var(--qoder-deep)', antigravity: 'var(--antigravity-deep)'};
 function miniDonut(parts, sz = 22) {   // parts: [{v, color}]
   const total = parts.reduce((a, p) => a + p.v, 0);
   if (!total) return '';
@@ -2024,6 +2074,7 @@ async function loadToday() {
     }
     if (agentOn('codex')) fams.codex = d.codex_daily[today] || 0;
     if (agentOn('qoder')) fams.qoder = (d.qoder_daily || {})[today] || 0;
+    if (agentOn('antigravity') && d.antigravity_daily) fams.antigravity = d.antigravity_daily[today] || 0;
     const tok = Object.values(fams).reduce((a, b) => a + b, 0);
     el.classList.toggle('has', tok > 0);
     if (!tok) { el.innerHTML = ''; return; }
@@ -2032,7 +2083,7 @@ async function loadToday() {
     let cur = 0, prev = 0;
     for (const h of d.hourly) {
       const tokens = (agentOn('claude') ? h.c || 0 : 0) + (agentOn('codex') ? h.x || 0 : 0)
-        + (agentOn('qoder') ? h.q || 0 : 0);
+        + (agentOn('qoder') ? h.q || 0 : 0) + (agentOn('antigravity') ? h.ag || 0 : 0);
       h.ts >= nowSec - 86400 ? cur += tokens : prev += tokens;
     }
     const delta = prev > 0 ? Math.round((cur - prev) / prev * 100) : null;
@@ -2040,8 +2091,12 @@ async function loadToday() {
     const deltaHtml = delta === null ? ''
       : `<span class="tsep">·</span><span class="delta ${delta >= 0 ? 'up' : 'down'}"
            title="${t('today.deltaTitle')}">${delta >= 0 ? '↑' : '↓'}${Math.abs(delta)}%</span>`;
+    const priced = pricedAgents();
+    const cost = priced.length === 2 ? d.cost_daily?.[today]
+      : d.costs_by_agent_daily?.[priced[0]?.id]?.[today];
+    const costText = scopedCost(priced, Number.isFinite(cost) ? t('today.eq', {cost: Math.round(cost)}) : '');
     el.innerHTML = `${donut}<span>${t('today.summary', {tok: fmtTokens(tok)})}
-      <span class="tsep">·</span>${t('today.eq', {cost: Math.round(d.cost_daily[today] || 0)})}${deltaHtml}</span>
+      ${costText ? '<span class="tsep">·</span>' + costText : ''}${deltaHtml}</span>
       <button type="button" class="infobtn" title="${t('usage.info')}">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"
           stroke-width="2.4" stroke-linecap="round">
@@ -2106,16 +2161,8 @@ async function loadProjects() {
 $('#search').oninput = e => {
   query = e.target.value.trim().toLowerCase();
   clearTimeout(searchTimer);
-  if (!query) { searchResults = null; renderSessions(); return; }   // 清空→回默认列表
-  searchTimer = setTimeout(async () => {
-    const q = query;                                                // 防乱序：迟到响应不覆盖新查询
-    try {
-      const d = await (await fetch('/api/sessions?q=' + encodeURIComponent(q))).json();
-      if (q !== query) return;
-      searchResults = d.sessions || [];
-    } catch { if (q === query) searchResults = []; }
-    renderSessions();
-  }, 250);
+  if (!query) { searchResults = null; renderSessions(); loadSessions(); return; }
+  searchTimer = setTimeout(loadSessions, 250);
 };
 
 /* ---------- 设置 ---------- */
@@ -2127,6 +2174,7 @@ const AGENT_SETTINGS = [
   {id: 'codex', name: 'Codex', show: 'show_codex', menubar: 'menubar_codex', color: 'color_codex', def: '#8be9e2'},
   {id: 'qoder', name: 'Qoder', show: 'show_qoder', menubar: 'menubar_qoder', color: 'color_qoder', def: '#a78bfa'},
   {id: 'qoder_cn', name: 'Qoder CN', show: 'show_qoder_cn', menubar: 'menubar_qoder_cn', color: 'color_qoder_cn', def: '#818cf8'},
+  {id: 'antigravity', name: 'Antigravity', show: 'show_antigravity', menubar: 'menubar_antigravity', color: 'color_antigravity', def: '#76baff'},
 ];
 // label/hint/sec/btns.name 存 i18n key，渲染时经 t() 解析（语言切换即时生效）
 const SET_SCHEMA = [
@@ -2355,7 +2403,7 @@ function applyColors(rerender) {
   // 故颜色变更时主动重渲额度环 / 用量图；启动时 SVG 本就以默认色新渲，无需重渲。
   if (rerender) {   // SVG 渐变/描边的 var() 非响应式，颜色变更须重渲相关图表
     if (typeof loadQuota === 'function') loadQuota();
-    if (typeof loadUsage === 'function') loadUsage();
+    drawUsage();
     if (typeof loadToday === 'function') loadToday();
   }
 }
@@ -2369,7 +2417,12 @@ function applySettings(key) {
   if (all || key === 'show_active')
     $('#active').style.display = settings.show_active ? '' : 'none';
   if (all || AGENT_SETTINGS.some(a => key === a.show)) {
-    if (!all) { loadQuota(); renderSessions(); loadActive(); loadDone(); }
+    if (filter !== 'all' && !agentOn(filter)) filter = 'all';
+    document.querySelectorAll('.shead .chip').forEach(c => {
+      c.style.display = c.dataset.f === 'all' || agentOn(c.dataset.f) ? '' : 'none';
+      c.classList.toggle('on', c.dataset.f === filter);
+    });
+    if (!all) { loadQuota(); renderSessions(); loadSessions(); loadActive(); loadDone(); loadToday(); drawUsage(); }
   }
   if (all || key === 'glass_dim')
     document.documentElement.style.setProperty('--dim', (settings.glass_dim || 68) / 100);
@@ -2384,7 +2437,7 @@ function applySettings(key) {
     document.body.classList.toggle('minimal', !!settings.minimal_mode);
   if (!all && (key === 'quota_auto_rotate' || key === 'quota_rotate_secs')) loadQuota();
   // 仅壳层关心的设置才喊 Swift（菜单栏 / 小组件外观 / 语言 / 灵动岛）
-  if (bridge && (all || ['menubar_claude', 'menubar_codex', 'menubar_qoder', 'menubar_qoder_cn', 'menubar_alert_color', 'menubar_rotate_secs',
+  if (bridge && (all || AGENT_SETTINGS.some(a => key === a.menubar) || ['menubar_alert_color', 'menubar_rotate_secs',
                          'menubar_value_dim', 'menubar_color_dim', 'language',
                          'font_scale', 'glass_dim', 'minimal_mode', 'island_dwell_secs'].includes(key)))
     bridge.postMessage('sync');

@@ -4,9 +4,11 @@ struct UsageRangeSummary {
     let days: [String]
     let daily: [Double]
     let agents: [(String, Double)]
+    let missingAntigravitySamples: Bool
     let cost: Double?
     let projects: [(ProjectUsage, Double)]
     var total: Double { daily.reduce(0, +) }
+    var tokenText: String { missingAntigravitySamples && agents.isEmpty ? "—" : Fmt.tokens(total) }
 
     init(usage: UsageResponse, span: Int, visible: Set<String>) {
         let selectedDays = Array(usage.days.suffix(span))
@@ -16,11 +18,14 @@ struct UsageRangeSummary {
             case "claude": return (usage.claudeDaily[day] ?? [:]).values.reduce(0) { $0 + $1.reduce(0, +) }
             case "codex": return usage.codexDaily[day] ?? 0
             case "qoder": return usage.qoderDaily?[day] ?? 0
+            case "antigravity": return usage.antigravityDaily?[day] ?? 0
             case "qoder_cn": return usage.qoderCnDaily?[day] ?? 0
             default: return 0
             }
         }
-        let ordered = Brand.allCases.map(\.rawValue).filter { visible.contains($0) }
+        let missing = visible.contains("antigravity") && !usage.hasAntigravitySamples(on: selectedDays)
+        missingAntigravitySamples = missing
+        let ordered = Brand.allCases.map(\.rawValue).filter { visible.contains($0) && !(missing && $0 == "antigravity") }
         daily = days.map { day in ordered.reduce(0) { $0 + tokens($1, day) } }
         agents = ordered.map { agent in (agent, selectedDays.reduce(0) { $0 + tokens(agent, $1) }) }
         var estimate = 0.0
@@ -31,7 +36,7 @@ struct UsageRangeSummary {
                 else { available = false }
             }
         }
-        cost = available ? estimate : nil
+        cost = available && !missing ? estimate : nil
         let source = span == 30 ? usage.projectsAll30d ?? [] : usage.projectsAll7d ?? usage.projects7d ?? []
         projects = source.compactMap { project in
             let amount = ordered.reduce(0) { $0 + (project.agents?[$1] ?? 0) }
@@ -74,25 +79,29 @@ struct UsageDashboardView: View {
                     Task { await onExport(span); exporting = false }
                 } label: {
                     Label(L("v3.export"), systemImage: "square.and.arrow.down")
-                        .font(.system(size: 11))
+                        .font(.system(size: 12))
                 }.buttonStyle(.plain).foregroundStyle(DashboardStyle.accent)
                     .help(L("v3.exportRange", ["n": "\(span)"]))
                     .disabled(exporting || usage == nil)
             }
             if let usage {
                 let summary = UsageRangeSummary(usage: usage, span: span, visible: agents)
+                if summary.missingAntigravitySamples {
+                    Text(L("usage.noAntigravitySample")).font(.system(size: 10)).foregroundStyle(Theme.ink3)
+                }
                 if agents.contains("codex"), let missing = usage.coverage?.codexMissingUsageFiles, missing > 0 {
                     Label(L("usage.incomplete", ["count": "\(missing)"]), systemImage: "exclamationmark.triangle")
                         .font(.system(size: 10)).foregroundStyle(Theme.warn)
                 }
                 HStack(alignment: .top, spacing: 20) {
-                    metric(L("v3.tokens"), value: Fmt.tokens(summary.total))
+                    metric(L("v3.tokens"), value: summary.tokenText)
                     Divider()
                     metric(L("v3.cost"), value: summary.cost.map { String(format: "$%.2f", $0) } ?? L("v3.unavailable"))
                 }.fixedSize(horizontal: false, vertical: true)
                 VStack(alignment: .leading, spacing: 16) {
                     DashboardHeading(text: L("v3.daily"))
                     DailyUsageChart(days: summary.days, values: summary.daily,
+                                    missingDays: agents == ["antigravity"] ? Set(summary.days.filter { !usage.hasAntigravitySamples(on: [$0]) }) : [],
                                     ink: agents.count == 1 ? agents.first.flatMap(Brand.init(rawValue:))?.accent ?? DashboardStyle.accent : DashboardStyle.accent)
                         .frame(height: 150)
                 }
@@ -154,6 +163,7 @@ struct UsageDashboardView: View {
 struct DailyUsageChart: View {
     let days: [String]
     let values: [Double]
+    var missingDays = Set<String>()
     var ink = DashboardStyle.accent
     var body: some View {
         Canvas { context, size in
@@ -179,6 +189,6 @@ struct DailyUsageChart: View {
                 }
             }
         }.accessibilityLabel(L("v3.daily"))
-            .accessibilityValue(zip(days, values).map { "\($0): \(Fmt.tokens($1))" }.joined(separator: ", "))
+            .accessibilityValue(zip(days, values).map { "\($0): \(missingDays.contains($0) ? "—" : Fmt.tokens($1))" }.joined(separator: ", "))
     }
 }

@@ -38,6 +38,7 @@ import time
 import urllib.request
 import urllib.parse
 import uuid
+from contextlib import closing
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -45,7 +46,9 @@ from socketserver import TCPServer
 from pathlib import Path
 
 HOME = Path.home()
-AGENT_IDS = ("claude", "codex", "qoder")
+TRANSCRIPT_TOOL_IDS = ("claude", "codex", "qoder")
+SESSION_TOOL_IDS = (*TRANSCRIPT_TOOL_IDS, "antigravity")
+AGENT_IDS = (*TRANSCRIPT_TOOL_IDS, "qoder_cn", "antigravity")
 CLAUDE_PROJECTS = HOME / ".claude" / "projects"
 CODEX_SESSIONS = HOME / ".codex" / "sessions"
 CLAUDE_PIDFILES = HOME / ".claude" / "sessions"
@@ -205,6 +208,7 @@ DEFAULT_SETTINGS = {
     "menubar_codex": True,     # 菜单栏常显 Codex 图标+百分比（可多选/全不选）
     "menubar_qoder": True,     # 菜单栏常显 Qoder 图标+百分比
     "menubar_qoder_cn": False, # 菜单栏常显 Qoder CN 图标+百分比
+    "menubar_antigravity": False,
     "menubar_alert_color": True,   # 菜单栏图标按额度变色（≥80% 橙 / ≥95% 红，分段独立）
     "menubar_value_dim": "shortest",  # 菜单栏显示哪个窗口的百分比：shortest/weekly/max
     "menubar_color_dim": "shortest",  # 菜单栏颜色由哪个窗口驱动：shortest/weekly/max
@@ -217,6 +221,7 @@ DEFAULT_SETTINGS = {
     "show_claude": True,       # 面板展示 Claude 板块（只用 Codex 的用户可关）
     "show_codex": True,        # 面板展示 Codex 板块（只用 Claude 的用户可关）
     "show_qoder": True,        # 面板展示 Qoder 板块
+    "show_antigravity": False, # Fresh installs are detected in get_settings.
     "show_qoder_cn": False,    # 面板展示 Qoder CN 板块（独立 Agent）
     "quota_auto_rotate": True, # 多 Agent/账号额度卡自动轮播
     "quota_rotate_secs": 6,    # 概览额度轮播间隔
@@ -231,6 +236,7 @@ DEFAULT_SETTINGS = {
     "color_codex": "",         # 自定义 Codex 主色（#rrggbb）；空=内置青
     "color_qoder": "",         # 自定义 Qoder 主色（#rrggbb）；空=内置紫
     "color_qoder_cn": "",      # 自定义 Qoder CN 主色（#rrggbb）；空=内置蓝紫
+    "color_antigravity": "",
     "language": "auto",        # 界面语言：auto（跟随系统）| zh-CN | en | ja
     "keep_awake": True,        # 有活跃会话时阻止系统休眠（避免会话因休眠/断网中断）
     "update_check": True,      # 检查新版本（向自托管 Pages 清单查版本号，不带凭据）
@@ -257,6 +263,8 @@ _settings_cache = None   # (mtime, 解析后的 saved dict)——按 mtime 命�
 def get_settings():
     global _settings_cache
     s = dict(DEFAULT_SETTINGS)
+    s["show_antigravity"] = any((HOME / ".gemini" / name).is_dir()
+                                for name in ("antigravity", "antigravity-cli"))
     with _settings_lock:
         try:
             mt = SETTINGS_FILE.stat().st_mtime
@@ -318,7 +326,7 @@ def _clean_settings(body):
         elif k == "language" and v != "auto" and v not in LOCALES:
             continue
         elif k in ("color_claude", "color_codex", "color_qoder",
-                  "color_qoder_cn"):
+                  "color_qoder_cn", "color_antigravity"):
             # 仅接受 #rrggbb 或空串（清除）——防 CSS 注入
             if v != "" and not re.fullmatch(r"#[0-9a-fA-F]{6}", v):
                 continue
@@ -392,7 +400,7 @@ def api_settings_save(body):
         "show_claude", "show_codex", "show_qoder", "show_qoder_cn",
         "claude_dirs", "codex_dirs", "qoder_dirs", "qoder_cn_dirs",
         "quota_interval", "menubar_claude", "menubar_codex", "menubar_qoder",
-        "menubar_qoder_cn",
+        "menubar_qoder_cn", "menubar_antigravity", "show_antigravity",
         "menubar_alert_color", "menubar_value_dim", "menubar_color_dim",
         "menubar_rotate_secs",
     }
@@ -2298,7 +2306,7 @@ _last_force_claude_quota = 0.0
 
 def _quota_surface_enabled(settings, provider):
     """Collect quota while either the panel or menu-bar surface needs it."""
-    default_show = provider != "qoder_cn"
+    default_show = DEFAULT_SETTINGS.get(f"show_{provider}", False)
     return (settings.get(f"show_{provider}", default_show)
             or settings.get(f"menubar_{provider}", False))
 
@@ -3024,6 +3032,34 @@ def _normal_quota_accounts(settings, ttl, fresh_codex=False,
         pool.shutdown(wait=False, cancel_futures=True)
 
 
+def _antigravity_snapshot():
+    try:
+        from antigravity_usage import read_usage
+        return read_usage()
+    except (ImportError, OSError, ValueError, sqlite3.Error):
+        return {}
+
+
+def _antigravity_quota():
+    windows, amounts = [], []
+    latest = None
+    for key, bucket in _antigravity_snapshot().get("quota", {}).items():
+        observed = bucket["observed_at"]
+        reset = bucket.get("reset_time")
+        if reset is None and "reset_in_seconds" in bucket:
+            reset = observed + bucket["reset_in_seconds"]
+        window = {"id": key, "label": key, "resets_at": reset}
+        if "remaining_fraction" in bucket:
+            windows.append({**window, "used_percent": round(100 * (1 - bucket["remaining_fraction"]), 1)})
+        if "remaining_amount" in bucket:
+            amounts.append({**window, "remaining": bucket["remaining_amount"]})
+        latest = observed if latest is None else max(latest, observed)
+    if not windows and not amounts:
+        return {"ok": False, "no_quota": True, "error": "No Antigravity CLI quota observation"}
+    return {"ok": True, "source": "antigravity_cli", "windows": windows,
+            "remaining_amounts": amounts, "sampled_at": _iso_at(latest)}
+
+
 def api_quota(force=False, cache_only=False, fresh_codex=False):
     s = get_settings()
     # 面板和状态栏是独立表面：两处都关闭才停止采集，避免“面板关闭、状态栏开启”
@@ -3106,12 +3142,16 @@ def api_quota(force=False, cache_only=False, fresh_codex=False):
     def status_account(primary):
         return {"account_id": "default", "account": "默认", "is_default": True,
                 **primary}
+    ag = (_antigravity_quota() if _quota_surface_enabled(s, "antigravity")
+          else {"ok": False, "hidden": True})
+    ag_accounts = [status_account(ag)]
     with _quota_change:
         revision = _quota_revision
     return {"claude": primary_claude,
             "codex": primary_codex,
             "qoder": primary_qoder,
             "qoder_cn": primary_qoder_cn,
+            "antigravity": ag,
             "agents": [
                 {"id": "claude", "name": "Claude",
                  "hidden": not s.get("show_claude", True),
@@ -3125,13 +3165,17 @@ def api_quota(force=False, cache_only=False, fresh_codex=False):
                 {"id": "qoder_cn", "name": "Qoder CN",
                  "hidden": not s.get("show_qoder_cn", False),
                  "accounts": qoder_cn_accts or [status_account(primary_qoder_cn)]},
+                {"id": "antigravity", "name": "Antigravity",
+                 "hidden": not s.get("show_antigravity", False), "accounts": ag_accounts},
             ],
             "accounts": {"claude": claude_accts, "codex": codex_accts,
-                         "qoder": qoder_accts, "qoder_cn": qoder_cn_accts},
+                         "qoder": qoder_accts, "qoder_cn": qoder_cn_accts,
+                         "antigravity": ag_accounts},
             "menubar": {"claude": s["menubar_claude"],
                         "codex": s["menubar_codex"],
                         "qoder": s["menubar_qoder"],
                         "qoder_cn": s["menubar_qoder_cn"],
+                        "antigravity": s.get("menubar_antigravity", False),
                         "alert_color": s.get("menubar_alert_color", True),
                         "value_dim": s.get("menubar_value_dim", "shortest"),
                         "color_dim": s.get("menubar_color_dim", "shortest"),
@@ -3734,6 +3778,96 @@ def _session_file_info(tool, path):
     }
 
 
+def _antigravity_cwd(raw):
+    """Return '' for no workspace, or None when no supplied workspace is local."""
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return ""
+    if not isinstance(raw, str):
+        return None
+    try:
+        uris = json.loads(raw)
+    except ValueError:
+        uris = raw
+    if uris is None or uris == [] or uris == "":
+        return ""
+    for uri in uris if isinstance(uris, list) else [uris]:
+        if not isinstance(uri, str):
+            continue
+        try:
+            u = urllib.parse.urlsplit(uri)
+            path = urllib.parse.unquote(u.path, errors="strict")
+        except ValueError:
+            continue
+        if (u.scheme == "file" and u.netloc.lower() in ("", "localhost")
+                and not u.query and not u.fragment and path.startswith("/")
+                and not path.startswith("//") and not re.search(r"[\x00-\x1f]", path)):
+            return path
+    return None
+
+
+def _antigravity_time(value):
+    if not isinstance(value, str):
+        return 0.0
+    try:
+        stamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=timezone.utc)
+        return max(0.0, stamp.timestamp())
+    except (ValueError, OverflowError, OSError):
+        return 0.0
+
+
+def _antigravity_entry(account, sid, title, cwd, stamp):
+    if not isinstance(sid, str) or not re.fullmatch(
+            r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", sid):
+        return None
+    return dict(tool="antigravity", account_id=account,
+                account="Antigravity CLI" if account == "cli" else "Antigravity",
+                path=f"antigravity-{account}://{sid}", inode=0, size=0, mtime=stamp,
+                preparsed=dict(session_id=sid, title=_clean_title(title) or f"Conversation {sid[:8]}",
+                               cwd=cwd, project=Path(cwd).name if cwd else "", branch=""))
+
+
+def _antigravity_app_entries():
+    db = HOME / ".gemini/antigravity/conversation_summaries.db"
+    with closing(sqlite3.connect(db.as_uri() + "?mode=ro", uri=True, timeout=.2)) as conn:
+        rows = conn.execute("""
+            SELECT conversation_id, title, workspace_uris, last_modified_time, last_user_input_time
+            FROM conversation_summaries s
+            WHERE parent_conversation_id='' AND nesting_depth=0 AND NOT EXISTS
+                (SELECT 1 FROM conversation_parents p WHERE p.conversation_id=s.conversation_id
+                 AND p.parent_id<>'')
+        """)
+        for sid, title, uris, modified, last_input in rows:
+            cwd = _antigravity_cwd(uris)
+            if cwd is None:
+                continue
+            yield _antigravity_entry("app", sid, title if isinstance(title, str) else "",
+                                     cwd, _antigravity_time(modified) or _antigravity_time(last_input))
+
+
+def _antigravity_cli_entries():
+    cache = HOME / ".gemini/antigravity-cli/cache/last_conversations.json"
+    with cache.open(encoding="utf-8") as f:
+        data = f.read(4 * 1024 * 1024 + 1)
+    if len(data) > 4 * 1024 * 1024:
+        raise ValueError("CLI cache too large")
+    mapping = json.loads(data)
+    if not isinstance(mapping, dict):
+        raise ValueError("invalid CLI cache")
+    for cwd, sid in mapping.items():
+        if not cwd.startswith("/") or re.search(r"[\x00-\x1f]", cwd):
+            raise ValueError("invalid CLI workspace")
+        entry = _antigravity_entry("cli", sid, "Antigravity CLI: " + (Path(cwd).name or cwd),
+                                   cwd, 0.0)
+        if entry is None:
+            raise ValueError("invalid CLI conversation ID")
+        yield entry
+
+
+_antigravity_complete = set()
+
+
 def _session_source_files():
     entries = []
     specs = (
@@ -3757,6 +3891,14 @@ def _session_source_files():
                     "size": st.st_size, "mtime": st.st_mtime,
                 })
     entries.extend(_qoder_app_session_entries())
+    _antigravity_complete.clear()
+    for account, scan in (("app", _antigravity_app_entries), ("cli", _antigravity_cli_entries)):
+        try:
+            snapshot = list(scan())
+        except (sqlite3.Error, OSError, ValueError):
+            continue
+        entries.extend(entry for entry in snapshot if entry)
+        _antigravity_complete.add(account)
     return entries
 
 
@@ -3849,7 +3991,7 @@ def _sync_pins_to_db(conn, migrate_legacy=False, keys=None):
             snap = dict(value)
             tool = str(snap.get("tool") or "")
             sid = str(snap.get("id") or old_key)
-            if tool not in AGENT_IDS or not _ID_RE.match(sid):
+            if tool not in SESSION_TOOL_IDS or not _ID_RE.match(sid):
                 continue
             parts = old_key.split("|", 2)
             account_id = str(snap.get("account_id") or "")
@@ -4068,7 +4210,9 @@ def _session_index_scan():
                         _session_state(processed_files=fast_processed + start + len(parsed))
 
             removed = [existing[path] for path in existing.keys() - seen
-                       if not path.startswith("qoder-app://") or _qoder_app_scan_authoritative]
+                       if (not path.startswith("qoder-app://") or _qoder_app_scan_authoritative)
+                       and (existing[path]["tool"] != "antigravity"
+                            or existing[path]["account_id"] in _antigravity_complete)]
             for start in range(0, len(removed), _SESSION_INDEX_BATCH):
                 changed |= _publish_session_batch(conn, removed=removed[start:start + _SESSION_INDEX_BATCH])
             now = time.time()
@@ -4171,7 +4315,7 @@ def _decode_session_cursor(raw, scope):
                 or normalized["rev"] < 0 or normalized["p"] not in (0, 1)
                 or not 0 <= normalized["r"] <= 3):
             return None
-        if normalized["t"] not in AGENT_IDS:
+        if normalized["t"] not in SESSION_TOOL_IDS:
             return None
         if (not re.fullmatch(r"[a-z0-9-]{1,120}", normalized["a"])
                 or not _ID_RE.match(normalized["s"])):
@@ -4198,7 +4342,7 @@ def _session_cursor_where(cursor):
 
 def _query_session_index(query="", tool="all", limit=None, cursor="", project_cwds=None):
     q = (query or "").strip().casefold()[:80]
-    requested_tools = tuple(agent for agent in AGENT_IDS
+    requested_tools = tuple(agent for agent in SESSION_TOOL_IDS
                             if agent in str(tool).split(","))
     tool = ",".join(requested_tools) if requested_tools else "all"
     if limit is None:
@@ -4208,7 +4352,7 @@ def _query_session_index(query="", tool="all", limit=None, cursor="", project_cw
             limit = _SESSION_PAGE_MAX
         else:
             per_tool = get_settings()["sessions_limit"]
-            limit = per_tool if tool != "all" else per_tool * len(AGENT_IDS)
+            limit = per_tool if tool != "all" else per_tool * len(SESSION_TOOL_IDS)
     try:
         limit = min(_SESSION_PAGE_MAX, max(1, int(limit)))
     except (TypeError, ValueError):
@@ -4269,7 +4413,8 @@ def _query_session_index(query="", tool="all", limit=None, cursor="", project_cw
         "cwd": row["cwd"], "project": row["project"], "branch": row["branch"],
         "mtime": row["mtime"], "size": row["size"], "account": row["account"],
         "account_id": row["account_id"], "pinned": bool(row["pinned"]),
-        "source": "qoder_app" if str(row["path"]).startswith(
+        "source": "antigravity_" + row["account_id"] if row["tool"] == "antigravity"
+        else "qoder_app" if str(row["path"]).startswith(
             ("qoder-app://", "qoder-app-pin://")) else None,
     } for row in page]
     status = _session_status()
@@ -4293,7 +4438,7 @@ def api_pin(body):
     tool = str(sess.get("tool") or "")
     sid = str(sess.get("id") or "")
     account_id = str(sess.get("account_id") or "default")[:120]
-    if (tool not in AGENT_IDS or not _ID_RE.match(sid)
+    if (tool not in SESSION_TOOL_IDS or not _ID_RE.match(sid)
             or not re.fullmatch(r"[a-z0-9-]{1,120}", account_id)):
         return {"ok": False, "error": "invalid id"}
     key = _pin_key(tool, account_id, sid)
@@ -4342,7 +4487,7 @@ def api_projects(query):
     if query.get("interactive") == ["1"]:
         _wake_stale_session_index()
     requested = str(query.get('tool', ['all'])[0])
-    tools = list(AGENT_IDS) if requested == 'all' else [t for t in requested.split(',') if t in AGENT_IDS]
+    tools = list(SESSION_TOOL_IDS) if requested == 'all' else [t for t in requested.split(',') if t in SESSION_TOOL_IDS]
     with _path_mappings_lock:
         mappings = _load_path_mappings()
     conn = _session_db_connect()
@@ -4761,8 +4906,12 @@ def _attach_active_index_metadata(active):
             candidates = [row for row in rows
                           if (not entry.get('cwd') or row['cwd'] == entry['cwd'])
                           and (str(row['path']).startswith('qoder-app://') == (entry.get('source') == 'qoder_app'))]
+            if entry.get("tool") == "antigravity" and entry.get("account_id"):
+                candidates = [row for row in candidates if row["account_id"] == entry["account_id"]]
             if len(candidates) == 1:
                 row = candidates[0]
+                if entry.get("tool") == "antigravity":
+                    entry["source"] = "antigravity_" + row["account_id"]
                 entry['indexed_row_key'] = f"{row['tool']}:{row['account_id'] or 'default'}:{sid}"
                 entry['title'] = row['title']
                 entry['indexed_session'] = {key: row[key] for key in
@@ -4997,8 +5146,11 @@ def api_active():
         active.extend(_qoder_app_active_entries(
             qoder_rows, now, qoder_app_service_alive))
 
-        active.sort(key=_active_sort_key)
+        with _ag_hook_lock:
+            _ag_expire_locked(time.monotonic())
+            active.extend(dict(row) for row, _, _, _ in _ag_hook_active.values())
         _attach_active_index_metadata(active)
+        active.sort(key=_active_sort_key)
         return {"active": active, "ts": time.time()}
     return cached("active", 3, build)
 
@@ -5120,7 +5272,7 @@ def _performance_candidates():
     try:
         rows = conn.execute(
             "SELECT tool,account_id,session_id,path FROM session_index "
-            "WHERE source_present=1 AND mtime>? ORDER BY mtime DESC LIMIT 32",
+            "WHERE source_present=1 AND tool<>'antigravity' AND mtime>? ORDER BY mtime DESC LIMIT 32",
             (time.time() - 300,)).fetchall()
         return [(_performance_key(r['tool'], r['account_id'], '', r['session_id']),
                  r['tool'], r['path']) for r in rows if not r['path'].startswith('qoder-app')]
@@ -5151,7 +5303,7 @@ def api_session_performance(query):
                 continue
             tool, sid = req.get('tool'), req.get('id')
             account, source = req.get('account', 'default'), req.get('source', 'transcript')
-            if (tool not in AGENT_IDS or not isinstance(sid, str) or not _ID_RE.fullmatch(sid)
+            if (tool not in TRANSCRIPT_TOOL_IDS or not isinstance(sid, str) or not _ID_RE.fullmatch(sid)
                     or not isinstance(account, str) or len(account) > 120
                     or source not in ('transcript', 'qoder_app')):
                 continue
@@ -5183,7 +5335,7 @@ def api_preview(query):
     tool = query.get("tool", [""])[0]
     sid = query.get("id", [""])[0]
     account_id = query.get("account_id", [""])[0][:120]
-    if tool not in AGENT_IDS or not _ID_RE.match(sid):
+    if tool not in TRANSCRIPT_TOOL_IDS or not _ID_RE.match(sid):
         return {"ok": False, "error": "invalid args"}
     indexed = _session_index_path(tool, sid, account_id)
     files = [indexed] if indexed and indexed.is_file() else []
@@ -6413,9 +6565,75 @@ def _is_temp_cwd(cwd):
     return any(rp == r or rp.startswith(r + os.sep) for r in _TEMP_ROOTS)
 
 
-def api_event(body):
+_ag_hook_active = {}
+_ag_hook_lock = threading.Lock()
+_AG_HOOK_TTL = 600
+
+
+def _ag_expire_locked(now):
+    for key, (_, _, _, deadline) in list(_ag_hook_active.items()):
+        if now >= deadline:
+            del _ag_hook_active[key]
+
+
+def _ag_listen(shutdown):
+    import runpy
+    root = Path(__file__).resolve().parent
+    script = root / "antigravity-hook.py"
+    if not script.is_file():
+        script = root / "scripts/antigravity-hook.py"
+    runpy.run_path(str(script))["listen"](lambda msg: api_event(msg, _private_hook=True), shutdown)
+
+
+def _ag_hook_event(body):
+    sid, cwd = body.get("conversationId"), body.get("cwd", "")
+    phase = body.get("event")
+    if (not isinstance(sid, str) or not re.fullmatch(
+            r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", sid)
+            or not isinstance(cwd, str) or len(cwd) > 4096 or "\0" in cwd
+            or (cwd and not os.path.isabs(cwd)) or phase not in ("PreInvocation", "Stop")):
+        return None, {"ok": False, "error": "invalid lifecycle input"}
+    sid = sid.lower()
+    account = body.get("account", "")
+    if account not in ("", "app", "cli", "ide"):
+        return None, {"ok": False, "error": "invalid lifecycle account"}
+    key = (account, sid)
+    if phase == "Stop" and (type(body.get("fullyIdle")) is not bool
+                            or not isinstance(body.get("terminationReason"), str)):
+        return None, {"ok": False, "error": "invalid Stop"}
+    state = None
+    with _ag_hook_lock:
+        now = time.monotonic()
+        _ag_expire_locked(now)
+        if phase == "PreInvocation":
+            previous = _ag_hook_active.pop(key, None)
+            if len(_ag_hook_active) >= 256:
+                del _ag_hook_active[next(iter(_ag_hook_active))]
+            start, turn = previous[1:3] if previous else (now, uuid.uuid4().hex)
+            row = dict(tool="antigravity", source="antigravity_" + (account or "hook"),
+                       account_id=account, id=sid, cwd=cwd, project=Path(cwd).name,
+                       last_active_at=time.time(), status="busy")
+            _ag_hook_active[key] = (row, start, turn, now + _AG_HOOK_TTL)
+        elif body["fullyIdle"]:
+            state = _ag_hook_active.pop(key, None)
+    if (phase != "Stop" or not body["fullyIdle"] or body["terminationReason"] != "model_stop"
+            or body.get("hasError") is not False):
+        return None, {"ok": True, "skipped": "activity_only"}
+    if not state:
+        return None, {"ok": True, "skipped": "no_open_execution"}
+    return (sid, cwd or state[0]["cwd"], now - state[1], state[2]), None
+
+
+def api_event(body, *, _private_hook=False):
     """接收 Claude/Qoder Stop hook 或 Codex notify 推来的完成事件。"""
     s = get_settings()
+    ag_done = None
+    if body.get("type") == "antigravity-lifecycle":
+        if not _private_hook:
+            return {"ok": False, "error": "private hook transport required"}
+        ag_done, result = _ag_hook_event(body)
+        if result is not None:
+            return result
     # 额度实时更新与“是否展示完成弹丸”是两条独立链路。即使用户关闭完成提醒，
     # Codex notify 仍按 thread-id 精确刷新对应 rollout，不能退回 30s/10min 轮询。
     if body.get("type") == "agent-turn-complete":
@@ -6428,7 +6646,13 @@ def api_event(body):
 
     sid = ""
     cwd = ""
-    if body.get("hook_event_name") == "Stop":
+    if ag_done:
+        tool = "antigravity"
+        sid, cwd, duration, turn = ag_done
+        if duration < s["notify_done_min_secs"]:
+            return {"ok": True, "skipped": "short"}
+        project = Path(cwd).name
+    elif body.get("hook_event_name") == "Stop":
         if body.get("stop_hook_active"):       # hook 续跑回环，忽略
             return {"ok": True, "skipped": "loop"}
         tool = "qoder" if body.get("agentdeck_tool") == "qoder" else "claude"
@@ -7445,7 +7669,7 @@ def api_usage():
         hourly = {}   # epoch_hour -> {"c": Claude, "x": Codex, "q": Qoder}
         projects = {}  # cwd -> {"tokens", "cost", "agents"}（近 7 天）
         projects30 = {}
-        costs_by_agent_daily = {a: {d: 0.0 for d in days} for a in AGENT_IDS}
+        costs_by_agent_daily = {a: {d: 0.0 for d in days} for a in TRANSCRIPT_TOOL_IDS}
         with _path_mappings_lock:
             path_mappings = _load_path_mappings()
 
@@ -7607,6 +7831,18 @@ def api_usage():
             except OSError:
                 pass
 
+        ag_daily = {}
+        for observation in _antigravity_snapshot().get("hourly", []):
+            ep = observation["hour"]
+            day = datetime.fromtimestamp(ep).strftime("%Y-%m-%d")
+            if day not in cost_daily or ep > now:
+                continue
+            total = observation["input_tokens"] + observation["output_tokens"]
+            ag_daily[day] = ag_daily.get(day, 0) + total
+            if ep >= hour_cut:
+                bucket = hourly.setdefault(ep, {"c": 0, "x": 0, "q": 0})
+                bucket["ag"] = bucket.get("ag", 0) + total
+
         top = sorted(projects.items(), key=lambda kv: (-kv[1]["tokens"], kv[0]))
         projects_all_7d = [{"cwd": cwd, "name": Path(cwd).name or cwd,
                         "tokens": v["tokens"], "cost": round(v["cost"], 2),
@@ -7620,6 +7856,7 @@ def api_usage():
             "codex_daily": codex_daily,
             "qoder_daily": qoder_daily,
             "qoder_cn_daily": qoder_cn_daily,
+            "antigravity_daily": ag_daily,
             "hourly": [{"ts": ep, **v} for ep, v in sorted(hourly.items())],
             "projects_7d": projects_all_7d[:6],
             "projects_all_7d": projects_all_7d,
@@ -7634,6 +7871,7 @@ def api_usage():
             "codex_cost_7d": round(xcost_7d, 2),
             "codex_cost_30d": round(xcost_30d, 2),
             "coverage": {
+                "antigravity_available": bool(ag_daily),
                 "codex_files": codex_coverage_files,
                 "codex_missing_usage_files": codex_missing_usage_files,
             },
@@ -7729,7 +7967,7 @@ def _forget_session_cwd(original_cwd):
 
 def _resume_command(tool, sid, env_prefix, cwd=None):
     binary = {"claude": "claude --resume", "codex": "codex resume",
-              "qoder": "qodercli --resume"}[tool]
+              "qoder": "qodercli --resume", "antigravity": "agy --conversation"}[tool]
     command = f"{env_prefix}{binary} {_shell_quote(sid)}"
     return f"cd {_shell_quote(cwd)} && {command}" if cwd else command
 
@@ -7774,7 +8012,7 @@ def api_data(body):
         u = api_usage()
         if 'days' in body:
             span = body.get('days')
-            usage_agents = (*AGENT_IDS, "qoder_cn")
+            usage_agents = AGENT_IDS
             agents = body.get('agents', list(usage_agents))
             if type(span) is not int or span not in (7, 30) or not isinstance(agents, list) or any(a not in usage_agents for a in agents):
                 return {'ok': False, 'error': 'invalid range'}
@@ -7784,7 +8022,7 @@ def api_data(body):
             for d in u['days'][-span:]:
                 for a in selected:
                     tokens = (sum(sum(v) for v in u['claude_daily'].get(d, {}).values()) if a == 'claude'
-                              else u.get(a + '_daily', {}).get(d, 0))
+                              else u.get(a + '_daily', {}).get(d, '' if a == 'antigravity' else 0))
                     cost = u.get('costs_by_agent_daily', {}).get(a, {}).get(d)
                     rows.append(f"{d},{a},{tokens},{'' if cost is None else round(cost, 4)}")
             _atomic_write_text(out, '\n'.join(rows) + '\n')
@@ -7792,12 +8030,13 @@ def api_data(body):
             return {'ok': True, 'path': str(out), 'days': span}
         out = Path.home() / "Downloads" / \
             f"agentdeck-usage-{datetime.now().strftime('%Y%m%d')}.csv"
-        rows = ["day,claude_tokens,codex_tokens,qoder_tokens,api_cost_usd,qoder_cn_tokens"]
+        rows = ["day,claude_tokens,codex_tokens,qoder_tokens,api_cost_usd,qoder_cn_tokens,antigravity_tokens"]
         for d in u["days"]:
             ct = sum(sum(v) for v in (u["claude_daily"].get(d) or {}).values())
             rows.append(f"{d},{ct},{u['codex_daily'].get(d, 0)},"
                         f"{u['qoder_daily'].get(d, 0)},"
-                        f"{u['cost_daily'].get(d, 0)},{u.get('qoder_cn_daily', {}).get(d, 0)}")
+                        f"{u['cost_daily'].get(d, 0)},{u.get('qoder_cn_daily', {}).get(d, 0)},"
+                        f"{u.get('antigravity_daily', {}).get(d, '')}")
         _atomic_write_text(out, "\n".join(rows) + "\n")
         subprocess.run(["open", "-R", str(out)], timeout=10)   # Finder 中显示
         return {"ok": True, "path": str(out)}
@@ -7841,8 +8080,23 @@ def api_path_mapping(body):
 def api_resume(body):
     tool = body.get("tool")
     sid = body.get("id", "")
-    if tool not in AGENT_IDS or not _ID_RE.match(sid):
+    if tool not in SESSION_TOOL_IDS or not isinstance(sid, str) or not _ID_RE.fullmatch(sid):
         return {"ok": False, "error": "invalid args"}
+
+    if tool == "antigravity":
+        if body.get("source") != "antigravity_cli" or body.get("account_id", "cli") != "cli":
+            return {"ok": False, "error": "Import desktop conversations manually in agy /resume"}
+        # Verify CLI ownership against the current cache, not a client label or stale pin.
+        try:
+            known = False
+            for entry in _antigravity_cli_entries():  # Validate the entire snapshot before resuming.
+                if entry["preparsed"]["session_id"] == sid:
+                    known = True
+        except (OSError, ValueError):
+            return {"ok": False, "retryable": True,
+                    "error": "Cannot read Antigravity CLI cache; retry when it is available"}
+        if not known:
+            return {"ok": False, "error": "Conversation not found in Antigravity CLI cache"}
 
     if tool == "qoder" and body.get("source") == "qoder_app":
         if body.get("copy_only") is True:
@@ -7875,7 +8129,7 @@ def api_resume(body):
     # 请求悄悄导向另一账号。旧客户端不传 account_id 时保留原行为。
     account_id = str(body.get("account_id") or "")
     env_prefix = ""
-    if account_id:
+    if account_id and tool != "antigravity":
         if not re.fullmatch(r"[a-z0-9-]{1,120}", account_id):
             return {"ok": False, "error": "invalid account"}
         sources = {"claude": claude_sources, "codex": codex_sources,
@@ -8240,6 +8494,9 @@ def main():
     server.daemon_threads = True
     shutdown_requested = _daemon_shutdown_controller(server)
     _daemon_shutdown_requested = shutdown_requested
+    threading.Thread(target=_run_startup_task,
+                     args=("Antigravity lifecycle", lambda: _ag_listen(shutdown_requested)),
+                     daemon=True, name="agentdeck-ag-hooks").start()
 
     # 会话库初始化与 hook 适配可能随历史数据量变慢，不应阻塞 health 监听；
     # API 自身也会按需确保索引已启动，两个任务均为幂等。

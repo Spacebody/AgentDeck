@@ -5,7 +5,7 @@
 <h1 align="center">AgentDeck</h1>
 
 <p align="center">
-  A macOS menu-bar app that unifies quota and session monitoring for <b>Claude Code</b>, <b>Codex</b>, and <b>Qoder</b>.
+  A macOS menu-bar app that unifies quota and session monitoring for <b>Claude Code</b>, <b>Codex</b>, <b>Qoder</b>, <b>Qoder CN</b>, and <b>Antigravity</b>.
 </p>
 
 <p align="center">
@@ -29,7 +29,7 @@
 </p>
 <p align="center"><sub>Usage: compare 7 or 30 days by agent and project</sub></p>
 
-AgentDeck integrates quota monitoring, session management, and usage analytics for Claude Code, Codex, and Qoder into a single menu-bar panel. The backend is a pure standard-library Python daemon, and the macOS client is a native AppKit + SwiftUI app in a SwiftPM package.
+AgentDeck integrates quota monitoring, session management, and usage analytics for multiple agents into a single menu-bar panel. The backend is a pure standard-library Python daemon, and the macOS client is a native AppKit + SwiftUI app in a SwiftPM package.
 
 ## Design principles
 
@@ -42,6 +42,7 @@ AgentDeck integrates quota monitoring, session management, and usage analytics f
 
 **Quota monitoring**
 - Live aggregation of Claude's official quota, Codex rate limits, and Qoder UsageInfo
+- Antigravity uses the same panel visibility, menu-bar and color settings as other agents. Its desktop app and CLI share one identity. Quota and token deltas come from [opt-in CLI sampling](docs/antigravity.md), not account-wide history.
 - Discovers independent Claude, Codex, Qoder, and Qoder CN config roots and flattens every agent/account pair into one peer carousel: no nested account dropdown, optional 4/6/8/10-second auto-rotation, pause, mouse, trackpad, and keyboard controls
 - A fixed-width menu-bar slot rolls each agent/account icon together with its quota every 6 seconds by default; for agents/accounts enabled in both surfaces, automatic rotation, manual selection, and pause state stay synchronized with the overview card; rotation can still be disabled, while number and alert-color windows remain independently configurable
 - Adjustable Claude/Qoder quota interval (10 minutes by default, up to 6 hours); Codex updates on completed turns and periodically reconciles through the CLI's app-server
@@ -151,6 +152,8 @@ All data is **processed locally** — no telemetry, no reporting:
 | Codex usage / sessions | parses local `~/.codex/sessions` rollout files | token stats; search and pagination read the metadata index rather than rescanning raw sessions |
 | Qoder quota | the signed-in App's private per-user Unix socket, with `qodercli` UsageInfo as fallback | IPC is restricted to read-only `credit/usage`, while CLI probes only request `get_usage_info`; identity and upgrade fields are discarded |
 | Qoder CN quota | independently reads `QODERCN_CONFIG_DIR` / `~/.qoder-cn` and invokes `qoderclicn` UsageInfo | uses a separate agent ID, settings, cache, and card; never reads international App IPC or forwards initialization messages or stderr |
+| Local Antigravity sessions | Read-only desktop conversation summaries and the CLI's last-conversation cache per workspace | Supports session search and project grouping. The CLI cache is not a full history. Desktop sessions do not generate CLI resume commands. Excludes standalone Gemini CLI and remote sessions. |
+| Antigravity activity and completion notifications | [Opt-in lifecycle hook](docs/antigravity-lifecycle.md) | Uses explicit execution events; going idle or losing a process never implies task completion. |
 | Qoder usage / sessions | `projects/**/*.jsonl` under discovered Qoder config directories, augmented by Qoder App's read-only session list | message bodies and identity fields are discarded at the adapter boundary; the index stores only ID, title, path, branch, and timestamps |
 | Done events | AgentDeck-installed Claude/Qoder Stop hooks and Codex notify wrapper | done alerts and the event stream |
 

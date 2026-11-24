@@ -42,7 +42,8 @@ class MacOSBuildTests(unittest.TestCase):
             app = Path(temp)
             resources = app / "Contents/Resources"
             resources.mkdir(parents=True)
-            for name in ("agentdeckd.py", "session_performance.py", "VERSION", "AgentDeck_AgentDeckKit.bundle"):
+            for name in ("agentdeckd.py", "session_performance.py", "antigravity_usage.py",
+                         "antigravity-hook.py", "VERSION", "AgentDeck_AgentDeckKit.bundle"):
                 (resources / name).touch()
             with (app / "Contents/Info.plist").open("wb") as stream:
                 plistlib.dump({"CFBundleExecutable": "AgentDeck",

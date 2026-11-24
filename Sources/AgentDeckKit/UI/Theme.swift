@@ -73,9 +73,24 @@ public func agentAccentInk(_ tool: String) -> NSColor {
         .usingColorSpace(.sRGB) ?? NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 1)
 }
 
+struct SessionIcon: View {
+    let tool: String
+    var fallback: Brand = .codex
+    var badgeSize: CGFloat? = nil
+
+    var body: some View {
+        if let badgeSize {
+            BrandBadge(brand: Brand(rawValue: tool) ?? fallback, size: badgeSize)
+        } else {
+            BrandGlyph(brand: Brand(rawValue: tool) ?? fallback)
+        }
+    }
+}
+
 enum Brand: String, CaseIterable {
     case claude, codex, qoder
     case qoderCn = "qoder_cn"
+    case antigravity
     var name: String { self == .qoderCn ? "Qoder CN" : rawValue.capitalized }
 
     // 默认主色（--claude #ff9d7a / --codex #8be9e2）
@@ -87,6 +102,7 @@ enum Brand: String, CaseIterable {
         case .codex: return Color(hex: 0x8be9e2)
         case .qoder: return Color(hex: 0xa78bfa)
         case .qoderCn: return Color(hex: 0x818cf8)
+        case .antigravity: return Color(hex: 0x76baff)
         }
     }
     // 渐变深端（--claude-deep #e8744f / --codex-deep #4fd1c5）
@@ -99,6 +115,7 @@ enum Brand: String, CaseIterable {
         case .codex: return Color(hex: 0x4fd1c5)
         case .qoder: return Color(hex: 0x7c3aed)
         case .qoderCn: return Color(hex: 0x4f46e5)
+        case .antigravity: return Color(hex: 0x3683d4)
         }
     }
     // 卡片右上角辉光（qcard::before：claude .22 / codex .18 透明度）
@@ -109,6 +126,7 @@ enum Brand: String, CaseIterable {
         case .codex: return Color(hex: 0x4fd1c5).opacity(0.18)
         case .qoder: return Color(hex: 0x7c3aed).opacity(0.20)
         case .qoderCn: return Color(hex: 0x4f46e5).opacity(0.20)
+        case .antigravity: return deep.opacity(0.20)
         }
     }
     // 进度环/进度条渐变（90deg/对角：deep → accent）

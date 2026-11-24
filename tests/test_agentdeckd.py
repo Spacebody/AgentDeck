@@ -988,8 +988,8 @@ class UsageProjectTests(unittest.TestCase):
                 with daemon._cache_lock:
                     daemon._ttl_cache.pop("usage", None)
 
-            self.assertEqual(usage["coverage"], {
-                "codex_files": 1, "codex_missing_usage_files": 0})
+            self.assertEqual(usage["coverage"]["codex_files"], 1)
+            self.assertEqual(usage["coverage"]["codex_missing_usage_files"], 0)
             self.assertEqual(usage["projects_7d"][0]["cwd"],
                              os.path.realpath(replacement))
             self.assertEqual(sum(usage["codex_daily"].values()), 110)
@@ -2422,7 +2422,7 @@ for (const [locale, five, weekly] of [
             gate.set()
         self.assertLess(time.monotonic() - started, 0.5)
         self.assertEqual([agent["id"] for agent in result["agents"]],
-                         ["claude", "codex", "qoder", "qoder_cn"])
+                         ["claude", "codex", "qoder", "qoder_cn", "antigravity"])
 
     def test_quota_timeout_preserves_known_multi_account_shape(self):
         settings = {**daemon.DEFAULT_SETTINGS,

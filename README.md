@@ -5,7 +5,7 @@
 <h1 align="center">AgentDeck</h1>
 
 <p align="center">
-  macOS 菜单栏应用：统一监控 <b>Claude Code</b>、<b>Codex</b> 与 <b>Qoder</b> 的额度和会话。
+  macOS 菜单栏应用：统一监控 <b>Claude Code</b>、<b>Codex</b>、<b>Qoder</b>、<b>Qoder CN</b> 和 <b>Antigravity</b> 的额度和会话。
 </p>
 
 <p align="center">
@@ -29,7 +29,7 @@
 </p>
 <p align="center"><sub>用量：按 Agent 和项目比较近 7 天或 30 天的消耗</sub></p>
 
-AgentDeck 将 Claude Code、Codex 与 Qoder 的额度监控、会话管理和用量统计集成在一个菜单栏面板中。后端为纯标准库 Python daemon，macOS 客户端为 SwiftPM 工程中的原生 AppKit + SwiftUI 应用，仍保持零第三方运行时依赖、无 Electron / 打包器、无运行时下载。
+AgentDeck 将多个 Agent 的额度监控、会话管理和用量统计集成在一个菜单栏面板中。后端为纯标准库 Python daemon，macOS 客户端为 SwiftPM 工程中的原生 AppKit + SwiftUI 应用，仍保持零第三方运行时依赖、无 Electron / 打包器、无运行时下载。
 
 ## 设计原则
 
@@ -42,6 +42,7 @@ AgentDeck 将 Claude Code、Codex 与 Qoder 的额度监控、会话管理和用
 
 **额度监控**
 - 实时聚合 Claude 官方额度（5 小时 / 7 天窗口）、Codex rate limits 与 Qoder UsageInfo
+- Antigravity 与其他 Agent 共用面板、状态栏和主题色设置；桌面端和 CLI 共用同一身份。额度与 token 增量来自[可选的 CLI 采样](docs/antigravity.md)，不代表整个账户的历史用量。
 - 多账号并行：自动发现 Claude / Codex / Qoder / Qoder CN 的独立配置目录；概览将“不同 Agent × 多个账号”拍平成同级轮播项，默认 6 秒自动轮播，可暂停并支持鼠标、触控板与键盘切换
 - 状态栏用一个固定宽度槽位逐项滚动“Agent/账号图标＋对应额度”，默认 6 秒；对同时参与两处展示的 Agent/账号，与概览卡同步自动轮播、手动切换及暂停状态；可关闭后固定当前项，数字与变色各自可选 5h / 周 / 最吃紧窗口
 - Claude / Qoder 额度查询间隔可调（默认 10 分钟，可至 6 小时）；Codex 由完成事件实时更新，并由 CLI 自带 app-server 周期校准
@@ -151,6 +152,8 @@ scripts/             图标与 DMG 背景生成、Codex notify 包装、CSRF 回
 | Codex 用量 / 会话 | 解析本地 `~/.codex/sessions` rollout 文件 | token 统计；搜索和分页只读元数据索引，不逐次扫描原始会话 |
 | Qoder 额度 | 已登录 Qoder App 的用户私有 Unix Socket；不可用时回退 `qodercli` UsageInfo | IPC 仅允许只读 `credit/usage`，CLI 仅请求 `get_usage_info`；不保存用户 ID、邮箱、头像或升级链接 |
 | Qoder CN 额度 | 独立读取 `QODERCN_CONFIG_DIR` / `~/.qoder-cn`，并调用 `qoderclicn` UsageInfo | 与 Qoder 使用不同 Agent ID、设置开关、缓存和卡片；不读取国际版 App IPC，不透传初始化消息或 stderr |
+| Antigravity 本地会话 | 桌面端只读会话摘要库；CLI 读取每个工作目录最近一次会话的续聊缓存 | 支持会话搜索和项目归属。CLI 缓存不是完整历史，桌面端会话不生成 CLI 恢复命令。不包含独立的 Gemini CLI 或远程会话。 |
+| Antigravity 活动与完成提醒 | [可选的生命周期 hook](docs/antigravity-lifecycle.md) | 使用明确的执行开始与结束事件；不会从空闲或进程消失推断任务完成。 |
 | Qoder 用量 / 会话 | 配置目录下的 `projects/**/*.jsonl`；Qoder App 运行时补充其只读会话列表 | App 响应在适配器入口丢弃消息正文和身份字段；索引只保存 ID、标题、路径、分支和时间 |
 | 完成事件 | AgentDeck 自动安装的 Claude / Qoder Stop hook 与 Codex notify wrapper 回调 | 完成提醒与事件流 |
 

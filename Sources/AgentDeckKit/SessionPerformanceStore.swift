@@ -80,7 +80,7 @@ final class SessionPerformanceStore: ObservableObject {
         task = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self, current == self.generation else { return }
-                let items = Array(Set(requests())).sorted { $0.key < $1.key }
+                let items = Set(requests().filter { $0.tool != "antigravity" }).sorted { $0.key < $1.key }
                 var next: [String: SessionPerformance] = [:]
                 // Keep GET request lines below HTTPServer's limit, even for a
                 // large configured page size and non-ASCII identifiers.
@@ -117,7 +117,7 @@ struct SessionSpeedView: View {
     @Environment(\.sessionPerformanceStore) private var store
 
     var body: some View {
-        if let store {
+        if request.tool != "antigravity", let store {
             SessionSpeedContent(store: store, key: request.key, expanded: expanded)
         }
     }

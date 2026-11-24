@@ -211,6 +211,7 @@ public final class AppStore: ObservableObject {
     /// `/api/quota.hidden`，避免启动瞬间闪出用户已隐藏的 Agent。
     func agentOn(_ tool: String, fallbackHidden: Bool? = nil) -> Bool {
         if let configured = settings["show_\(tool.lowercased())"] { return configured.boolVal }
+        if tool == "antigravity", let hidden = quota?.antigravityPanelHidden { return !hidden }
         if let fallbackHidden { return !fallbackHidden }
         return AgentSettingsCatalog.all.first { $0.id == tool.lowercased() }?.defaultShow ?? false
     }
@@ -494,6 +495,7 @@ public final class AppStore: ObservableObject {
         onSettingsChanged?()   // 即时刷新菜单栏（语言/常显用量/告警阈值等）
         scheduleSettingsSave()
         if AgentSettingsCatalog.visibilityKeys.contains(key) || key == "sessions_limit" {
+            if key == "show_antigravity", !value.boolVal, sessionFilter == "antigravity" { sessionFilter = "all" }
             sessionRequestGeneration += 1
             let generation = sessionRequestGeneration
             searchTask?.cancel()
@@ -653,6 +655,7 @@ public final class AppStore: ObservableObject {
     @discardableResult
     func resume(_ s: SessionItem, copyOnly: Bool = false,
                 replacementCwd: String? = nil) async -> ResumeResult? {
+        guard copyOnly ? s.canCopyCommand : s.canResume else { return nil }
         let request = SessionResumeRequest(
             tool: s.tool, id: s.id, cwd: s.cwd ?? "",
             accountId: s.accountId, copyOnly: copyOnly,
@@ -694,6 +697,7 @@ public final class AppStore: ObservableObject {
     @discardableResult
     func focus(tool: String, id: String, cwd: String, pid: Int,
                source: String? = nil) async -> Bool {
+        guard SessionTools.canFocus(tool) else { return false }
         var body: [String: Any] = ["tool": tool, "session": id, "cwd": cwd, "pid": pid]
         if let source { body["source"] = source }
         let r = try? await api.postJSON("/api/focus", body: body)
@@ -744,7 +748,7 @@ public final class AppStore: ObservableObject {
     }
 
     func setSessionFilter(_ filter: String) {
-        let normalized = ["all", "claude", "codex", "qoder"].contains(filter) ? filter : "all"
+        let normalized = SessionTools.indexed.contains(filter) ? filter : "all"
         guard normalized != sessionFilter else { return }
         sessionFilter = normalized
         sessionRequestGeneration += 1
@@ -813,8 +817,8 @@ public final class AppStore: ObservableObject {
         if sessionFilter != "all" {
             effectiveTool = sessionFilter
         } else {
-            let enabled = ["claude", "codex", "qoder"].filter { agentOn($0) }
-            if !enabled.isEmpty && enabled.count < 3 { effectiveTool = enabled.joined(separator: ",") }
+            let enabled = SessionTools.indexed.filter { agentOn($0) }
+            if !enabled.isEmpty && enabled.count < SessionTools.indexed.count { effectiveTool = enabled.joined(separator: ",") }
         }
         if effectiveTool != "all" { params["tool"] = effectiveTool }
         params["limit"] = String(sessionPageSize)
@@ -833,7 +837,7 @@ public final class AppStore: ObservableObject {
         resetHistory: Bool, generation: Int, interactive: Bool = false
     ) async {
         guard generation == sessionRequestGeneration, !Task.isCancelled else { return }
-        if sessionFilter == "all" && !agentOn("claude") && !agentOn("codex") && !agentOn("qoder") {
+        if sessionFilter == "all" && !SessionTools.indexed.contains(where: { agentOn($0) }) {
             sessions = []; sessionsTotal = 0; sessionsHasMore = false
             sessionsLoading = false; sessionsIndexing = false; sessionsLoadFailed = false
             sessionNextCursor = nil; sessionPageCursors = [nil]; sessionPage = 1

@@ -465,6 +465,7 @@ public struct AgentDeckRootView: View {
                 active: store.activeShown, done: store.doneShown, showActive: store.showActive,
                 showClaudeAgent: showClaude, showCodexAgent: showCodex,
                 showQoderAgent: showQoder, showQoderCNAgent: showQoderCN,
+                showAntigravityAgent: store.agentOn("antigravity"),
                 quotaAutoRotate: (store.settings["quota_auto_rotate"]?.boolVal ?? true)
                     && !store.menubarRotationActive,
                 quotaRotateSecs: store.settings["quota_rotate_secs"]?.intVal ?? 6,
@@ -498,7 +499,8 @@ public struct AgentDeckRootView: View {
     private var dashboardAgents: Set<String> {
         Set([store.agentOn("claude", fallbackHidden: store.quota?.claude?.hidden) ? "claude" : nil,
              store.agentOn("codex", fallbackHidden: store.quota?.codex?.hidden) ? "codex" : nil,
-             store.agentOn("qoder", fallbackHidden: store.quota?.qoder?.hidden) ? "qoder" : nil].compactMap { $0 })
+             store.agentOn("qoder", fallbackHidden: store.quota?.qoder?.hidden) ? "qoder" : nil,
+             store.agentOn("antigravity") ? "antigravity" : nil].compactMap { $0 })
     }
 
     private var usageAgents: Set<String> {
@@ -512,7 +514,7 @@ public struct AgentDeckRootView: View {
                 sessions: store.sessionsShown, active: store.showActive ? store.activeShown : [],
                 onOpenActive: focusActive, scrollable: false,
                 query: store.sessionQuery, filter: store.sessionFilter,
-                total: store.sessionsTotal, hasMore: store.sessionsHasMore,
+                showAntigravity: store.agentOn("antigravity"), total: store.sessionsTotal, hasMore: store.sessionsHasMore,
                 page: store.sessionPage, pageCount: store.sessionPageCount,
                 pageSize: store.sessionPageSize,
                 loading: store.sessionsLoading, indexing: store.sessionsIndexing,
@@ -615,7 +617,7 @@ public struct AgentDeckRootView: View {
         case .range(let span):
             guard let usage = store.usage else { return [] }
             let summary = UsageRangeSummary(usage: usage, span: span, visible: usageAgents)
-            var rows = [(L("v3.range", ["n": "\(span)"]), Fmt.tokens(summary.total)),
+            var rows = [(L("v3.range", ["n": "\(span)"]), summary.tokenText),
                         (L("v3.cost"), summary.cost.map { String(format: "$%.2f", $0) } ?? L("v3.unavailable"))]
             rows += summary.agents.map { (Brand(rawValue: $0.0)?.name ?? $0.0, Fmt.tokens($0.1)) }
             if dashboardAgents.contains("codex"), let missing = usage.coverage?.codexMissingUsageFiles, missing > 0 {
@@ -891,6 +893,7 @@ public struct AgentDeckWidgetRootView: View {
                     showQoderAgent: store.agentOn("qoder", fallbackHidden: store.quota?.qoder?.hidden),
                     showQoderCNAgent: store.agentOn(
                         "qoder_cn", fallbackHidden: store.quota?.qoderCn?.hidden),
+                    showAntigravityAgent: store.agentOn("antigravity"),
                     onTapPanel: onTapPanel,
                     onFocusActive: { a in
                         // 小组件常驻桌面：跳转成功不收起自身

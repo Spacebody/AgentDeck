@@ -24,6 +24,7 @@ final class AgentSettingsCatalogTests: XCTestCase {
             "show_codex": .bool(false),
             "show_qoder": .bool(true),
             "show_qoder_cn": .bool(false),
+            "show_antigravity": .bool(false),
             "menubar_codex": .bool(true),
         ]
 

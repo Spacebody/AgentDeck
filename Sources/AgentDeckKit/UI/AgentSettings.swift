@@ -26,7 +26,8 @@ struct AgentSettingDescriptor: Identifiable, Equatable {
     let defaultMenubar: Bool
 }
 
-enum AgentSettingsCatalog {
+public enum AgentSettingsCatalog {
+    public static var ids: [String] { all.map(\.id) }
     static let all: [AgentSettingDescriptor] = [
         .init(id: "claude", name: "Claude", brand: .claude,
               showKey: "show_claude", menubarKey: "menubar_claude",
@@ -43,6 +44,10 @@ enum AgentSettingsCatalog {
         .init(id: "qoder_cn", name: "Qoder CN", brand: .qoderCn,
               showKey: "show_qoder_cn", menubarKey: "menubar_qoder_cn",
               colorKey: "color_qoder_cn", defaultColor: "#818cf8",
+              defaultShow: false, defaultMenubar: false),
+        .init(id: "antigravity", name: "Antigravity", brand: .antigravity,
+              showKey: "show_antigravity", menubarKey: "menubar_antigravity",
+              colorKey: "color_antigravity", defaultColor: "#76baff",
               defaultShow: false, defaultMenubar: false),
     ]
 

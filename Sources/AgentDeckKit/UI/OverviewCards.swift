@@ -15,8 +15,9 @@ struct AgentUsageDonut: View {
 }
 
 struct MiniDonut: View {
+    static let defaultDiameter: CGFloat = 22
     let parts: [(value: Double, color: Color)]
-    var size: CGFloat = 22
+    var size: CGFloat = Self.defaultDiameter
 
     var body: some View {
         let total = parts.reduce(0) { $0 + $1.value }
@@ -81,7 +82,7 @@ struct TodayBar: View {
             + Text(Fmt.tokens(summary.totalTokens)).font(.rounded(11.5, weight: .semibold)).foregroundColor(Theme.ink)
             + Text(" tok").foregroundColor(Theme.ink2)
             + Text("  ·  ").foregroundColor(Theme.ink3)
-            + Text("≈ $\(Int(summary.costUSD.rounded()))").foregroundColor(Theme.ink2)
+            + Text(summary.costUSD.map { "≈ $\(Int($0.rounded()))" } ?? L("v3.unavailable")).foregroundColor(Theme.ink2)
         if let d = summary.deltaPercent {
             s = s + Text("  ·  ").foregroundColor(Theme.ink3)
                 + Text("\(d >= 0 ? "↑" : "↓")\(abs(d))%")
@@ -103,7 +104,7 @@ private struct SessionRow: View {
     var body: some View {
         Button(action: onTap) {
             HStack(spacing: 8) {
-                BrandBadge(brand: Brand(rawValue: tool) ?? .claude, size: 20)
+                SessionIcon(tool: tool, fallback: .claude, badgeSize: 20)
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 6) {
                         Text(title)
@@ -117,13 +118,16 @@ private struct SessionRow: View {
                     }
                     if let detail { detail }
                 }
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 9, weight: .semibold)).foregroundStyle(Theme.ink3)
+                if SessionTools.canFocus(tool) {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 9, weight: .semibold)).foregroundStyle(Theme.ink3)
+                }
             }
             .padding(.horizontal, 6).padding(.vertical, 4)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .disabled(!SessionTools.canFocus(tool))
     }
 }
 

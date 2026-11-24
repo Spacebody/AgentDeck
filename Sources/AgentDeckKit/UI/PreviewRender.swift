@@ -273,7 +273,7 @@ public enum PreviewRender {
 
     /// Agent 管理子页：所有 Agent 同级纵向展示面板、状态栏和主题色设置。
     public static func agentSettingsPNG(scale: CGFloat = 2) -> Data? {
-        png(PanelChrome(height: 420) {
+        png(PanelChrome(height: 510) {
             VStack(spacing: 10) {
                 HStack(spacing: 8) {
                     Image(systemName: "chevron.left")

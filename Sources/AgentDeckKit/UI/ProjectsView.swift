@@ -28,7 +28,7 @@ struct ProjectsView: View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
                 DashboardHeading(text: L("tab.projects"), count: model.projects.count)
-                Button {
+                IconButton(system: "folder.badge.plus", fontSize: 13) {
                     let picker = NSOpenPanel()
                     picker.title = L("v3.importFolders")
                     picker.canChooseFiles = false
@@ -36,11 +36,12 @@ struct ProjectsView: View {
                     picker.allowsMultipleSelection = true
                     picker.canCreateDirectories = false
                     if picker.runModal() == .OK { model.importDirectories(picker.urls) }
-                } label: { Image(systemName: "folder.badge.plus") }
-                .buttonStyle(.plain).help(L("v3.importFolders")).accessibilityLabel(L("v3.importFolders"))
-                Button { Task { await model.refresh(agents: agents) } } label: {
-                    Image(systemName: "arrow.clockwise")
-                }.buttonStyle(.plain).help(L("header.refresh")).disabled(model.loading)
+                }
+                .help(L("v3.importFolders")).accessibilityLabel(L("v3.importFolders"))
+                IconButton(system: "arrow.clockwise", fontSize: 13) {
+                    Task { await model.refresh(agents: agents) }
+                }
+                .help(L("header.refresh")).accessibilityLabel(L("header.refresh")).disabled(model.loading)
             }
             if model.loading && model.projects.isEmpty { ProgressView().controlSize(.small) }
             if model.failed {
@@ -129,16 +130,17 @@ private struct ProjectSessionsView: View {
             }
             ForEach((previewSessions ?? model.sessions).filter { session in !showActive || !project.active.contains { $0.indexedRowKey == session.rowKey } }, id: \.rowKey) { session in
                 HStack(spacing: 8) {
-                    BrandGlyph(brand: Brand(rawValue: session.tool) ?? .codex)
+                    SessionIcon(tool: session.tool)
                     VStack(alignment: .leading, spacing: 4) {
                         Text(session.title ?? session.id).font(.system(size: 11)).lineLimit(2)
-                        Text([session.account, Fmt.relative(Date(timeIntervalSince1970: session.mtime))]
+                        Text([session.sourceLabel ?? session.account, session.tool == "antigravity" && session.mtime <= 0 ? nil : Fmt.relative(Date(timeIntervalSince1970: session.mtime))]
                             .compactMap { $0 }.joined(separator: " · "))
                             .font(.system(size: 10)).foregroundStyle(Theme.ink3)
                     }.frame(maxWidth: .infinity, alignment: .leading)
                     Button { onResume(session) } label: {
                         Image(systemName: "arrow.up.right").frame(width: 28, height: 28)
                     }.buttonStyle(.plain).foregroundStyle(DashboardStyle.accent).help(L("session.resume"))
+                        .disabled(!session.canResume)
                 }.padding(.vertical, 6)
             }
             HStack {

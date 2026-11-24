@@ -377,6 +377,7 @@ struct Week7Bars: View {
         case .other:  return [Color(hex: 0x9a9aa5), Color(hex: 0x6a6a75)]
         case .codex:  return [Brand.codex.accent, Brand.codex.deep]
         case .qoder:  return [Brand.qoder.accent, Brand.qoder.deep]
+        case .antigravity: return [Brand.antigravity.accent, Brand.antigravity.deep]
         }
     }
 

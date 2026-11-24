@@ -8,6 +8,7 @@ struct QuotaResponse: Decodable {
     let codex: QuotaNode?
     let qoder: QuotaNode?
     let qoderCn: QuotaNode?
+    var antigravity: QuotaNode? = nil
     let agents: [AgentQuota]?
     let accounts: QuotaAccounts?
     let menubar: MenubarConfig?
@@ -20,6 +21,7 @@ struct QuotaResponse: Decodable {
         codex: QuotaNode?,
         qoder: QuotaNode? = nil,
         qoderCn: QuotaNode? = nil,
+        antigravity: QuotaNode? = nil,
         agents: [AgentQuota]? = nil,
         accounts: QuotaAccounts?,
         menubar: MenubarConfig?,
@@ -31,6 +33,7 @@ struct QuotaResponse: Decodable {
         self.codex = codex
         self.qoder = qoder
         self.qoderCn = qoderCn
+        self.antigravity = antigravity
         self.agents = agents
         self.accounts = accounts
         self.menubar = menubar
@@ -53,13 +56,15 @@ struct QuotaAccounts: Decodable {
     let codex: [QuotaNode]
     let qoder: [QuotaNode]?
     let qoderCn: [QuotaNode]?
+    var antigravity: [QuotaNode]? = nil
 
     init(claude: [QuotaNode], codex: [QuotaNode], qoder: [QuotaNode]? = nil,
-         qoderCn: [QuotaNode]? = nil) {
+         qoderCn: [QuotaNode]? = nil, antigravity: [QuotaNode]? = nil) {
         self.claude = claude
         self.codex = codex
         self.qoder = qoder
         self.qoderCn = qoderCn
+        self.antigravity = antigravity
     }
 }
 
@@ -95,6 +100,11 @@ func normalizedQuotaRotationInterval(_ value: Int) -> Int {
 }
 
 extension QuotaResponse {
+    var antigravityPanelHidden: Bool? {
+        if let group = agents?.first(where: { $0.id == "antigravity" }) { return group.hidden ?? false }
+        return antigravity.map { $0.hidden ?? false }
+    }
+
     func flatPages(visibleAgents: Set<String>? = nil) -> [QuotaPage] {
         let groups: [AgentQuota]
         if let agents, !agents.isEmpty {
@@ -109,6 +119,8 @@ extension QuotaResponse {
                            accounts: legacyAccounts(accounts?.qoder, primary: qoder)),
                 AgentQuota(id: "qoder_cn", name: "Qoder CN", hidden: qoderCn?.hidden,
                            accounts: legacyAccounts(accounts?.qoderCn, primary: qoderCn)),
+                AgentQuota(id: "antigravity", name: "Antigravity", hidden: antigravity?.hidden,
+                           accounts: legacyAccounts(accounts?.antigravity, primary: antigravity)),
             ]
         }
         return groups.flatMap { group -> [QuotaPage] in
@@ -145,6 +157,7 @@ struct QuotaNode: Decodable, Identifiable {
     let account: String?        // 账号显示名（label）
     let isDefault: Bool?        // is_default
     let kind: String?           // claude="oauth"
+    var remainingAmounts: [QuotaAmount]? = nil
     let windows: [QuotaWindow]?
     let error: String?
     let noQuota: Bool?          // no_quota（Codex 无额度信息）
@@ -199,6 +212,13 @@ struct ExtraUsage: Decodable {
     }
 }
 
+struct QuotaAmount: Decodable, Identifiable {
+    let id: String
+    let label: String?
+    let remaining: Double
+    let resetsAt: FlexibleDate?
+}
+
 /// 单个限额窗口（5h / 周限额 / Sonnet / Opus …）。
 struct QuotaWindow: Decodable, Identifiable, Hashable {
     let id: String              // five_hour / seven_day / seven_day_sonnet …
@@ -230,6 +250,7 @@ struct MenubarConfig: Decodable {
     let codex: Bool?
     let qoder: Bool?
     let qoderCn: Bool?
+    var antigravity: Bool? = nil
     let alertColor: Bool?       // alert_color
     let valueDim: String?       // value_dim：shortest / weekly / max
     let colorDim: String?       // color_dim

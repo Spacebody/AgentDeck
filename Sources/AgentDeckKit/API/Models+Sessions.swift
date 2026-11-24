@@ -1,6 +1,11 @@
 // AgentDeck v2 — 会话页数据模型。对应 api_sessions(1137) / api_preview(1460) / api_resume(2334)。
 import Foundation
 
+enum SessionTools {
+    static let indexed = ["claude", "codex", "qoder", "antigravity"]
+    static func canFocus(_ tool: String) -> Bool { tool != "antigravity" }
+}
+
 struct SessionsResponse: Decodable {
     let sessions: [SessionItem]
     let query: String?
@@ -33,6 +38,17 @@ struct SessionItem: Decodable, Identifiable {
     let accountId: String?
     var source: String? = nil
     var pinned: Bool?
+
+    var canResume: Bool { tool != "antigravity" || (source == "antigravity_cli" && accountId == "cli") }
+    var canCopyCommand: Bool { canResume && source != "qoder_app" }
+    var sourceLabel: String? {
+        guard tool == "antigravity" else { return nil }
+        switch source {
+        case "antigravity_cli": return "Antigravity CLI"
+        case "antigravity_app": return L("session.antigravityDesktop")
+        default: return "Antigravity"
+        }
+    }
 
     /// ForEach / 预览 / 置顶复合键；同一会话可被复制到不同账号目录。
     var rowKey: String { "\(tool):\(accountId ?? "default"):\(id)" }

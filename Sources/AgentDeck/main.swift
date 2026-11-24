@@ -365,7 +365,7 @@ final class IslandController {
     }
 
     private func brandIcon(for tool: String) -> NSImage {
-        let key = ["claude", "codex", "qoder", "qoder_cn"].contains(tool.lowercased())
+        let key = AgentSettingsCatalog.ids.contains(tool.lowercased())
             ? tool.lowercased() : "claude"
         let bundleName = "AgentDeck_AgentDeckKit.bundle"
         let bases = [Bundle.main.resourceURL,
@@ -381,7 +381,7 @@ final class IslandController {
             }
         }
         let conf = NSImage.SymbolConfiguration(pointSize: 20, weight: .semibold)
-        let symbol = key == "claude" ? "sparkle" : key == "codex" ? "apple.terminal" : "q.square"
+        let symbol = key == "antigravity" ? "arrow.up.forward.circle" : key == "claude" ? "sparkle" : key == "codex" ? "apple.terminal" : "q.square"
         let img = NSImage(systemSymbolName: symbol,
                           accessibilityDescription: key)?
             .withSymbolConfiguration(conf) ?? NSImage(size: NSSize(width: 26, height: 26))
@@ -808,7 +808,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func focusSession(_ event: IslandController.Event?) {
         // 额度告警弹丸无会话可跳转 → 直接打开面板看额度
-        guard let event, event.kind != "alert" else { showPanel(); return }
+        guard let event, event.kind != "alert", event.tool != "antigravity" else { showPanel(); return }
         var req = URLRequest(url: URL(string: "\(kBase)/api/focus")!)
         req.httpMethod = "POST"
         req.timeoutInterval = 15
@@ -958,13 +958,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// agent 单色模板字形：直接用官方 App 自带的菜单栏模板图（assets/brand 随包分发）
     /// Claude.app TrayIconTemplate / Codex.app codexTemplate，形状与官方完全一致
     func agentGlyph(_ tool: String) -> NSImage? {
-        let file = tool == "codex" ? "codex-tray@2x" : tool == "claude" ? "claude-tray@2x" : nil
+        let file = ["codex", "claude", "antigravity"].contains(tool) ? "\(tool)-tray@2x" : nil
         if let file,
            let path = Bundle.main.path(forResource: file, ofType: "png", inDirectory: "static/brand"),
            let img = NSImage(contentsOfFile: path) {
             // 按字形实际占比对齐视觉大小：两家字形均 34px，但 Claude 画布 48(留白 29%)、
             // Codex 画布 36 —— 等字形高 ~14.2pt 反推画布高
-            let h: CGFloat = tool == "codex" ? 15 : 20
+            let h: CGFloat = tool == "codex" ? 15 : tool == "antigravity" ? 22 : 20
             img.size = NSSize(width: img.size.width / img.size.height * h, height: h)
             img.isTemplate = true
             return img
@@ -972,6 +972,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // 兜底：品牌资源缺失时退回 SF Symbol
         let conf = NSImage.SymbolConfiguration(pointSize: 14.5, weight: .medium)
         let symbol = tool == "codex" ? "apple.terminal"
+            : tool == "antigravity" ? "arrow.up.forward.circle"
             : ["qoder", "qoder_cn"].contains(tool) ? "q.square" : "sparkle"
         let img = NSImage(systemSymbolName: symbol,
                           accessibilityDescription: tool)?
@@ -1883,21 +1884,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 return pcts[index]
             }
             var full: [MBItem] = []      // 全部 tool×账号，统一进入单槽位
-            for tool in ["claude", "codex", "qoder", "qoder_cn"] {
+            for tool in AgentSettingsCatalog.ids {
                 guard mb?[tool] as? Bool ?? false else { continue }
                 // accounts 列表（新后端）；缺失则回退到顶层单账号对象
                 let list = (accounts?[tool] as? [[String: Any]])
                     ?? (json[tool] as? [String: Any]).map { [$0] } ?? []
                 let multi = list.filter { ($0["windows"] as? [[String: Any]])?.isEmpty == false }.count > 1
                 for (i, node) in list.enumerated() {
-                    guard let windows = node["windows"] as? [[String: Any]],
-                          let p = dimPct(windows, valueDim) else { continue }
-                    let alert = alertFor(dimPct(windows, colorDim) ?? p)   // 颜色由所选维度独立驱动
-                    let pctStr = String(format: "%.0f%%", p)
+                    let windows = node["windows"] as? [[String: Any]] ?? []
+                    let alert: NSColor?
+                    let value: String
+                    if let pct = dimPct(windows, valueDim) {
+                        value = String(format: "%.0f%%", pct)
+                        alert = alertFor(dimPct(windows, colorDim) ?? pct)
+                    } else if tool == "antigravity", let amount = (node["remaining_amounts"] as? [[String: Any]])?.first,
+                              let remaining = amount["remaining"] as? Double, let label = amount["label"] as? String {
+                        value = "\(label.prefix(10)) \(remaining.formatted())"
+                        alert = nil
+                    } else { continue }
                     let raw = node["account"] as? String ?? ""
                     let label = raw.count > 10 ? String(raw.prefix(10)) + "…" : raw  // 防长名撑宽菜单栏
                     // 轮转项：同 tool 多账号时带账号名区分；否则仅百分比
-                    let text = (multi && !label.isEmpty) ? "\(label) \(pctStr)" : pctStr
+                    let text = (multi && !label.isEmpty) ? "\(label) \(value)" : value
                     let pageID = stableQuotaPageID(
                         agentID: tool, accountID: node["account_id"] as? String,
                         isDefault: node["is_default"] as? Bool ?? false,
@@ -1999,10 +2007,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func menubarAgentEnabled(_ tool: String) -> Bool {
-        switch tool {
-        case "claude", "codex", "qoder", "qoder_cn": return store.menubarAgentEnabled(tool)
-        default: return false
-        }
+        AgentSettingsCatalog.ids.contains(tool) && store.menubarAgentEnabled(tool)
     }
 
     func drawMenubar(_ items: [MBItem], animated: Bool) {

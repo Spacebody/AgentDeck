@@ -12,6 +12,7 @@ struct WidgetView: View {
     var showCodexAgent: Bool? = nil
     var showQoderAgent: Bool? = nil
     var showQoderCNAgent: Bool? = nil
+    var showAntigravityAgent: Bool? = nil
     var onTapPanel: () -> Void = {}
     var onFocusActive: (ActiveSession) -> Void = { _ in }
 
@@ -22,7 +23,8 @@ struct WidgetView: View {
         let showQoderCN = showQoderCNAgent ?? !(quota?.qoderCn?.hidden ?? true)
         let visible = Set([showClaude ? "claude" : nil, showCodex ? "codex" : nil,
                            showQoder ? "qoder" : nil,
-                           showQoderCN ? "qoder_cn" : nil].compactMap { $0 })
+                           showQoderCN ? "qoder_cn" : nil,
+                           (showAntigravityAgent ?? !(quota?.antigravityPanelHidden ?? true)) ? "antigravity" : nil].compactMap { $0 })
         let pages = quota?.flatPages(visibleAgents: visible) ?? []
         let widgetPages = Array(pages.prefix(2))
         let maxWindows = widgetPages.map { $0.account.displayWindows.count }.max() ?? 0
@@ -47,7 +49,7 @@ struct WidgetView: View {
                     Text(Fmt.tokens(today.totalTokens)).font(.system(size: 19, weight: .semibold))
                     Text("tokens").foregroundStyle(Theme.ink3)
                     Spacer(minLength: 2)
-                    Text(String(format: "≈ $%.2f", today.costUSD)).foregroundStyle(Theme.ink2)
+                    Text(today.costUSD.map { String(format: "≈ $%.2f", $0) } ?? L("v3.unavailable")).foregroundStyle(Theme.ink2)
                 }.font(.system(size: 11)).monospacedDigit()
             }
             if showActive && !activeRows.isEmpty {
@@ -66,9 +68,11 @@ struct WidgetView: View {
                                 SessionActivityLabel(status: status, tool: session.tool)
                                     .environment(\.flatCard, true)
                             }
-                            Image(systemName: "chevron.right").foregroundStyle(Theme.ink3)
+                            if SessionTools.canFocus(session.tool) {
+                                Image(systemName: "chevron.right").foregroundStyle(Theme.ink3)
+                            }
                         }.contentShape(Rectangle())
-                    }.buttonStyle(.plain)
+                    }.buttonStyle(.plain).disabled(!SessionTools.canFocus(session.tool))
                 }
             }
         }
