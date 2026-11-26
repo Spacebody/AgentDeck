@@ -239,16 +239,22 @@ class AnalyticsStore:
         self._wake = threading.Event()
         self._stop = threading.Event()
         self._thread = None
+        self._last_scan_request = None
         self._state = {"status":"cold", "scanning":False, "batches":0, "errors":0}
 
     def health(self):
         with self._lock:
             return dict(self._state)
 
-    def request_scan(self):
+    def request_scan(self, *, min_interval=0):
         with self._lock:
             if self._stop.is_set():
                 return
+            now = time.monotonic()
+            if (min_interval and self._last_scan_request is not None
+                    and now - self._last_scan_request < min_interval):
+                return
+            self._last_scan_request = now
             self._wake.set()
             if self._thread is None:
                 self._thread = threading.Thread(target=self._worker, name="v4-analytics", daemon=True)

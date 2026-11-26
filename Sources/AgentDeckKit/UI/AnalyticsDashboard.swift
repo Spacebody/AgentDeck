@@ -1,6 +1,10 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
+enum AnalyticsRefreshCadence {
+    static let visibleSeconds: UInt64 = 10
+}
+
 enum AnalyticsMode: String, CaseIterable {
     case trend, composition, performance
 }
@@ -245,9 +249,11 @@ private struct AnalyticsResults: View {
             var delay: UInt64 = 3
             while !Task.isCancelled {
                 let retry = await load()
-                guard retry || (mode == .performance && cursor == nil) else { return }
-                do { try await Task.sleep(nanoseconds: (retry ? delay : 30) * 1_000_000_000) } catch { return }
-                delay = min(delay * 2, 30)
+                // A paginated snapshot must keep its generation until the user refreshes.
+                guard cursor == nil else { return }
+                let seconds = retry ? delay : AnalyticsRefreshCadence.visibleSeconds
+                do { try await Task.sleep(nanoseconds: seconds * 1_000_000_000) } catch { return }
+                delay = retry ? min(delay * 2, AnalyticsRefreshCadence.visibleSeconds) : 3
             }
         }
         .task(id: exporting) { if exporting { await saveCSV() } }

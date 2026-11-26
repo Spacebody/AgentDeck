@@ -70,6 +70,20 @@ class StoreTests(unittest.TestCase):
     def total(self):
         return self.query()["summary"][0]["metrics"]["tokens_total"]
 
+    def test_visible_scan_requests_are_coalesced_but_later_requests_wake(self):
+        # Keep this scheduler test deterministic; the worker's indexing is covered below.
+        with patch.object(threading, "Thread") as thread:
+            with patch.object(v.time, "monotonic", side_effect=[100, 105, 115]):
+                self.store.request_scan(min_interval=15)
+                self.assertTrue(self.store._wake.is_set())
+                self.store._wake.clear()
+                self.store.request_scan(min_interval=15)
+                self.assertFalse(self.store._wake.is_set())
+                self.store.request_scan(min_interval=15)
+                self.assertTrue(self.store._wake.is_set())
+            thread.assert_called_once()
+            thread.return_value.start.assert_called_once()
+
     def test_atomic_copy_deletion_and_non_authoritative_discovery(self):
         self.write("original.log",fact("a"),fact("b"))
         self.write("copy.log",fact("a"))

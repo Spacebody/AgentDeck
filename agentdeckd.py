@@ -8371,6 +8371,7 @@ _LOCAL_HTTP_HOSTS = {f"127.0.0.1:{PORT}", f"localhost:{PORT}"}
 _quota_wait_slots = threading.BoundedSemaphore(4)
 _event_wait_slots = threading.BoundedSemaphore(4)
 _analytics_read_slots = threading.BoundedSemaphore(3)
+_ANALYTICS_VISIBLE_SCAN_INTERVAL = 15
 _analytics_store = None
 
 
@@ -8391,7 +8392,7 @@ def _analytics_loop(shutdown):
     _analytics_store = store
     try:
         while not shutdown.is_set():
-            store.request_scan()
+            store.request_scan(min_interval=_ANALYTICS_VISIBLE_SCAN_INTERVAL)
             shutdown.wait(45)
     finally:
         _analytics_store = None
@@ -8413,6 +8414,10 @@ def _analytics_response(query, *, export=False):
         params = {k: v[0] for k, v in query.items()}
         if export:
             return 200, store.export_csv(params).encode("utf-8"), "text/csv; charset=utf-8"
+        if not params.get("cursor") and not params.get("generation"):
+            # A current summary requests a coalesced background scan; do not block
+            # readers on file I/O or intentionally advance a paginated snapshot.
+            store.request_scan(min_interval=_ANALYTICS_VISIBLE_SCAN_INTERVAL)
         return 200, store.query(params), json_type
     except GenerationConflict:
         return 409, {"error": "index changed; restart pagination"}, json_type

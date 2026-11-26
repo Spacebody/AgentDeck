@@ -389,18 +389,17 @@ private struct SessionRow: View {
                     Text(meta).font(.system(size: 8.5)).foregroundStyle(Theme.ink3).lineLimit(1)
                 }.frame(maxWidth: .infinity, alignment: .leading)
                 ZStack(alignment: .trailing) {
-                    if hovering || expanded { actions }
-                    else if let active {
-                        VStack(alignment: .trailing, spacing: 3) {
-                            if let status = active.status, ["busy", "idle"].contains(status) {
-                                SessionActivityLabel(status: status, tool: active.tool)
-                            }
-                            if active.status == "busy" {
-                                SessionSpeedView(request: active.indexedSession?.performanceRequest ?? active.performanceRequest,
-                                                 compactWidth: nil, currentTurnOnly: true)
-                            }
+                    if let active {
+                        let request = active.indexedSession?.performanceRequest ?? active.performanceRequest
+                        if let onOpen {
+                            Button(action: onOpen) {
+                                ActiveSessionAccessory(session: active, performanceRequest: request, showsOpen: true)
+                            }.buttonStyle(.plain).help(L("v3.open"))
+                                .accessibilityHint(L("v3.open"))
+                        } else {
+                            ActiveSessionAccessory(session: active, performanceRequest: request, showsOpen: false)
                         }
-                    }
+                    } else if hovering || expanded { actions }
                 }.frame(width: SessionRowLayout.trailing, alignment: .trailing)
             }
             .frame(minHeight: 34, alignment: .topLeading)
@@ -409,6 +408,10 @@ private struct SessionRow: View {
             .onTapGesture { onToggle() }
 
             if expanded {
+                if active != nil {
+                    actions.frame(maxWidth: .infinity, alignment: .trailing)
+                        .padding(.trailing, SessionRowLayout.inset).padding(.bottom, 5)
+                }
                 AnalyticsDetailLink(scope: AnalyticsScope(session), title: session.title ?? session.id,
                                     agents: [session.tool])
                     .frame(maxWidth: .infinity, alignment: .leading).padding(.leading, 35)

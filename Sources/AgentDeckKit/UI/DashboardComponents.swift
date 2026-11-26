@@ -52,6 +52,29 @@ enum SessionRowLayout {
     static let trailing: CGFloat = 126
 }
 
+/// Keep the status in the same column, whether or not a session can be opened.
+struct ActiveSessionAccessory: View {
+    let session: ActiveSession
+    let performanceRequest: SessionPerformanceRequest
+    let showsOpen: Bool
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 5) {
+            VStack(alignment: .trailing, spacing: 5) {
+                if let status = session.status, ["busy", "idle"].contains(status) {
+                    SessionActivityLabel(status: status, tool: session.tool)
+                }
+                if session.status == "busy" {
+                    SessionSpeedView(request: performanceRequest, compactWidth: nil, currentTurnOnly: true)
+                }
+            }
+            Image(systemName: "arrow.up.right")
+                .font(.system(size: 11)).foregroundStyle(Theme.ink3)
+                .opacity(showsOpen ? 1 : 0).accessibilityHidden(true)
+        }
+    }
+}
+
 struct DashboardActiveList: View {
     let sessions: [ActiveSession]
     var showsHeading = true
@@ -69,18 +92,9 @@ struct DashboardActiveList: View {
                             Text(session.cwd ?? session.tool).font(.system(size: 10))
                                 .foregroundStyle(Theme.ink3).lineLimit(1).truncationMode(.middle)
                         }.frame(maxWidth: .infinity, alignment: .leading)
-                        HStack(alignment: .top, spacing: 5) {
-                            VStack(alignment: .trailing, spacing: 5) {
-                                if let status = session.status, ["busy", "idle"].contains(status) {
-                                    SessionActivityLabel(status: status, tool: session.tool)
-                                }
-                                if session.status == "busy" {
-                                    SessionSpeedView(request: session.performanceRequest, compactWidth: nil, currentTurnOnly: true)
-                                }
-                            }
-                            Image(systemName: "arrow.up.right").font(.system(size: 11)).foregroundStyle(Theme.ink3)
-                                .opacity(SessionTools.canFocus(session.tool) ? 1 : 0).accessibilityHidden(true)
-                        }.frame(width: SessionRowLayout.trailing, alignment: .trailing)
+                        ActiveSessionAccessory(session: session, performanceRequest: session.performanceRequest,
+                                               showsOpen: SessionTools.canFocus(session.tool))
+                            .frame(width: SessionRowLayout.trailing, alignment: .trailing)
                     }.frame(maxWidth: .infinity, minHeight: 34, alignment: .topLeading)
                         .padding(.horizontal, SessionRowLayout.inset).padding(.vertical, 8).contentShape(Rectangle())
                 }.buttonStyle(.plain).disabled(!SessionTools.canFocus(session.tool))

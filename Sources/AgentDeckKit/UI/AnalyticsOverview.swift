@@ -88,7 +88,7 @@ struct AnalyticsOverview<Quota: View>: View {
                     guard !Task.isCancelled else { return }
                     problem = (error as? APIError).map { if case .http(503) = $0 { return "analytics.indexing" }; return "common.opFailed" } ?? "common.opFailed"
                 }
-                do { try await Task.sleep(nanoseconds: 30_000_000_000) } catch { return }
+                do { try await Task.sleep(nanoseconds: AnalyticsRefreshCadence.visibleSeconds * 1_000_000_000) } catch { return }
             }
         }
     }
