@@ -4880,6 +4880,28 @@ def _pid_codex_rollout_info(pid):
     return best
 
 
+_CODEX_RESUME_ID = re.compile(
+    r"^resume\s+([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})(?=\s|$)")
+
+
+def _codex_resumed_rollout_info(session_id, files):
+    """Resolve an explicit resume ID when the shared server owns the rollout FD."""
+    suffix = f"-{session_id}.jsonl"
+    matches = {path for path in files if path.name.endswith(suffix)}
+    if len(matches) != 1:
+        return None
+    path = matches.pop()
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return None
+    meta = _rollout_meta(path)
+    if meta.get("subagent") or meta.get("id") != session_id:
+        return None
+    return {"id": session_id, "cwd": meta["cwd"], "mtime": mtime,
+            "status": _codex_rollout_work_status(path)}
+
+
 def _qoder_transcript_meta(path):
     """Read only Qoder session identity fields needed by the active-session list."""
     sid, cwd = path.stem, ""
@@ -5079,6 +5101,7 @@ def api_active():
                             capture_output=True, text=True, timeout=10)
         ppid_of, rows, tool_pids, codex_app_server_pids = {}, [], set(), set()
         qoder_app_service_alive = False
+        codex_resume_ids = {}
         for line in ps.stdout.splitlines():
             parts = line.strip().split(None, 3)
             if len(parts) < 4:
@@ -5103,6 +5126,10 @@ def api_active():
                 if _is_codex_desktop_app_server(args):
                     codex_app_server_pids.add(pid_i)
                 continue
+            if raw_tool == "codex":
+                resumed = _CODEX_RESUME_ID.match(tool_args)
+                if resumed:
+                    codex_resume_ids[pid_i] = resumed.group(1)
             tool = "qoder" if raw_tool in ("qodercli", "qoder") else raw_tool
             # AgentDeck's own headless quota probe must never appear as a user session.
             if tool == "qoder" and ("--no-session-persistence" in tool_args
@@ -5153,30 +5180,40 @@ def api_active():
                     entry["status"] = "busy" if observed_at - info["mtime"] < 30 else "idle"
             active.append(entry)
 
-        # Codex 无官方状态索引：按其 rollout 文件最近写入时间推断 忙碌/空闲
+        # 优先按对应 rollout 的轮次起止事件判忙闲，最后才用写入时间兜底。
         codex_entries = [e for e in active if e["tool"] == "codex" and not e["status"]]
         if codex_entries:
             now = time.time()
-            cwd_mtime = {}
-            for f in _iter_codex_files(15):
-                c = _rollout_cwd(f)
-                if c:
-                    try:
-                        cwd_mtime[c] = max(cwd_mtime.get(c, 0), f.stat().st_mtime)
-                    except OSError:
-                        pass
+            cwd_mtime = None
+            resume_files = None
             for e in codex_entries:
                 info = _pid_codex_rollout_info(e["pid"])
+                resumed_id = codex_resume_ids.get(e["pid"])
+                if not info and resumed_id:
+                    if resume_files is None:
+                        resume_files = _iter_codex_files(limit=None)
+                    info = _codex_resumed_rollout_info(resumed_id, resume_files)
                 if info:
                     e["id"] = info["id"] or e["id"]
                     e["cwd"] = e["cwd"] or info["cwd"]
                     e["project"] = Path(e["cwd"]).name if e["cwd"] else "—"
                     e["last_active_at"] = max(e["last_active_at"], info["mtime"])
-                    # 当前进程已明确打开某个 rollout 后，该文件的新旧就是该会话的
-                    # 结论；不得再按 cwd 回退到同项目另一会话的最近写入时间。
+                    # 已明确对应 rollout，不再按 cwd 取同项目的其他会话。
                     e["status"] = info.get("status") \
                         or ("busy" if now - info["mtime"] < 30 else "idle")
                     continue
+                if resumed_id:
+                    # Exact ID is known; another same-project session is not evidence.
+                    continue
+                if cwd_mtime is None:
+                    cwd_mtime = {}
+                    for path in _iter_codex_files(15):
+                        cwd = _rollout_cwd(path)
+                        if cwd:
+                            try:
+                                cwd_mtime[cwd] = max(cwd_mtime.get(cwd, 0), path.stat().st_mtime)
+                            except OSError:
+                                pass
                 # Codex 桌面端 rollout cwd 可能是进程 cwd 的子目录，前缀匹配
                 cands = [mt for c, mt in cwd_mtime.items()
                          if c == e["cwd"] or c.startswith(e["cwd"] + "/")

@@ -1362,6 +1362,41 @@ class SessionIndexTests(unittest.TestCase):
 
 
 class ActiveSessionTests(unittest.TestCase):
+    def test_api_active_reads_exact_resumed_codex_turn_from_shared_server(self):
+        sid = "11111111-1111-1111-1111-111111111111"
+        other = "22222222-2222-2222-2222-222222222222"
+        cwd = "/work/project"
+        with tempfile.TemporaryDirectory() as td:
+            rollout, neighbor = [
+                Path(td) / f"rollout-2026-01-01T00-00-00-{key}.jsonl"
+                for key in (sid, other)
+            ]
+            for path, key, event in ((rollout, sid, "task_started"),
+                                     (neighbor, other, "task_complete")):
+                _jsonl(path, [
+                    {"type": "session_meta", "payload": {"id": key, "cwd": cwd}},
+                    {"type": "event_msg", "payload": {"type": event}},
+                ])
+            now = daemon.time.time()
+            os.utime(rollout, (now - 180, now - 180))
+            os.utime(neighbor, (now - 90, now - 90))
+            ps = SimpleNamespace(stdout=f"123 2 03:00 /opt/bin/codex resume {sid}\n")
+            with mock.patch.object(daemon, "cached", side_effect=lambda _k, _t, build: build()), \
+                    mock.patch.object(daemon, "_iter_claude_pidfiles", return_value=[]), \
+                    mock.patch.object(daemon.subprocess, "run", return_value=ps), \
+                    mock.patch.object(daemon, "_pid_cwd", return_value=cwd), \
+                    mock.patch.object(daemon, "_pid_codex_rollout_info", return_value=None), \
+                    mock.patch.object(daemon, "_iter_codex_files", side_effect=lambda limit: (
+                        [neighbor, rollout] if limit is None else [neighbor])), \
+                    mock.patch.object(daemon, "_codex_desktop_rollout_candidates", return_value=[]), \
+                    mock.patch.object(daemon, "_session_db_connect", side_effect=OSError):
+                [entry] = daemon.api_active()["active"]
+                self.assertEqual((entry["id"], entry["status"]), (sid, "busy"))
+                with rollout.open("a") as stream:
+                    stream.write('{"type":"event_msg","payload":{"type":"task_complete"}}\n')
+                [entry] = daemon.api_active()["active"]
+                self.assertEqual((entry["id"], entry["status"]), (sid, "idle"))
+
     def test_api_active_empty_runtime_and_index_returns_without_error(self):
         class EmptyCursor:
             def fetchall(self):
