@@ -30,7 +30,7 @@ class StoreNotReady(Exception):
 BUDGET = {"max_rows": 256, "max_bytes": 256 * 1024}
 EXPORT_MAX_BYTES = 8 * 1024 * 1024
 # Bump for incompatible collector cursor, identity, attribution, or normalization changes.
-PARSER_REVISION = 1
+PARSER_REVISION = 3
 APPLICATION_ID = 0x41443441
 SCOPE_FIELDS = ("agent", "account_id", "source_kind", "session_id", "model", "project")
 COUNTS = ("tokens_total", "input_tokens", "output_tokens", "calls", "cache_read_tokens",
@@ -93,7 +93,7 @@ def _fact(raw):
     if any(v is not None and (not isinstance(v, str) or len(v) > 8192)
            for v in payload.values()):
         raise ValueError("invalid fact dimension")
-    for k in VALUES + ("observed_at", "first_observed_at", "last_observed_at"):
+    for k in VALUES + ("observed_at", "first_observed_at", "last_observed_at", "generation_ms"):
         value = raw.get(k)
         for alias in ALIASES.get(k, ()):
             if value is None:
@@ -107,7 +107,18 @@ def _fact(raw):
               and total is not None and cache is not None and cache <= total):
             payload["input_uncached_tokens"] = total-cache
     payload.pop("api_equivalent_usd", None)
+    flag = raw.get("speed_includes_wait")
+    payload["speed_includes_wait"] = flag if type(flag) is bool else None
+    if "speed_output_tokens" in raw:
+        matched = raw["speed_output_tokens"]
+        payload["speed_output_tokens"] = matched if type(matched) is int and _num(matched) else None
     payload["call_observed"] = raw.get("call_observed") is True
+    if payload["agent"] == "claude" and payload["kind"] == "call":
+        # A collapsed stream's first/last timestamps need not identify this counter.
+        end = raw.get("output_observed_at")
+        if "output_observed_at" not in raw and payload["last_observed_at"] in (None,payload["observed_at"]):
+            end = payload["observed_at"]
+        payload["output_observed_at"] = end if _num(end) else None
     return _dump([raw["agent"], raw["event_key"]]), payload
 
 
@@ -131,14 +142,67 @@ def _publish(db):
     # TEMP is file-backed; wholesale source replacement must not materialize its keys in RAM.
     db.execute("""INSERT INTO facts
         SELECT k,json_extract(body,'$.observed_at'),body FROM (
-            SELECT o.k,o.body,row_number() OVER(PARTITION BY o.k ORDER BY o.stamp DESC,o.src) AS n
+            SELECT o.k,owner_fact(o.body,o.stamp,o.src) AS body
             FROM dirty d CROSS JOIN owners o ON o.k=d.k
-            JOIN sources s ON s.id=o.src AND s.live=o.gen
-        ) WHERE n=1 ON CONFLICT(k) DO UPDATE SET ts=excluded.ts,body=excluded.body
+            JOIN sources s ON s.id=o.src AND s.live=o.gen GROUP BY o.k
+        ) WHERE true ON CONFLICT(k) DO UPDATE SET ts=excluded.ts,body=excluded.body
         WHERE facts.body<>excluded.body""")
     db.execute("""DELETE FROM facts WHERE k IN (SELECT k FROM dirty) AND NOT EXISTS
         (SELECT 1 FROM owners o JOIN sources s ON s.id=o.src AND s.live=o.gen WHERE o.k=facts.k)""")
     db.execute("DELETE FROM dirty")
+
+
+_TIMING = ("output_observed_at","generation_ms","latency_ms","ttft_ms","speed_includes_wait","speed_output_tokens")
+
+
+def _counter_rank(f):
+    count, end = f.get("output_tokens"), f.get("output_observed_at")
+    return (-(count if count is not None else -1), end if end is not None else math.inf,
+            -sum(f.get(k) is not None for k in ("generation_ms","latency_ms","ttft_ms")))
+
+
+class _OwnerFact:
+    """Keep a single owner's evidence bundle. Decode only when a second live copy exists."""
+    def __init__(self):
+        self.body = self.rank = None
+        self.claude = False
+        self.first = math.inf
+        self.last = -math.inf
+
+    def _consider(self, body, stamp, src):
+        f = json.loads(body) if self.claude else None
+        if self.claude:
+            rank = (*_counter_rank(f),src)
+            for key in ("first_observed_at","observed_at"):
+                if f.get(key) is not None:
+                    self.first = min(self.first,f[key])
+            for key in ("last_observed_at","observed_at"):
+                if f.get(key) is not None:
+                    self.last = max(self.last,f[key])
+        else:
+            rank = (-(stamp if stamp is not None else -math.inf),src)
+        if self.rank is None or rank < self.rank:
+            self.rank,self.body = rank,body
+
+    def step(self, body, stamp, src):
+        if self.body is None:
+            self.body,self.stamp,self.src = body,stamp,src
+            return
+        if self.rank is None:
+            f = json.loads(self.body)
+            self.claude = f.get("agent") == "claude" and f.get("kind") == "call"
+            self._consider(self.body,self.stamp,self.src)
+        self._consider(body,stamp,src)
+
+    def finalize(self):
+        if not self.claude:
+            return self.body
+        winner = json.loads(self.body)
+        if math.isfinite(self.first):
+            winner["observed_at"] = winner["first_observed_at"] = self.first
+        if math.isfinite(self.last):
+            winner["last_observed_at"] = self.last
+        return _dump(winner)
 
 
 def _merge_claude(old,new):
@@ -146,6 +210,12 @@ def _merge_claude(old,new):
     time_fields = [x for x in (a,b,old.get("first_observed_at"),new.get("first_observed_at")) if x is not None]
     latest = [x for x in (a,b,old.get("last_observed_at"),new.get("last_observed_at")) if x is not None]
     result = {**old,**{k:v for k,v in new.items() if v is not None}}
+    paired = min((old,new),key=_counter_rank)
+    for k in _TIMING:
+        if k in paired:
+            result[k] = paired[k]
+        else:
+            result.pop(k,None)
     for k in COUNTS:
         vs = [v for v in (old.get(k),new.get(k)) if v is not None]
         result[k] = max(vs,default=None)
@@ -206,6 +276,7 @@ class AnalyticsStore:
         db = sqlite3.connect(self.path, timeout=1)
         try:
             db.row_factory = sqlite3.Row
+            db.create_aggregate("owner_fact",3,_OwnerFact)
             app_id = db.execute("PRAGMA application_id").fetchone()[0]
             revision = db.execute("PRAGMA user_version").fetchone()[0]
             if app_id not in (0,APPLICATION_ID) or revision > PARSER_REVISION:
@@ -455,6 +526,10 @@ class AnalyticsStore:
                 if name in p:
                     where.append(f"json_extract(body,'$.{name}')=?")
                     args.append(p[name])
+            for name,value in p.get("group_filters", ()):
+                # IS supports bound NULL without sacrificing literal string identities.
+                where.append(f"json_extract(body,'$.{name}') IS ?")
+                args.append(value)
             if "agents" in p:
                 where.append("json_extract(body,'$.agent') IN ("+",".join("?" for _ in p["agents"])+")")
                 args.extend(p["agents"])
@@ -498,13 +573,17 @@ class AnalyticsStore:
                 return _csv(group_rows())
             rows = list(group_rows())
             more = len(rows) > p["limit"]
+            # A ranked group covers matching facts, just like its row and CSV export.
+            # Only an ungrouped overview promises coverage of every selected agent.
+            group_scoped = p.get("group_filters") or any(k in p for k in ("agent","model","project","session_id"))
+            expected_agents = set() if group_scoped else set(p.get("agents",()))
             def collect(group):
                 stmt,order_by = slices(group)
                 result = []
                 for row in db.execute(stmt+" ORDER BY "+order_by,args):
                     item = json.loads(row[-1])
                     observed = set(item.pop("_agents"))
-                    if set(p.get("agents",()))-observed:
+                    if expected_agents-observed:
                         for m in ("cost_usd","api_equivalent_usd"):
                             if item["metrics"][m] is not None:
                                 item["metrics"][m],item["quality"][m] = None,"partial"
@@ -524,9 +603,20 @@ def _parameters(params):
         raise ValueError("expected scalar analytics parameters")
     p = params.copy()
     allowed = set(SCOPE_FIELDS) | {"timezone","start","end","period","dimension","sort","generation",
-                                   "cursor","limit","agents","basis"}
+                                   "cursor","limit","agents","basis","group_filters"}
     if p.keys()-allowed:
         raise ValueError("unexpected analytics parameter")
+    if "group_filters" in p:
+        raw = p["group_filters"]
+        if not isinstance(raw,str):
+            raise ValueError("invalid analytics group filters")
+        items = json.loads(raw)
+        if (not isinstance(items,list) or not 1 <= len(items) <= 16
+                or any(not isinstance(item,list) or len(item)!=2
+                       or item[0] not in ("agent","model","project")
+                       or not (item[1] is None or isinstance(item[1],str)) for item in items)):
+            raise ValueError("invalid analytics group filters")
+        p["group_filters"] = items
     p.setdefault("timezone","UTC")
     try:
         zone = ZoneInfo(p["timezone"])
@@ -563,6 +653,28 @@ def _parameters(params):
     return p
 
 
+def _speed_sample(f):
+    n = f.get("speed_output_tokens", f["output_tokens"])
+    if type(n) is not int or n < 20 or (f["output_tokens"] is not None and n > f["output_tokens"]):
+        return None
+    ms = f.get("generation_ms")
+    wait = f.get("speed_includes_wait") is True
+    if ms is None:
+        latency, ttft = f["latency_ms"], f["ttft_ms"]
+        if latency is None:
+            return None
+        if ttft is not None and 0 < ttft < latency:
+            ms, wait = latency - ttft, False
+        elif wait:
+            ms = latency
+        else:
+            return None
+    # Reject an implausible measured interval; do not rescue it with a slower fallback.
+    if not 200 < ms <= 1_800_000 or n * 1000 > 3000 * ms:
+        return None
+    return n, ms, wait
+
+
 class _Aggregate:
     def __init__(self):
         self.sums = {}
@@ -570,7 +682,7 @@ class _Aggregate:
         self.expected = {}
         self.agents = set()
         self.qoder_sources = set()
-        self.paired_output = self.paired_ms = self.pairs = 0
+        self.paired_output = self.paired_ms = self.pairs = self.wait_pairs = 0
 
     def step(self, body):
         f = json.loads(body)
@@ -598,10 +710,13 @@ class _Aggregate:
             if v is not None:
                 self.known[k] = self.known.get(k,0)+1
                 self.sums[k] = self.sums.get(k,0)+v
-        if f["latency_ms"] and f["output_tokens"] is not None:
-            self.paired_output += f["output_tokens"]
-            self.paired_ms += f["latency_ms"]
+        pair = _speed_sample(f)
+        if pair is not None:
+            n, ms, wait = pair
+            self.paired_output += n
+            self.paired_ms += ms
             self.pairs += 1
+            self.wait_pairs += wait
 
     def finalize(self):
         metrics,quality,subs = {},{},{}
@@ -613,7 +728,8 @@ class _Aggregate:
             q = "unknown" if not n else "complete" if n == self.expected[k] else "partial"
             quality[k],metrics[k],subs[k] = q,val if q=="complete" else None,val
         for k,n in (("latency_samples",self.known.get("latency_ms",0)),
-                    ("ttft_samples",self.known.get("ttft_ms",0)),("speed_samples",self.pairs)):
+                    ("ttft_samples",self.known.get("ttft_ms",0)),("speed_samples",self.pairs),
+                    ("speed_wait_samples",self.wait_pairs)):
             metrics[k],quality[k],subs[k] = n,"complete",n
         speed = self.paired_output*1000/self.paired_ms if self.pairs else None
         speed_q = "unknown" if not self.pairs else "complete" if self.pairs == self.expected.get("latency_ms") else "partial"
@@ -639,7 +755,7 @@ def _csv(rows):
             return out.write(line)
     writer = csv.writer(Limited())
     dims = ("basis","key","label",*SCOPE_FIELDS)
-    metrics = (*VALUES,"latency_samples","ttft_samples","speed_samples","speed_output_tps")
+    metrics = (*VALUES,"latency_samples","ttft_samples","speed_samples","speed_output_tps","speed_wait_samples")
     writer.writerow([*dims,*metrics,*("quality_"+k for k in metrics),*("known_"+k for k in metrics)])
     def safe(v):
         if isinstance(v,str) and (v.startswith(("\t","\r","\n")) or v.lstrip().startswith(("=","+","-","@"))):

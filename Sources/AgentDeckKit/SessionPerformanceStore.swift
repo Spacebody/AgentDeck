@@ -47,6 +47,8 @@ struct SessionPerformance: Decodable, Equatable {
         default: return nil
         }
     }
+
+    var workingLabel: String? { state == "active" && rate != nil ? label : nil }
 }
 
 struct SessionPerformanceResponse: Decodable {
@@ -114,11 +116,14 @@ extension EnvironmentValues {
 struct SessionSpeedView: View {
     let request: SessionPerformanceRequest
     var expanded = false
+    var compactWidth: CGFloat? = 126
+    var currentTurnOnly = false
     @Environment(\.sessionPerformanceStore) private var store
 
     var body: some View {
         if request.tool != "antigravity", let store {
-            SessionSpeedContent(store: store, key: request.key, expanded: expanded)
+            SessionSpeedContent(store: store, key: request.key, expanded: expanded, compactWidth: compactWidth,
+                                currentTurnOnly: currentTurnOnly)
         }
     }
 }
@@ -127,6 +132,8 @@ private struct SessionSpeedContent: View {
     @ObservedObject var store: SessionPerformanceStore
     let key: String
     let expanded: Bool
+    let compactWidth: CGFloat?
+    let currentTurnOnly: Bool
 
     var body: some View {
         let metric = store.metrics[key]
@@ -147,11 +154,11 @@ private struct SessionSpeedContent: View {
             .font(.system(size: 9.5)).foregroundStyle(Theme.ink2)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.vertical, 6)
-        } else if let label = metric?.label {
+        } else if let label = currentTurnOnly ? metric?.workingLabel : metric?.label {
             Text(label).font(.system(size: 9.5, weight: .medium)).monospacedDigit()
                 .foregroundStyle(Theme.ink2)
                 .lineLimit(1).minimumScaleFactor(0.85)
-                .frame(width: 126, alignment: .leading)
+                .frame(width: compactWidth, alignment: .leading)
                 .help(L("speed.basis"))
                 .transaction { $0.animation = nil }
         }

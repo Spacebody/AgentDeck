@@ -5,7 +5,7 @@ import AgentDeckKit
 
 // 用法：PreviewGen [overview|codexonly|visibilityoff|visibilityon|quotacases|quotadual|quotaclaude|quotaduplicate|quotaharmony|charts|chartsfiltered|sessions|settings|agentsettings|widget|widgetsizes|widgetfour|widgetstress|root|readme|readmesettings|widgetroot] [outPath]
 var args = Array(CommandLine.arguments.dropFirst())
-let mode = ["v4usage", "v4sampled", "v4overview", "overview", "codexonly", "visibilityoff", "visibilityon", "quotacases", "quotadual", "quotaclaude", "quotaduplicate", "quotaharmony", "charts", "chartsfiltered",
+let mode = ["v4usage", "v4trendGaps", "v4composition", "v4performance", "v4performanceEmpty", "v4sampled", "v4overview", "overview", "codexonly", "visibilityoff", "visibilityon", "quotacases", "quotadual", "quotaclaude", "quotaduplicate", "quotaharmony", "charts", "chartsfiltered",
             "sessions", "settings", "agentsettings", "widget", "widgetsizes", "widgetfour", "widgetstress", "root", "readme", "readmesettings", "widgetroot", "carousel", "quotamixed", "sessionspeed", "v3overview", "v3sessions", "v3projects", "v3usage", "v3settings", "v3scrolled"].contains(args.first)
     ? args.removeFirst() : "overview"
 let outPath = args.first ?? "/tmp/agentdeck-\(mode).png"
@@ -19,6 +19,9 @@ let data = MainActor.assumeIsolated { () -> Data? in
     }
     switch mode {
     case "v4usage": return PreviewRender.analyticsPNG()
+    case "v4trendGaps": return PreviewRender.analyticsPNG(gaps: true)
+    case "v4performanceEmpty": return PreviewRender.analyticsPNG(mode: "performance", noPerformance: true)
+    case "v4composition", "v4performance": return PreviewRender.analyticsPNG(mode: String(mode.dropFirst(2)))
     case "v4sampled": return PreviewRender.analyticsPNG(sampled: true)
     case "v4overview": return PreviewRender.dashboardPNG(tab: "overview")
     case "v3overview", "v3sessions", "v3projects", "v3usage", "v3settings", "v3scrolled": return PreviewRender.dashboardPNG(tab: String(mode.dropFirst(2)))

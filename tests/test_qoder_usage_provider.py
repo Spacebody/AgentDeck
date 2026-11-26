@@ -47,6 +47,19 @@ class QoderCollectorTests(unittest.TestCase):
         (self.logs / "sample.jsonl").unlink()
         self.assertIn("qoder_cli:default", self.provider.discover()["complete_scopes"])
 
+    def test_message_timestamps_do_not_measure_generation_in_either_cli(self):
+        cn_logs = self.cn_root / "projects"
+        cn_logs.mkdir(parents=True)
+        for root in (self.logs, cn_logs):
+            (root / "turn.jsonl").write_bytes(self.row(type="user", requestId="req") +
+                self.row(dict(request_id="req", output_tokens=12), timestamp="2025-02-02T09:01:00+08:00"))
+        for src in self.provider.discover()["sources"]:
+            call, obs = q.read_batch(src)["facts"]
+            self.assertEqual(obs["output_tokens"], 12)
+            for fact in (call, obs):
+                self.assertIsNone(fact.get("generation_ms"))
+                self.assertFalse(fact.get("speed_includes_wait"))
+
     def test_append_partial_alias_fields_and_privacy(self):
         p = self.logs / "session.jsonl"
         first = self.row()

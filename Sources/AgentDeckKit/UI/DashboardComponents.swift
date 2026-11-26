@@ -25,14 +25,31 @@ struct SessionActivityLabel: View {
         HStack(spacing: 5) {
             if status == "busy" {
                 let color = Brand(rawValue: tool)?.accent ?? Theme.ok
-                Circle().fill(color).frame(width: 6, height: 6)
-                    .shadow(color: color.opacity(0.65), radius: 2)
-                    .pulse().accessibilityHidden(true)
+                SessionActivityDot(color: color, size: 6)
             }
             Text(L(status == "busy" ? "active.busy" : "active.idle"))
                 .font(.system(size: 11, weight: .medium)).foregroundStyle(Theme.ink2)
         }.fixedSize()
     }
+}
+
+struct SessionActivityDot: View {
+    let color: Color
+    let size: CGFloat
+
+    var body: some View {
+        Color.clear.frame(width: size, height: size)
+            .overlay {
+                Circle().fill(color).shadow(color: color.opacity(0.65), radius: 2).pulse()
+            }
+            .accessibilityHidden(true)
+    }
+}
+
+enum SessionRowLayout {
+    static let badge: CGFloat = 26
+    static let inset: CGFloat = 9
+    static let trailing: CGFloat = 126
 }
 
 struct DashboardActiveList: View {
@@ -44,24 +61,28 @@ struct DashboardActiveList: View {
             if showsHeading { DashboardHeading(text: L("active.running", ["n": "\(sessions.count)"])) }
             ForEach(Array(sessions.enumerated()), id: \.offset) { _, session in
                 Button { onOpen(session) } label: {
-                    HStack(spacing: 10) {
-                        SessionIcon(tool: session.tool, badgeSize: 28)
+                    HStack(alignment: .top, spacing: 9) {
+                        SessionIcon(tool: session.tool, badgeSize: SessionRowLayout.badge)
                         VStack(alignment: .leading, spacing: 5) {
                             Text(session.title ?? session.project ?? session.cwd ?? session.tool)
                                 .font(.system(size: 12, weight: .medium)).lineLimit(1)
                             Text(session.cwd ?? session.tool).font(.system(size: 10))
                                 .foregroundStyle(Theme.ink3).lineLimit(1).truncationMode(.middle)
                         }.frame(maxWidth: .infinity, alignment: .leading)
-                        VStack(alignment: .trailing, spacing: 5) {
-                            if let status = session.status, ["busy", "idle"].contains(status) {
-                                SessionActivityLabel(status: status, tool: session.tool)
+                        HStack(alignment: .top, spacing: 5) {
+                            VStack(alignment: .trailing, spacing: 5) {
+                                if let status = session.status, ["busy", "idle"].contains(status) {
+                                    SessionActivityLabel(status: status, tool: session.tool)
+                                }
+                                if session.status == "busy" {
+                                    SessionSpeedView(request: session.performanceRequest, compactWidth: nil, currentTurnOnly: true)
+                                }
                             }
-                            SessionSpeedView(request: session.performanceRequest)
-                        }
-                        if SessionTools.canFocus(session.tool) {
                             Image(systemName: "arrow.up.right").font(.system(size: 11)).foregroundStyle(Theme.ink3)
-                        }
-                    }.padding(.vertical, 9).contentShape(Rectangle())
+                                .opacity(SessionTools.canFocus(session.tool) ? 1 : 0).accessibilityHidden(true)
+                        }.frame(width: SessionRowLayout.trailing, alignment: .trailing)
+                    }.frame(maxWidth: .infinity, minHeight: 34, alignment: .topLeading)
+                        .padding(.horizontal, SessionRowLayout.inset).padding(.vertical, 8).contentShape(Rectangle())
                 }.buttonStyle(.plain).disabled(!SessionTools.canFocus(session.tool))
                     .help(SessionTools.canFocus(session.tool) ? L("v3.open") : "")
             }
@@ -170,7 +191,9 @@ struct DashboardQuota: View {
                 }
             }
             QuotaAmountRows(amounts: node.remainingAmounts ?? [])
-            if node.displayWindows.isEmpty && (node.remainingAmounts ?? []).isEmpty {
+            if brand == .antigravity, node.hidden != true, let state = node.samplingSetup, state != .ready {
+                AntigravitySamplingView(state: state)
+            } else if node.displayWindows.isEmpty && (node.remainingAmounts ?? []).isEmpty {
                 Text(L(node.hidden == true ? "quota.loading" : node.noQuota == true ? (brand == .antigravity ? "quota.noAntigravitySample" : "quota.noQuota") : node.ok == true ? "quota.noOther" : "quota.fetchFailed"))
                     .font(.system(size: 11)).foregroundStyle(Theme.ink3)
                 if node.hidden != true, !(brand == .antigravity && node.noQuota == true), let error = node.error, !error.isEmpty {

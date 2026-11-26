@@ -194,10 +194,14 @@ public struct AgentDeckRootView: View {
         self.onScale = { _ in }; self.onContentHeight = { _ in }
         self.previewMode = !liveLayout
         _showSettings = State(initialValue: settingsOpen)
-        _tab = State(initialValue: initialTab)
+        _navigation = State(initialValue: UsageNavigation(tab: initialTab))
     }
 
-    @State private var tab = "overview"
+    @State private var navigation = UsageNavigation()
+    private var tab: String { navigation.tab }
+    @State private var scopedDays = 30
+    @State private var scopedFixture: AnalyticsSnapshot?
+    @State private var originViewport: CGFloat?
     @State private var analyticsDays = 7
     @State private var analyticsRefresh = 0
     @State private var showSettings = false
@@ -235,6 +239,12 @@ public struct AgentDeckRootView: View {
                 if let msg = toastMsg { toastView(msg) }
             }
             .environment(\.minimalMode, minimal)
+            .environment(\.samplingStore, previewMode ? nil : store)
+            .environment(\.openAnalytics, { destination, fixture in
+                scopedDays = 30
+                scopedFixture = fixture
+                navigation.open(destination)
+            })
             .environment(\.adShowInfo, { kind in
                 infoResponder = NSApp.keyWindow?.firstResponder
                 info = kind
@@ -253,6 +263,7 @@ public struct AgentDeckRootView: View {
             if info != nil { info = nil }
             else if showSettings && settingsPage == .agents { settingsPage = .main }
             else if showSettings { showSettings = false }
+            else if navigation.destination != nil { navigation.back() }
             else { onHidePanel() }
         }
         .onChange(of: info) { value in
@@ -264,8 +275,8 @@ public struct AgentDeckRootView: View {
             }
         }
         .onChange(of: fontScale) { onScale($0) }
-        .onChange(of: tab) { store.performanceShowsSessions = $0 == "sessions" && !showSettings }
-        .onChange(of: showSettings) { store.performanceShowsSessions = !$0 && tab == "sessions" }
+        .onChange(of: navigation.selectedTab) { store.performanceShowsSessions = $0 == "sessions" && !showSettings }
+        .onChange(of: showSettings) { store.performanceShowsSessions = !$0 && navigation.selectedTab == "sessions" }
         .environment(\.sessionPerformanceStore, previewMode ? nil : store.performance)
         .environment(\.analyticsFixture, previewMode ? .preview : nil)
         .environment(\.analyticsLive, store.panelVisible && !showSettings && !previewMode)
@@ -409,8 +420,8 @@ public struct AgentDeckRootView: View {
     }
 
     private func tabButton(_ id: String, icon: String, label: String) -> some View {
-        let on = tab == id
-        return Button { tab = id } label: {
+        let on = navigation.selectedTab == id
+        return Button { navigation.select(id) } label: {
             Text(label).font(.system(size: 13, weight: on ? .semibold : .regular))
             .lineLimit(1).minimumScaleFactor(0.7)
             .foregroundStyle(on ? Theme.ink : Theme.ink3)
@@ -424,15 +435,7 @@ public struct AgentDeckRootView: View {
 
     // MARK: 主内容滚动容器（量自然高 → 上报主壳做高度自适应；超屏才滚动）
     private var mainScroll: some View {
-        let content = tabContent
-            .id(tab)
-            .padding(.horizontal, 22)
-            .padding(.vertical, 12)
-            .background(GeometryReader { geo in
-                Color.clear.preference(key: ContentHeightKey.self, value: geo.size.height)
-            })
-
-        return VStack(spacing: 0) {
+        VStack(spacing: 0) {
             VStack(spacing: 4) {
                 header.zIndex(1)
                 if showUpdate { updateBar }
@@ -446,16 +449,49 @@ public struct AgentDeckRootView: View {
             .background(GeometryReader { geo in
                 Color.clear.preference(key: ContentHeightKey.self, value: geo.size.height)
             })
-            if previewMode { content }
-            else {
-                ScrollView {
-                    content.frame(maxWidth: .infinity, alignment: .leading)
-                        .background(PanelInputRegion(.scrollBody))
-                }.scrollIndicators(.hidden)
+            ZStack(alignment: .top) {
+                let covered = navigation.destination != nil
+                pageScroll(visible: !covered) { tabContent.id(tab) }
+                    .background(GeometryReader { geo in
+                        Color.clear.preference(key: OriginViewportKey.self, value: covered ? nil : geo.size.height)
+                    })
+                    .onPreferenceChange(OriginViewportKey.self) { if let height = $0, height > 0 { originViewport = height } }
+                    .frame(height: covered ? originViewport : nil, alignment: .top)
+                    .frame(height: covered ? 0 : nil, alignment: .top)
+                    .opacity(covered ? 0 : 1)
+                    .disabled(covered).allowsHitTesting(!covered).accessibilityHidden(covered)
+                    .environment(\.analyticsLive, !covered && store.panelVisible && !showSettings && !previewMode)
+                if let destination = navigation.destination {
+                    pageScroll(visible: true) {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Button { navigation.back() } label: {
+                                Label(L("common.back"), systemImage: "chevron.left")
+                            }.buttonStyle(.plain)
+                            Text(destination.scopeLabel + " · " + destination.title)
+                                .font(.headline).lineLimit(2).textSelection(.enabled)
+                            AnalyticsDashboard(agents: destination.visibleAgents(in: usageAgents), scope: destination.scope,
+                                               fixture: scopedFixture, days: $scopedDays)
+                        }
+                    }.id(destination)
+                }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .onPreferenceChange(ContentHeightKey.self) { onContentHeight($0) }
+    }
+
+    @ViewBuilder private func pageScroll<Content: View>(visible: Bool, @ViewBuilder _ page: () -> Content) -> some View {
+        let content = page().padding(.horizontal, 22).padding(.vertical, 12)
+            .background(GeometryReader { geo in
+                Color.clear.preference(key: ContentHeightKey.self, value: visible ? geo.size.height : 0)
+            })
+        if previewMode { content }
+        else {
+            ScrollView {
+                content.frame(maxWidth: .infinity, alignment: .leading)
+                    .background(PanelInputRegion(.scrollBody, active: visible))
+            }.scrollIndicators(.hidden)
+        }
     }
 
     // MARK: Tab 内容（自然高；超屏由外层 ScrollView 滚动）
@@ -472,6 +508,7 @@ public struct AgentDeckRootView: View {
                 showClaudeAgent: showClaude, showCodexAgent: showCodex,
                 showQoderAgent: showQoder, showQoderCNAgent: showQoderCN,
                 showAntigravityAgent: store.agentOn("antigravity"),
+                analyticsAgents: usageAgents,
                 quotaAutoRotate: (store.settings["quota_auto_rotate"]?.boolVal ?? true)
                     && !store.menubarRotationActive,
                 quotaRotateSecs: store.settings["quota_rotate_secs"]?.intVal ?? 6,
@@ -481,18 +518,19 @@ public struct AgentDeckRootView: View {
                 onSelectQuota: { store.selectQuotaPage($0, notifyMenubar: true) },
                 onQuotaRotationPauseChange: { store.setQuotaRotationPaused($0) },
                 onFocusActive: focusActive, onFocusDone: focusDone,
-                onViewUsage: { analyticsDays = 1; tab = "usage" })
+                onViewUsage: { analyticsDays = 1; navigation.select("usage") })
         } else if tab == "sessions" {
             sessionsCard
         } else if tab == "projects" {
             ProjectsView(agents: dashboardAgents, analyticsAgents: usageAgents,
-                         isActive: store.panelVisible && !showSettings,
+                         isActive: store.panelVisible && !showSettings && navigation.destination == nil,
                          showActive: store.showActive, refreshSeconds: store.settings["refresh_interval"]?.intVal ?? 30,
                          previewProjects: previewMode ? PreviewRender.dashboardProjects : nil,
                          previewSessions: previewMode ? store.sessions : nil,
                          onOpen: focusActive, onResume: resume)
         } else if tab == "usage" {
-            AnalyticsDashboard(agents: usageAgents, fixture: previewMode ? .preview : nil, days: $analyticsDays)
+            AnalyticsDashboard(agents: usageAgents, fixture: previewMode ? (analyticsDays == 1 ? .todayPreview : .preview) : nil,
+                               days: $analyticsDays, initialBasis: "recorded", initialMode: .trend)
         }
     }
 
@@ -529,7 +567,9 @@ public struct AgentDeckRootView: View {
                 onPageSize: { store.setSessionPageSize($0) })
         }
         .task(id: store.panelVisible && !showSettings) {
-            if store.panelVisible && !showSettings && !previewMode { store.visitSessionList() }
+            if store.panelVisible && !showSettings && navigation.destination == nil && !previewMode {
+                store.visitSessionList()
+            }
         }
         .frame(maxWidth: .infinity, alignment: .top)
         .reveal(delay: 0.05)
@@ -901,6 +941,7 @@ public struct AgentDeckWidgetRootView: View {
                     })
                 .padding(EdgeInsets(top: 18, leading: 10, bottom: 8, trailing: 10))
                 .environment(\.sessionPerformanceStore, store.performance)
+                .environment(\.samplingStore, store)
             }
             .environment(\.minimalMode, minimal)
         }

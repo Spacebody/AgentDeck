@@ -22,8 +22,13 @@ public enum MenubarRotationPolicy {
         return TimeInterval(configuredSeconds)
     }
 
-    public static func shouldDeferPassiveRefresh(isAnimating: Bool) -> Bool {
-        isAnimating
+    public enum Presentation { case replace, roll, finishCurrentRoll }
+
+    public static func presentation(targetID: String?, nextID: String?, isAnimating: Bool,
+                                    reduceMotion: Bool) -> Presentation {
+        guard !reduceMotion, let targetID, let nextID else { return .replace }
+        if targetID != nextID { return .roll }
+        return isAnimating ? .finishCurrentRoll : .replace
     }
 
     public static func shouldAcceptResponse(requestID: Int, lastAppliedRequestID: Int) -> Bool {

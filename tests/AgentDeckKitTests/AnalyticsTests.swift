@@ -22,6 +22,55 @@ private final class AnalyticsFixtureProtocol: URLProtocol {
 }
 
 final class AnalyticsTests: XCTestCase {
+    func testPerformanceShowsMeasuredZeroAndPartialButNotSampleCounters() {
+        let slice = AnalyticsSlice(basis: "recorded", metrics: ["calls": 0, "ttft_samples": 0],
+                                   quality: ["calls": "complete", "latency_ms": "partial", "ttft_samples": "complete"],
+                                   knownSubtotals: ["latency_ms": 42])
+        XCTAssertEqual(slice.measuredPerformanceKeys, ["calls", "latency_ms"])
+        let empty = AnalyticsSlice(basis: "recorded", metrics: ["ttft_samples": 0],
+                                   quality: ["ttft_samples": "complete"], knownSubtotals: nil)
+        XCTAssertTrue(empty.measuredPerformanceKeys.isEmpty)
+    }
+
+    func testPartialComponentIsNotCountedAgainInRemainder() {
+        let slice = AnalyticsSlice(basis: "recorded", metrics: ["tokens_total": 200, "output_tokens": 40],
+                                   quality: ["tokens_total": "complete", "output_tokens": "complete",
+                                             "input_uncached_tokens": "partial"],
+                                   knownSubtotals: ["input_uncached_tokens": 80])
+        XCTAssertEqual(slice.subtotal("input_uncached_tokens"), 80)
+        XCTAssertNil(slice.unclassifiedTokens)
+    }
+
+    func testRankedDetailKeepsExactQueryAndUsesRawGroupIdentity() throws {
+        let row = try JSONDecoder().decode(AnalyticsSlice.self, from: Data(#"{"basis":"recorded","metrics":{},"quality":{},"label":"repo","project":"/work/team/repo","model":"model:actual","agent":"codex"}"#.utf8))
+        let scope = AnalyticsScope.session(agent: "codex", account: "dev", source: "transcript", id: "s1")
+        let q = AnalyticsQuery(days: 7, agents: ["claude","codex"], dimension: "model", basis: "recorded",
+                               scope: scope, now: Date(timeIntervalSince1970: 123456))
+        let project = try XCTUnwrap(AnalyticsGroupFilter(dimension: "project", row: row))
+        let model = try XCTUnwrap(AnalyticsGroupFilter(dimension: "model", row: row))
+        XCTAssertEqual(project.value, "/work/team/repo")
+        XCTAssertEqual(model.value, "model:actual")
+        XCTAssertNil(AnalyticsGroupFilter(dimension: "session", row: row))
+        var params = q.filtered(by: project).filtered(by: model).parameters()
+        let encoded = try XCTUnwrap(params.removeValue(forKey: "group_filters"))
+        XCTAssertEqual(try JSONDecoder().decode([[String?]].self, from: Data(encoded.utf8)),
+                       [["project", "/work/team/repo"], ["model", "model:actual"]])
+        XCTAssertEqual(params, q.parameters())
+    }
+
+    func testUnknownGroupAndDisabledSessionAgentNeverWidenSelection() throws {
+        let row = try JSONDecoder().decode(AnalyticsSlice.self, from: Data(#"{"basis":"recorded","metrics":{},"quality":{},"model":null,"label":"Unknown"}"#.utf8))
+        let filter = try XCTUnwrap(AnalyticsGroupFilter(dimension: "model", row: row))
+        let q = AnalyticsQuery(days: 1, agents: ["claude"], dimension: "agent", basis: "recorded",
+                               scope: .session(agent: "codex", account: "work", source: "transcript", id: "sid"),
+                               groupFilter: filter)
+        let params = q.parameters()
+        XCTAssertEqual(params["agents"], "")
+        XCTAssertEqual(params["account_id"], "work")
+        let encoded = try XCTUnwrap(params["group_filters"])
+        XCTAssertEqual(try JSONDecoder().decode([[String?]].self, from: Data(encoded.utf8)), [["model", nil]])
+    }
+
     func testCalendarDaysUseLocalMidnightAcrossDST() throws {
         let zone = try XCTUnwrap(TimeZone(identifier: "America/Los_Angeles"))
         let date = try XCTUnwrap(ISO8601DateFormatter().date(from: "2025-03-09T20:00:00Z"))

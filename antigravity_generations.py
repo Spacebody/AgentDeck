@@ -119,7 +119,14 @@ def _fallback(db, data):
 
 
 def _duration_ms(data):
-    parts = {f: v for f, w, v, _ in _fields(data) if w == 0 and f in (1, 2)}
+    parts = {}
+    try:
+        for f, w, v, _ in _fields(data):
+            if f not in (1, 2) or w != 0 or f in parts:
+                return None
+            parts[f] = v
+    except ValueError:
+        return None
     sec, ns = parts.get(1, 0), parts.get(2, 0)
     if sec < 86400 and ns < 10**9:
         return sec * 1000 + ns / 10**6
@@ -127,8 +134,12 @@ def _duration_ms(data):
 
 
 def _generation(data):
-    counts, model, stamp, first, stream = {}, None, None, None, None
+    counts, model, stamp = {}, None, None
+    timings = {}
     for field, wire, value, _ in _fields(data):
+        if field in (11, 12):
+            timings[field] = _duration_ms(value) if wire == 2 and field not in timings else None
+            continue
         if wire != 2:
             continue
         if field == 4:
@@ -143,10 +154,6 @@ def _generation(data):
             candidate = bytes(value)
             if re.fullmatch(rb"[A-Za-z0-9][A-Za-z0-9._:/+() -]*", candidate):
                 model = candidate.decode("ascii")
-        elif field == 11:
-            first = _duration_ms(value)
-        elif field == 12:
-            stream = _duration_ms(value)
     if not counts:
         return None
     inp = counts.get(2, 0) + counts.get(5, 0) if 2 in counts or 5 in counts else None
@@ -155,12 +162,19 @@ def _generation(data):
         out = counts[9] + counts[10]
     if out is not None and any(counts.get(k, 0) > out for k in (9, 10)):
         raise ValueError("inconsistent output")
+    first, stream = timings.get(11), timings.get(12)
+    # Output includes reasoning; field 12 times only the streamed reply.
+    reply = counts.get(10)
+    if out is not None and 9 in counts:
+        derived = out - counts[9]
+        reply = derived if reply is None or reply == derived else None
     return dict(observed_at=stamp, input_tokens=inp, input_uncached_tokens=counts.get(2),
                 cache_read_tokens=counts.get(5), output_tokens=out,
                 reasoning_output_tokens=counts.get(9), model=model, calls=1,
                 tokens_total=inp + out if inp is not None and out is not None else None,
                 latency_ms=first + stream if first is not None and stream is not None else None,
-                ttft_ms=first)
+                ttft_ms=first, generation_ms=stream if stream and reply is not None else None,
+                speed_output_tokens=reply)
 
 
 def _recorded(db, scope, sid, cursor, rows, byte_limit):

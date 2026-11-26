@@ -1,7 +1,33 @@
+import AppKit
 import XCTest
 @testable import AgentDeckKit
 
 final class MenubarRotationPolicyTests: XCTestCase {
+    func testDrumFramesMoveTemplateFacesOfDifferentWidthsAndPreserveAlertColor() throws {
+        func face(_ width: CGFloat, ink: NSColor, template: Bool) -> NSImage {
+            let image = NSImage(size: NSSize(width: width, height: 22), flipped: false) { rect in
+                ink.setFill()
+                rect.insetBy(dx: 2, dy: 7).fill()
+                return true
+            }
+            image.isTemplate = template
+            return image
+        }
+        let a = face(22, ink: .black, template: true), b = face(64, ink: .black, template: true)
+        let start = MenubarDrumRenderer.frame(from: a, to: b, progress: 0)
+        let middle = MenubarDrumRenderer.frame(from: a, to: b, progress: 0.5)
+        XCTAssertEqual(middle.size, b.size)
+        XCTAssertTrue(middle.isTemplate)
+        func centerAlpha(_ image: NSImage) throws -> CGFloat {
+            let bitmap = try XCTUnwrap(NSBitmapImageRep(data: try XCTUnwrap(image.tiffRepresentation)))
+            return try XCTUnwrap(bitmap.colorAt(x: bitmap.pixelsWide / 2, y: bitmap.pixelsHigh / 2)).alphaComponent
+        }
+        XCTAssertGreaterThan(try centerAlpha(start), 0.9)
+        XCTAssertLessThan(try centerAlpha(middle), 0.1)
+        let alert = face(64, ink: .red, template: false)
+        XCTAssertFalse(MenubarDrumRenderer.frame(from: a, to: alert, progress: 0.5).isTemplate)
+    }
+
     func testOnlySuccessfulHTTPStatusCanApplyMenubarSnapshot() {
         XCTAssertTrue(MenubarRotationPolicy.isSuccessfulHTTPStatus(200))
         XCTAssertTrue(MenubarRotationPolicy.isSuccessfulHTTPStatus(299))
@@ -45,13 +71,38 @@ final class MenubarRotationPolicyTests: XCTestCase {
     }
 
     func testPassiveRefreshWaitsForAnimationAndCompletionUsesLatestItem() {
-        XCTAssertTrue(MenubarRotationPolicy.shouldDeferPassiveRefresh(isAnimating: true))
-        XCTAssertFalse(MenubarRotationPolicy.shouldDeferPassiveRefresh(isAnimating: false))
+        XCTAssertEqual(MenubarRotationPolicy.presentation(targetID: "same", nextID: "same",
+                       isAnimating: true, reduceMotion: false), .finishCurrentRoll)
+        XCTAssertEqual(MenubarRotationPolicy.presentation(targetID: "same", nextID: "same",
+                       isAnimating: false, reduceMotion: false), .replace)
 
         var items = ["codex 10%", "qoder 20%"]
         items[1] = "qoder 21%"
         XCTAssertEqual(MenubarRotationPolicy.currentItem(items: items, currentIndex: 1),
                        "qoder 21%")
+    }
+
+    func testAllAgentAndAccountChangesRollEvenWhenInterruptingAnotherRoll() {
+        let ids = AgentSettingsCatalog.ids.map { $0 + "::default" } + ["codex::work"]
+        for from in ids {
+            for to in ids where from != to {
+                for active in [true, false] {
+                    XCTAssertEqual(MenubarRotationPolicy.presentation(targetID: from, nextID: to,
+                                   isAnimating: active, reduceMotion: false), .roll)
+                    XCTAssertEqual(MenubarRotationPolicy.presentation(targetID: from, nextID: to,
+                                   isAnimating: active, reduceMotion: true), .replace)
+                }
+            }
+        }
+    }
+
+    func testStartupFallbackAndEnablingReduceMotionAreImmediate() {
+        for (from, to) in [(nil, "codex"), ("codex", nil), ("codex", "codex")] as [(String?, String?)] {
+            XCTAssertEqual(MenubarRotationPolicy.presentation(targetID: from, nextID: to,
+                           isAnimating: true, reduceMotion: true), .replace)
+        }
+        XCTAssertEqual(MenubarRotationPolicy.presentation(targetID: nil, nextID: "codex",
+                       isAnimating: false, reduceMotion: false), .replace)
     }
 
     func testAnimationCompletionHandlesRemovedOrEmptyItemList() {

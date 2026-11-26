@@ -101,7 +101,7 @@ struct SessionsView: View {
                     DashboardHeading(text: L("active.running", ["n": "\(filteredActive.count)"]))
                     ForEach(Array(filteredActive.enumerated()), id: \.offset) { _, active in
                         if let session = previewSessions.first(where: { $0.rowKey == active.indexedRowKey }) {
-                            sessionRow(session, onOpen: SessionTools.canFocus(active.tool) ? { onOpenActive(active) } : nil)
+                            sessionRow(session, active: active, onOpen: SessionTools.canFocus(active.tool) ? { onOpenActive(active) } : nil)
                         } else {
                             DashboardActiveList(sessions: [active], showsHeading: false, onOpen: onOpenActive)
                         }
@@ -160,8 +160,8 @@ struct SessionsView: View {
         return sessions + active.compactMap(\.indexedSession).filter { keys.insert($0.rowKey).inserted }
     }
 
-    private func sessionRow(_ s: SessionItem, onOpen: (() -> Void)? = nil) -> some View {
-        SessionRow(session: s, expanded: expandedKey == s.rowKey,
+    private func sessionRow(_ s: SessionItem, active: ActiveSession? = nil, onOpen: (() -> Void)? = nil) -> some View {
+        SessionRow(session: s, active: active, expanded: expandedKey == s.rowKey,
                    preview: previewMtimes[s.rowKey] == s.mtime ? previews[s.rowKey] : nil,
                    onToggle: { toggle(s) }, onResume: { onResume(s) }, onCopy: { onCopy(s) }, onPin: { onPin(s) },
                    onRelocate: { onRelocate(s) }, onForgetPath: { onForgetPath(s) }, onOpen: onOpen)
@@ -365,6 +365,7 @@ struct SessionsView: View {
 // MARK: - 会话行
 private struct SessionRow: View {
     let session: SessionItem
+    let active: ActiveSession?
     let expanded: Bool
     let preview: [PreviewMsg]?
     var onToggle: () -> Void = {}
@@ -376,24 +377,34 @@ private struct SessionRow: View {
     var onOpen: (() -> Void)? = nil
 
     @State private var hovering = false
-    private var live: Bool { Date().timeIntervalSince1970 - session.mtime < 120 }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 9) {
-                SessionIcon(tool: session.tool, fallback: .claude, badgeSize: 26)
+            HStack(alignment: .top, spacing: 9) {
+                SessionIcon(tool: session.tool, fallback: .claude, badgeSize: SessionRowLayout.badge)
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 4) {
-                        if live { Circle().fill(Theme.ok).frame(width: 5, height: 5).shadow(color: Theme.ok, radius: 3).pulse(1.6) }   // .livedot 呼吸
                         Text(session.title ?? "—").font(.system(size: 11)).foregroundStyle(Theme.ink).lineLimit(1)
                     }
                     Text(meta).font(.system(size: 8.5)).foregroundStyle(Theme.ink3).lineLimit(1)
-                    SessionSpeedView(request: session.performanceRequest)
-                }
-                Spacer(minLength: 6)
-                if hovering || expanded { actions.fixedSize(horizontal: true, vertical: false) }
+                }.frame(maxWidth: .infinity, alignment: .leading)
+                ZStack(alignment: .trailing) {
+                    if hovering || expanded { actions }
+                    else if let active {
+                        VStack(alignment: .trailing, spacing: 3) {
+                            if let status = active.status, ["busy", "idle"].contains(status) {
+                                SessionActivityLabel(status: status, tool: active.tool)
+                            }
+                            if active.status == "busy" {
+                                SessionSpeedView(request: active.indexedSession?.performanceRequest ?? active.performanceRequest,
+                                                 compactWidth: nil, currentTurnOnly: true)
+                            }
+                        }
+                    }
+                }.frame(width: SessionRowLayout.trailing, alignment: .trailing)
             }
-            .padding(.horizontal, 9).padding(.vertical, 8)
+            .frame(minHeight: 34, alignment: .topLeading)
+            .padding(.horizontal, SessionRowLayout.inset).padding(.vertical, 8)
             .contentShape(Rectangle())
             .onTapGesture { onToggle() }
 
@@ -401,11 +412,10 @@ private struct SessionRow: View {
                 AnalyticsDetailLink(scope: AnalyticsScope(session), title: session.title ?? session.id,
                                     agents: [session.tool])
                     .frame(maxWidth: .infinity, alignment: .leading).padding(.leading, 35)
-                SessionSpeedView(request: session.performanceRequest, expanded: true)
-                    .padding(.leading, 35).padding(.trailing, 9)
                 previewBox.padding(.leading, 35).padding(.trailing, 4).padding(.bottom, 6)
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: Theme.rMd, style: .continuous)
             .fill(session.pinned == true ? Color(hex: 0xffd479).opacity(0.045)
                   : (hovering ? Color.white.opacity(0.06) : .clear)))
@@ -443,13 +453,14 @@ private struct SessionRow: View {
                     .foregroundStyle(session.pinned == true ? Color(hex: 0xffd479) : Theme.ink2)
             }.buttonStyle(.plain)
             if onOpen != nil || session.canResume {
+                let title = L(onOpen != nil ? "v3.open" : session.source == "qoder_app" ? "session.open" : "session.resume")
                 Button(action: onOpen ?? onResume) {
-                    Text(L(onOpen != nil ? "v3.open" : session.source == "qoder_app" ? "session.open" : "session.resume"))
-                        .font(.system(size: 9.5, weight: .semibold)).foregroundStyle(Theme.ink)
-                        .padding(.horizontal, 11).frame(height: 25)
+                    Image(systemName: onOpen != nil || session.source == "qoder_app" ? "arrow.up.right" : "play.fill")
+                        .font(.system(size: 11, weight: .medium)).foregroundStyle(Theme.ink)
+                        .frame(width: 28, height: 25)
                         .background(Capsule().fill(Color.white.opacity(0.10)))
                         .overlay(Capsule().strokeBorder(Theme.edgeHi))
-                }.buttonStyle(.plain)
+                }.buttonStyle(.plain).help(title).accessibilityLabel(title)
             }
             if session.canCopyCommand {
                 Button(action: onCopy) {

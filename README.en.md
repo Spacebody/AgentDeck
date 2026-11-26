@@ -25,13 +25,13 @@
 </p>
 <p align="center"><sub>Overview: today’s tokens, account quotas and active sessions</sub></p>
 <p align="center">
-  <img src="docs/screenshots/usage-en.png" width="360" alt="AgentDeck 3.0 usage">
+  <img src="docs/screenshots/v4-usage-preview-zh.png" width="360" alt="AgentDeck 4.0 usage trends in Chinese">
 </p>
-<p align="center"><sub>Usage: compare 7 or 30 days by agent and project</sub></p>
+<p align="center"><sub>Usage trends and group rankings (Chinese interface shown)</sub></p>
 
 AgentDeck integrates quota monitoring, session management, and usage analytics for multiple agents into a single menu-bar panel. The backend is a pure standard-library Python daemon, and the macOS client is a native AppKit + SwiftUI app in a SwiftPM package.
 
-The local `v4` preview adds usage analytics from native client records. Public downloads remain on the stable release. See the [analytics notes](docs/v4-analytics.md) for source coverage and measurement boundaries.
+Version 4.0.0 adds local usage trends, breakdowns, and performance for today, the last 7 days, or the last 30 days, with CSV export. Recorded usage and sampled usage are shown separately. The [analytics notes](docs/v4-analytics.md) explain which metrics each source can report and when a value is unavailable.
 
 ## Design principles
 

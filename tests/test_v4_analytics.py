@@ -193,6 +193,57 @@ class StoreTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.store.query(dict(period="forever"))
 
+    def test_group_detail_intersects_scope_and_uses_exact_nullable_values(self):
+        self.write("facts.log",fact("1",2,project="/one/repo",model=None),
+                   fact("2",3,project="/two/repo",model=None),fact("3",5,project="/one/repo",model="null"),
+                   fact("4",7,project=None,agent="codex"))
+        self.scan()
+        filters=json.dumps([["project","/one/repo"],["model",None]])
+        params=dict(group_filters=filters,agents="claude",account_id="default",session_id="session",
+                    source_kind="transcript",basis="recorded",dimension="model")
+        page=self.query(**params)
+        self.assertEqual(page["summary"][0]["metrics"]["tokens_total"],2)
+        self.assertIsNone(page["rows"][0]["model"])
+        csv_rows=list(csv.DictReader(io.StringIO(self.store.export_csv(dict(self.params,**params)))))
+        self.assertEqual([r["tokens_total"] for r in csv_rows],["2"])
+        self.assertFalse(self.query(**params,project="/two/repo")["rows"])
+        for field,value,total in (("model","null",5),("project",None,7),("agent","claude",10)):
+            self.assertEqual(self.query(group_filters=json.dumps([[field,value]]))["summary"][0]["metrics"]["tokens_total"],total)
+        self.assertFalse(self.query(agents="",group_filters='[["agent","codex"]]')["rows"])
+        self.assertFalse(self.query(agents="claude",group_filters='[["agent","codex"]]')["rows"])
+        for invalid in ('[["bad","x"]]','[["agent",2]]','["model"]','null'):
+            with self.assertRaises(ValueError):
+                self.query(group_filters=invalid)
+
+    def test_ranked_cost_matches_detail_and_csv_without_promoting_unknown_overview(self):
+        self.write("facts.log",fact("p",model="m",project="/a",cost_usd=1,
+                   input_basis="uncached",input_tokens=10,output_tokens=2,cache_read_tokens=0,
+                   cache_write_tokens=0))
+        self.scan()
+        amounts={"cost_usd":1,"api_equivalent_usd":.25}
+        with patch("v4_pricing.api_equivalent_usd",return_value=.25):
+            for dim,value in (("model","m"),("project","/a"),("agent","claude")):
+                base=dict(agents="claude,codex",dimension=dim)
+                overview=self.query(**base)
+                detail=dict(base,group_filters=json.dumps([[dim,value]]))
+                result=self.query(**detail)
+                exported,=csv.DictReader(io.StringIO(self.store.export_csv(dict(self.params,**detail))))
+                for metric,amount in amounts.items():
+                    for row in (overview["rows"][0],result["rows"][0],result["summary"][0],result["series"][0]):
+                        self.assertEqual((row["metrics"][metric],row["quality"][metric],row["known_subtotals"][metric]),
+                                         (amount,"complete",amount))
+                    self.assertEqual((float(exported[metric]),exported["quality_"+metric],float(exported["known_"+metric])),
+                                     (amount,"complete",amount))
+                    for row in (overview["summary"][0],overview["series"][0]):
+                        self.assertIsNone(row["metrics"][metric])
+                        self.assertEqual((row["quality"][metric],row["known_subtotals"][metric]),("partial",amount))
+            self.write("facts.log",fact("q",model="m",agent="codex"),mode="a")
+            self.scan()
+            detail=self.query(agents="claude,codex",dimension="model",group_filters='[["model","m"]]')
+            for row in (detail["summary"][0],detail["series"][0],detail["rows"][0]):
+                self.assertIsNone(row["metrics"]["cost_usd"])
+                self.assertEqual((row["quality"]["cost_usd"],row["known_subtotals"]["cost_usd"]),("partial",1))
+
     def test_discovery_wake_never_starves_first_round(self):
         self.write("a.log",fact("a"))
         self.write("b.log",fact("b"))
@@ -200,6 +251,138 @@ class StoreTests(unittest.TestCase):
         self.scan()
         self.assertEqual(self.total(),20)
         self.assertEqual({s for s,pos in self.provider.reads if pos==0},{"a.log","b.log"})
+
+    def test_weighted_speed_interval_precedence_wait_counts_and_csv(self):
+        self.write("calls.log",
+                   fact("a",output_tokens=100,generation_ms=1000,latency_ms=12000,ttft_ms=2000),
+                   fact("b",output_tokens=200,latency_ms=5000,ttft_ms=1000,speed_includes_wait=True),
+                   fact("c",output_tokens=100,latency_ms=3000,speed_includes_wait=True),
+                   fact("d",output_tokens=50,generation_ms=1000,speed_includes_wait=True))
+        self.scan()
+        page=self.query()
+        # (100+200+100+50)/(1+4+3+1) rather than mean(per-request TPS).
+        for row in (page["summary"][0],page["series"][0],page["rows"][0]):
+            self.assertEqual(row["metrics"]["speed_output_tps"],50)
+            self.assertEqual(row["metrics"]["speed_samples"],4)
+            self.assertEqual(row["metrics"]["speed_wait_samples"],2)
+            self.assertEqual(row["quality"]["speed_output_tps"],"complete")
+        csv_row,=csv.DictReader(io.StringIO(self.store.export_csv(self.params)))
+        self.assertEqual(float(csv_row["speed_output_tps"]),50)
+        self.assertEqual(csv_row["speed_wait_samples"],"2")
+        self.write("calls.log",fact("e",output_tokens=300,latency_ms=1000),mode="a")
+        self.scan()
+        row=self.query()["summary"][0]
+        self.assertEqual(row["metrics"]["output_tokens"],750)
+        self.assertEqual(row["metrics"]["latency_samples"],4)
+        self.assertIsNone(row["metrics"]["speed_output_tps"])
+        self.assertEqual(row["quality"]["speed_output_tps"],"partial")
+        self.assertEqual(row["known_subtotals"]["speed_output_tps"],50)
+        self.assertEqual(row["metrics"]["speed_samples"],4)
+
+    def test_speed_sample_boundaries_and_invalid_evidence(self):
+        for n,ms,accepted in ((19,1000,False),(20,200,False),(20,201,True),
+                              (20,1800000,True),(20,1800001,False),(3000,1000,True),(3001,1000,False)):
+            with self.subTest(n=n,ms=ms):
+                _, f=v._fact(fact("x",output_tokens=n,generation_ms=ms,latency_ms=2000,speed_includes_wait=True))
+                self.assertEqual(v._speed_sample(f) is not None,accepted)
+        for fields in (dict(latency_ms=2000),dict(ttft_ms=500),dict(latency_ms=500,ttft_ms=600),
+                       dict(latency_ms=500,speed_includes_wait="true"),dict(generation_ms=True)):
+            _, f=v._fact(fact("x",output_tokens=30,**fields))
+            self.assertIsNone(v._speed_sample(f))
+
+    def test_previous_parser_revision_replays_speed_fields(self):
+        self.write("calls.log",fact("x",output_tokens=80,generation_ms=400))
+        self.scan()
+        with closing(sqlite3.connect(self.store.path)) as db, db:
+            db.execute("PRAGMA user_version=2")
+            db.execute("UPDATE facts SET body=json_remove(body,'$.generation_ms')")
+        self.provider.reads.clear()
+        self.scan()
+        self.assertEqual(self.provider.reads[0],("calls.log",0))
+        self.assertEqual(self.query()["summary"][0]["metrics"]["speed_output_tps"],200)
+
+    def test_claude_durable_counter_timing_pair_after_replay_and_growth(self):
+        def sample(n,end,last,**timing):
+            return fact("id",observed_at=100,output_tokens=n,output_observed_at=end,
+                        last_observed_at=last,**timing)
+        self.write("owner.log",sample(50,120,125,generation_ms=500,latency_ms=600,ttft_ms=100))
+        self.scan()
+        self.write("owner.log",sample(50,300,300,generation_ms=2000,speed_includes_wait=True),
+                   sample(40,110,400,generation_ms=450,speed_output_tokens=20),mode="a")
+        self.scan()
+        def metrics():
+            return self.query()["summary"][0]["metrics"]
+        self.assertEqual((metrics()["output_tokens"],metrics()["speed_output_tps"],metrics()["latency_ms"],
+                          metrics()["ttft_ms"],metrics()["speed_wait_samples"]),(50,100,600,100,0))
+        self.write("owner.log",sample(80,450,450),mode="a")
+        self.scan()
+        self.assertEqual(metrics()["output_tokens"],80)
+        for k in ("speed_output_tps","latency_ms","ttft_ms"):
+            self.assertIsNone(metrics()[k])
+        self.write("owner.log",sample(80,500,500,generation_ms=400),mode="a")
+        self.scan()
+        self.assertIsNone(metrics()["speed_output_tps"],"later unchanged counter is not a timed generation")
+        self.write("owner.log",sample(80,440,550,generation_ms=400),mode="a")
+        self.scan()
+        self.assertEqual(metrics()["speed_output_tps"],200)
+
+    def test_live_copy_selection_uses_counter_endpoint_not_replay_stamp(self):
+        self.write("a.log",fact("id",observed_at=80,output_tokens=30,output_observed_at=100,
+                                last_observed_at=700,generation_ms=3000))
+        self.write("b.log",fact("id",observed_at=110,output_tokens=50,output_observed_at=140,
+                                last_observed_at=150,generation_ms=500))
+        self.write("c.log",fact("id",observed_at=90,output_tokens=50,output_observed_at=160,
+                                last_observed_at=600,generation_ms=1000))
+        self.scan()
+        def metrics():
+            return self.query(start=80,end=81)["summary"][0]["metrics"]
+        self.assertEqual((metrics()["calls"],metrics()["output_tokens"],metrics()["speed_output_tps"]),(1,50,100))
+        self.write("d.log",fact("id",observed_at=115,output_tokens=50,output_observed_at=130))
+        self.scan()
+        self.assertIsNone(metrics()["speed_output_tps"])
+        (self.root/"d.log").unlink()
+        (self.root/"b.log").unlink()
+        self.scan()
+        self.assertEqual((metrics()["calls"],metrics()["output_tokens"],metrics()["speed_output_tps"]),(1,50,50))
+
+    def test_real_transcript_replay_after_response_cache_eviction(self):
+        from usage_claude_codex import Provider as TranscriptProvider
+        log=self.root/"projects"/"p"/"main.jsonl"
+        log.parent.mkdir(parents=True)
+        def response(mid,second):
+            return dict(type="assistant",sessionId="s",parentUuid="u",timestamp=second,
+                        message=dict(model=mid,id=mid,usage=dict(input_tokens=0,output_tokens=100,
+                                     cache_read_input_tokens=0,cache_creation_input_tokens=0)))
+        trigger="2026-11-25T00:00:00Z"
+        with log.open("w") as stream:
+            print(json.dumps(dict(type="user",sessionId="s",uuid="u",timestamp=trigger,message={})),file=stream)
+            for key in ["target"]+[f"other{i}" for i in range(40)]:
+                print(json.dumps(response(key,"2026-11-25T00:00:01Z")),file=stream)
+        def read():
+            provider=TranscriptProvider("claude",lambda:[{"id":"default","path":self.root}])
+            with closing(v.AnalyticsStore(self.root/"real.sqlite",[provider])) as store:
+                with closing(store._writer()) as db:
+                    store._scan(db)
+                self.assertEqual(store.health()["errors"],0)
+                return store.query(dict(start=1795564800,end=1795651200,model="target"))["summary"][0]["metrics"]
+        self.assertEqual(read()["speed_output_tps"],100)
+        with log.open("a") as stream:
+            print(json.dumps(response("target","2026-11-25T01:00:01Z")),file=stream)
+        metrics=read()
+        self.assertEqual((metrics["calls"],metrics["speed_samples"],metrics["latency_ms"],metrics["speed_output_tps"]),
+                         (1,1,1000,100))
+
+    def test_stream_numerator_override_is_nullable_and_never_changes_reported_output(self):
+        self.write("ag.log",*(fact(str(i),agent="antigravity",generation_ms=1000,
+                                   output_tokens=900,**fields) for i,fields in enumerate((
+                                       {"speed_output_tokens":100},{"speed_output_tokens":None},
+                                       {"speed_output_tokens":True},{"speed_output_tokens":901},{}))))
+        self.scan()
+        row=self.query()["summary"][0]
+        self.assertEqual(row["metrics"]["output_tokens"],4500)
+        self.assertEqual(row["metrics"]["speed_samples"],2)
+        self.assertEqual(row["known_subtotals"]["speed_output_tps"],500)
+        self.assertEqual(row["quality"]["speed_output_tps"],"partial")
 
     def test_pinned_wal_under_continuous_updates_releases_after_completion(self):
         path=self.root/"events.db"

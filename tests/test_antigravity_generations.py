@@ -99,8 +99,33 @@ class GenerationsTests(unittest.TestCase):
                           first["reasoning_output_tokens"], first["observed_at"], first["latency_ms"]),
                          (13, 12, 25, 7, TS, 1001))
         self.assertEqual((second["observed_at"], second["tokens_total"]), (TS+1, 0))
+        self.assertEqual((first["generation_ms"], first["speed_output_tokens"]), (1000, 5))
+        self.assertIsNone(second["generation_ms"])
         self.assertNotIn(private, json.dumps(facts))
         self.assertNotIn(str(self.home), json.dumps(facts))
+
+    def test_stream_pairs_with_reply_not_total_or_first_token_wait(self):
+        timing = field(12, field(2, 2000000))
+        for counts, reply in [([(3, 12), (9, 8)], 4), ([(10, 5)], 5),
+                              ([(9, 6), (10, 0)], 0), ([(3, 5)], None),
+                              ([(3, 10), (9, 9), (10, 9)], None)]:
+            with self.subTest(counts=counts):
+                fact = ag._generation(record(*counts, ts=TS) + timing)
+                self.assertEqual(fact["speed_output_tokens"], reply)
+                self.assertEqual(fact["generation_ms"], None if reply is None else 2)
+                self.assertFalse(fact.get("speed_includes_wait"))
+                self.assertIsNone(fact["latency_ms"])
+
+    def test_invalid_or_ambiguous_stream_does_not_discard_usage(self):
+        good = field(12, field(1, 1))
+        for timing in [b"", field(12, b""), field(12, field(1, 86400)),
+                       field(12, field(2, 10**9)), field(12, b"\xff"), good + good,
+                       field(12, field(1, 1) + field(1, 2)), field(12, field(3, 2))]:
+            with self.subTest(timing=timing):
+                fact = ag._generation(record((3, 9), (10, 9), ts=TS) + field(11, field(1, 2)) + timing)
+                self.assertIsNone(fact["generation_ms"])
+                self.assertEqual(fact["output_tokens"], 9)
+                self.assertEqual(fact["ttft_ms"], 2000)
 
     def test_cli_live_wal_and_late_metadata(self):
         db = self.database("antigravity-cli")

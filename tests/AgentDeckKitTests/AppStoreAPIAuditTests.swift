@@ -64,6 +64,85 @@ private final class AuditHeldRequest {
 }
 
 final class AppStoreAPIAuditTests: XCTestCase {
+    @MainActor func testAntigravityEnableAndFirstSampleOnOrdinaryQuotaPoll() async throws {
+        let enable = expectation(description: "single boot-bound enable")
+        enable.assertForOverFulfill = true
+        let client = api { stub in
+            switch stub.request.url?.path {
+            case "/api/health": stub.respond(#"{"instance_id":"boot-one"}"#)
+            case "/api/antigravity/enable":
+                XCTAssertEqual(stub.request.httpMethod, "POST")
+                var body = stub.request.httpBody ?? Data()
+                if let stream = stub.request.httpBodyStream {
+                    stream.open(); defer { stream.close() }
+                    var bytes = [UInt8](repeating: 0, count: 512)
+                    let n = stream.read(&bytes, maxLength: bytes.count)
+                    if n > 0 { body.append(contentsOf: bytes.prefix(n)) }
+                }
+                XCTAssertEqual((try? JSONSerialization.jsonObject(with: body)) as? [String: String],
+                               ["proof": "0d9bce3d554c395f3e49c2e45d00a1917120022e18c0d5bc85f514cac906f13d"])
+                enable.fulfill()
+                stub.respond(#"{"ok":true,"setup_state":"waiting"}"#)
+            case "/api/quota":
+                XCTAssertNil(stub.request.url?.query)
+                stub.respond(#"{"antigravity":{"ok":true,"setup_state":"ready","windows":[{"id":"model","label":"Model","used_percent":25}]}}"#)
+            default: stub.respond("{}")
+            }
+        }
+        let store = AppStore(api: client, samplingCredential: { String(repeating: "a", count: 64) })
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        store.quota = try decoder.decode(QuotaResponse.self, from: Data(
+            #"{"antigravity":{"ok":false,"setup_state":"available","no_quota":true}}"#.utf8))
+        store.setPerformanceVisible("panel", true)
+        defer { store.setPerformanceVisible("panel", false); store.stop() }
+        await store.enableAntigravitySampling()
+        XCTAssertEqual(store.antigravitySetupReply, .waiting)
+        await store.enableAntigravitySampling()
+        await fulfillment(of: [enable], timeout: 1)
+        let refreshed = await store.refresh()
+        XCTAssertTrue(refreshed)
+        XCTAssertNil(store.antigravitySetupReply)
+        XCTAssertEqual(store.quota?.antigravity?.samplingSetup, .ready)
+        XCTAssertEqual(store.quota?.antigravity?.displayWindows.first?.usedPercent, 25)
+    }
+
+    @MainActor func testAntigravityRefusalAndNonActionableStates() async throws {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        for raw in ["conflict", "cli_missing"] {
+            let store = AppStore(api: api { stub in
+                if stub.request.url?.path == "/api/health" { stub.respond(#"{"instance_id":"x"}"#) }
+                else { stub.respond("{\"ok\":false,\"setup_state\":\"\(raw)\"}") }
+            }, samplingCredential: { String(repeating: "a", count: 64) })
+            store.quota = try decoder.decode(QuotaResponse.self, from: Data(
+                #"{"antigravity":{"ok":false,"setup_state":"available"}}"#.utf8))
+            await store.enableAntigravitySampling()
+            XCTAssertEqual(store.antigravitySetupReply?.rawValue, raw)
+            XCTAssertFalse(store.antigravitySetupFailed)
+        }
+        let store = AppStore(api: api { stub in XCTFail("unexpected request"); stub.respond("{}") })
+        for raw in ["conflict", "cli_missing", "waiting", "ready", "future_state"] {
+            store.quota = try decoder.decode(QuotaResponse.self, from: Data(
+                "{\"antigravity\":{\"ok\":false,\"setup_state\":\"\(raw)\"}}".utf8))
+            await store.enableAntigravitySampling()
+        }
+    }
+
+    func testAntigravityCapabilityFileFailsClosed() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let key = dir.appendingPathComponent("key"), link = dir.appendingPathComponent("link")
+        let token = String(repeating: "b", count: 64)
+        try (token + "\n").write(to: key, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: key.path)
+        XCTAssertEqual(try AntigravitySetupCredential.read(from: key), token)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: key)
+        XCTAssertThrowsError(try AntigravitySetupCredential.read(from: link))
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: key.path)
+        XCTAssertThrowsError(try AntigravitySetupCredential.read(from: key))
+    }
     @MainActor func testIndexDemandAppearsOnlyOnInteractiveRequests() async {
         let list = expectation(description: "user visited session list")
         let poll = expectation(description: "background session poll")

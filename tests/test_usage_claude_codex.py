@@ -108,6 +108,109 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual((last["tokens_total"], last["first_observed_at"], last["last_observed_at"]),
                          (24, EPOCH, EPOCH + 2))
 
+    def test_claude_replay_preserves_timing_paired_with_retained_output(self):
+        user = dict(type="user", uuid="u", timestamp=TS, message=dict(content="PRIVATE"))
+        attachment = dict(type="attachment", uuid="a", parentUuid="u")
+        thinking = dict(claude(output_tokens=1), parentUuid="a", requestId="r",
+                        timestamp="2026-11-25T00:00:03Z", thinkingDurationMs=2000)
+        end = dict(claude(output_tokens=19), requestId="r", timestamp="2026-11-25T00:00:06Z")
+        pair = self.source("claude", [user, attachment, thinking, end])
+        facts, cursor = self.read(pair, budget=dict(max_bytes=4096, max_rows=1))
+        with Path(pair[1]["path"]).open("a") as f:
+            print(json.dumps(dict(end, timestamp="2026-11-25T01:00:06Z")), file=f)
+        replay, _ = self.read(pair, cursor)
+        for f in (facts[-1], replay[0]):
+            self.assertEqual((f["generation_ms"], f["latency_ms"], f["ttft_ms"], f["output_tokens"]),
+                             (5000, 6000, 1000, 19))
+            self.assertIs(f["speed_includes_wait"], False)
+            self.assertEqual(f["output_observed_at"], EPOCH + 6)
+        self.assertEqual(facts[-1]["event_key"], replay[0]["event_key"])
+        self.assertGreater(replay[0]["last_observed_at"], facts[-1]["last_observed_at"])
+        self.assertNotIn("PRIVATE", json.dumps(cursor))
+
+    def test_claude_tool_result_trigger_not_whole_turn_or_unrelated_user(self):
+        tool = dict(type="user", uuid="tool", timestamp="2026-11-25T00:00:05Z",
+                    message=dict(content=[dict(type="tool_result")]))
+        reply = dict(claude(), parentUuid="tool", timestamp="2026-11-25T00:00:07Z")
+        facts, _ = self.read(self.source("claude", [tool, reply, dict(claude("other"), parentUuid="missing")]))
+        self.assertEqual(facts[0]["generation_ms"], 2000)
+        self.assertTrue(facts[0]["speed_includes_wait"])
+        self.assertNotIn("ttft_ms", facts[0])
+        self.assertNotIn("generation_ms", facts[1])
+
+    def test_codex_only_times_single_verified_delta(self):
+        start = event("task_started", turn_id="t")
+        output = dict(event("item_completed", item=dict(type="AgentMessage"), started_at_ms=EPOCH*1000+1000,
+                            completed_at_ms=EPOCH*1000+2000), timestamp="2026-11-25T00:00:02Z")
+        one = dict(count(usage(10, 4), usage(10, 4)), timestamp="2026-11-25T00:00:04Z")
+        tool = dict(row("response_item", dict(type="function_call_output", output="PRIVATE")),
+                    timestamp="2026-11-25T00:00:08Z")
+        multi = dict(count(usage(30, 12), usage(10, 4)), timestamp="2026-11-25T00:00:10Z")
+        idle = dict(count(usage(40, 16), usage(10, 4)), timestamp="2026-11-25T00:00:12Z")
+        wait = dict(count(usage(50, 20), usage(10, 4)), timestamp="2026-11-25T00:00:16Z")
+        last_output = dict(event("item_completed", item=dict(type="AgentMessage"), completed_at_ms=EPOCH*1000+15000),
+                           timestamp="2026-11-25T00:00:15Z")
+        pair = self.source("codex", [meta(), start, output, one, one, tool, multi, idle,
+                                     dict(tool, timestamp="2026-11-25T00:00:13Z"), last_output, wait])
+        facts, cursor = self.read(pair, budget=dict(max_rows=1,max_bytes=4096))
+        self.assertEqual(facts, self.read(pair)[0])
+        a,b,c,d = facts
+        self.assertEqual((a["generation_ms"], a["latency_ms"], a["ttft_ms"]), (1000,2000,1000))
+        self.assertFalse(a["speed_includes_wait"])
+        for f in (b,c):
+            self.assertFalse({"latency_ms","generation_ms","ttft_ms","speed_includes_wait"} & f.keys())
+        self.assertEqual((d["generation_ms"], d["latency_ms"]), (2000,2000))
+        self.assertTrue(d["speed_includes_wait"])
+        self.assertNotIn("PRIVATE", json.dumps(cursor))
+
+    def test_codex_request_timing_boundary_ambiguity(self):
+        start = event("task_started", turn_id="a")
+        def item(turn=None, name="AgentMessage"):
+            p = dict(item=dict(type=name), started_at_ms=EPOCH*1000+1000, completed_at_ms=EPOCH*1000+1800)
+            if turn:
+                p["turn_id"] = turn
+            return dict(event("item_completed", **p), timestamp="2026-11-25T00:00:02Z")
+        tally = dict(count(usage(10,4),usage(10,4)), timestamp="2026-11-25T00:00:30Z")
+        foreign = dict(tally, payload=dict(tally["payload"], turn_id="b"))
+        for records in ([row("turn_context",dict(turn_id="a")), item(), tally],
+                        [start, event("task_complete", turn_id="a"), item(), tally],
+                        [start, row("turn_context",dict(turn_id="b")), item(), tally],
+                        [start, item("b"), tally], [start, item(), foreign],
+                        [start, item(), item(name="Reasoning"), tally],
+                        [start, item(), item(name="CommandExecution"), tally],
+                        [start, item(), row("response_item",dict(type="function_call_output")), tally],
+                        [start, item(), dict(tally, payload=dict(tally["payload"],
+                         info=dict(total_token_usage=usage(10,4),last_token_usage=usage(5,2))))]):
+            facts,_ = self.read(self.source("codex", [meta(), *records]))
+            self.assertTrue(all("generation_ms" not in f for f in facts))
+        facts,_ = self.read(self.source("codex", [meta(),start,item(),foreign]))
+        self.assertEqual((facts[0]["output_tokens"],facts[0]["turn_id"],facts[0]["model"],facts[0]["project"]),
+                         (4,"b",None,None))
+        # A foreign tool's trigger does not shorten the actual request.
+        trigger = dict(event("user_message",turn_id="b"), timestamp="2026-11-25T00:00:01Z")
+        facts,_ = self.read(self.source("codex", [meta(),start,trigger,item(),tally]))
+        self.assertEqual((facts[0]["generation_ms"],facts[0]["latency_ms"]), (800,1800))
+        for name, reasoning, valid in [("Reasoning", 1, False), ("AgentMessage", 1, False),
+                                       ("Reasoning", 4, True)]:
+            vector = usage(10,4,r=reasoning)
+            split = dict(count(vector,vector),timestamp=tally["timestamp"])
+            facts,_ = self.read(self.source("codex", [meta(),start,item(name=name),split]))
+            self.assertEqual("generation_ms" in facts[0],valid)
+            self.assertEqual(facts[0]["output_tokens"],4)
+
+    def test_codex_inherited_replay_marks_and_preupgrade_cursor_not_reused(self):
+        completed = dict(event("item_completed",item=dict(type="Reasoning"),
+                               started_at_ms=EPOCH*1000,completed_at_ms=EPOCH*1000+500),
+                         timestamp="2026-11-25T00:00:01Z")
+        tally = dict(count(usage(1,4),usage(1,4)),timestamp="2026-11-25T00:00:02Z")
+        facts,_ = self.read(self.source("codex", [meta("child",forked_from_id="parent"), completed,
+            event("task_started",turn_id="child-turn",started_at=EPOCH), tally]))
+        self.assertEqual(facts[0]["output_tokens"],4)
+        self.assertNotIn("generation_ms",facts[0])
+        facts,_ = self.read(self.source("codex", [completed,tally]), cursor=dict(
+            sid="s",open=True,turn="old",trigger_ms=EPOCH*1000,first_ms=EPOCH*1000))
+        self.assertNotIn("generation_ms",facts[0])
+
     def test_durable_owner_after_revision_window_eviction_and_restart(self):
         def response(output, stamp):
             item = claude("target", output_tokens=output, cache_read_input_tokens=0,

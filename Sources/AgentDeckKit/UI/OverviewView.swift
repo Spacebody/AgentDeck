@@ -53,6 +53,7 @@ struct OverviewView: View {
     var showQoderAgent: Bool? = nil
     var showQoderCNAgent: Bool? = nil
     var showAntigravityAgent: Bool? = nil
+    var analyticsAgents: Set<String>? = nil
     var quotaAutoRotate: Bool = true
     var quotaRotateSecs: Int = 6
     var carouselActive: Bool = true
@@ -66,8 +67,7 @@ struct OverviewView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 24) {
-            AnalyticsOverview(agents: visibleAgents, active: analyticsActive, open: onViewUsage) { quotaSection }
-                .id(visibleAgents)
+            AnalyticsOverview(agents: analyticsAgents ?? visibleAgents, active: analyticsActive, open: onViewUsage) { quotaSection }
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
                     DashboardHeading(text: L("usage.tabCurve"))
@@ -123,20 +123,6 @@ struct OverviewView: View {
         Set([showClaude ? "claude" : nil, showCodex ? "codex" : nil,
              showQoder ? "qoder" : nil, showQoderCN ? "qoder_cn" : nil,
              (showAntigravityAgent ?? !(quota?.antigravityPanelHidden ?? true)) ? "antigravity" : nil].compactMap { $0 })
-    }
-
-    private var todayTokenText: String {
-        if visibleAgents == ["antigravity"] {
-            guard let usage, let day = usage.days.last, usage.hasAntigravitySamples(on: [day]) else { return "—" }
-        }
-        return Fmt.tokens(today?.totalTokens ?? 0)
-    }
-
-    private var todayCost: String {
-        guard let usage, let cost = UsageRangeSummary(usage: usage, span: 1, visible: visibleAgents).cost else {
-            return L("v3.unavailable")
-        }
-        return String(format: "≈ $%.2f", cost)
     }
 
     @ViewBuilder private var quotaSection: some View {

@@ -2,6 +2,14 @@ import XCTest
 @testable import AgentDeckKit
 
 final class SessionPerformanceTests: XCTestCase {
+    func testWorkingListOnlyShowsMeasuredCurrentTurn() {
+        for state in ["completed", "stale", "sampling", "unavailable"] {
+            XCTAssertNil(SessionPerformance(state: state, mode: "turn_average", tokensPerSecond: 12).workingLabel)
+        }
+        XCTAssertNil(SessionPerformance(state: "active", mode: "turn_average").workingLabel)
+        XCTAssertNotNil(SessionPerformance(state: "active", mode: "turn_average", tokensPerSecond: 12).workingLabel)
+    }
+
     func testOnlyExplicitAverageCanDisplayRate() {
         XCTAssertNil(SessionPerformance(state: "active", tokensPerSecond: 50).rate)
         XCTAssertNil(SessionPerformance(state: "stale", mode: "turn_average", tokensPerSecond: 50).rate)

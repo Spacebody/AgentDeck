@@ -60,6 +60,26 @@ def _summary(src, s, ts, duration):
                  started_at=start, ended_at=ts, duration_secs=seconds, **s.get("turn_usage", {}))
 
 
+def _millis(ts):
+    return round(ts * 1000) if ts is not None else None
+
+
+def _timing(start, first, end, output):
+    if not output or end is None or (start is not None and start >= end):
+        return {}
+    if first is not None and (first > end or (start is not None and first < start)):
+        return {}
+    result = {}
+    if start is not None:
+        result["latency_ms"] = end - start
+    if first is not None and start is not None:
+        result["ttft_ms"] = first - start
+    origin = first if first is not None else start
+    if origin is not None and end > origin:
+        result.update(generation_ms=end - origin, speed_includes_wait=first is None)
+    return result
+
+
 def _claude(src, s, e, ts):
     msg, kind = _obj(e.get("message")), e.get("type")
     sid = _label(e.get("sessionId"))
@@ -71,6 +91,15 @@ def _claude(src, s, e, ts):
         s["parent"] = None
     if _project(e.get("cwd")):
         s["project"] = e["cwd"]
+    nodes = s.setdefault("timing_parents", {})
+    uid, parent = _label(e.get("uuid")), _label(e.get("parentUuid"))
+    def node_key(value):
+        return _key(s["sid"], value)
+    trigger = nodes.get(node_key(parent)) if parent else None
+    if uid and (kind == "attachment" or (kind == "user" and not e.get("isMeta"))):
+        nodes[node_key(uid)] = trigger if kind == "attachment" else _millis(ts)
+        if len(nodes) > 128:
+            del nodes[next(iter(nodes))]
     if kind == "user" and not e.get("isMeta"):
         content = msg.get("content")
         if not isinstance(content, list) or not any(_obj(x).get("type") == "tool_result" for x in content):
@@ -99,6 +128,24 @@ def _claude(src, s, e, ts):
     recent = s.setdefault("responses", {})
     key = fact["event_key"]
     old = recent.pop(key, {})
+    start = old.get("trigger_ms")
+    if start is None:
+        start = trigger
+    first = old.get("first_token_ms")
+    think = _number(e.get("thinkingDurationMs"))
+    end = _millis(ts)
+    if think and end is not None:
+        candidate = end - think
+        if start is None or start <= candidate:
+            first = min(first, candidate) if first is not None else candidate
+    # Bind duration to the observation reporting the retained output counter;
+    # a late replay with fewer tokens cannot extend a stronger response.
+    timed_end = old.get("output_end_ms")
+    old_out = old.get("output_tokens")
+    if out is not None and (old_out is None or out > old_out):
+        timed_end = end
+    elif out is not None and out == old_out and end is not None:
+        timed_end = min(end, timed_end) if timed_end is not None else end
     stamps = [x for x in (ts, old.get("first_observed_at"), old.get("last_observed_at")) if x is not None]
     fact["observed_at"] = fact["first_observed_at"] = min(stamps, default=None)
     fact["last_observed_at"] = max(stamps, default=None)
@@ -111,6 +158,9 @@ def _claude(src, s, e, ts):
     if len(recent) >= 32:
         del recent[next(iter(recent))]
     recent[key] = {k: v for k, v in fact.items() if k.endswith("_tokens") or k.endswith("_observed_at")}
+    recent[key].update(trigger_ms=start, first_token_ms=first, output_end_ms=timed_end)
+    fact["output_observed_at"] = timed_end / 1000 if timed_end is not None else None
+    fact.update(_timing(start, first, timed_end, fact["output_tokens"]))
     return fact
 
 
@@ -128,7 +178,11 @@ def _snapshot(value):
 
 def _gap(s):
     s.update(previous=None, model=None, project=None, turn=None, start=None, turn_usage={},
-             epoch=s.get("epoch", 0) + 1, gap=True)
+             epoch=s.get("epoch", 0) + 1, gap=True, timing_window={},
+             timing_parents={}, open=False, timing_turn=None, last_usage_ms=None)
+    for response in s.get("responses", {}).values():
+        for field in ("trigger_ms", "first_token_ms", "output_end_ms"):
+            response.pop(field, None)
 
 
 def _codex(src, s, e, ts):
@@ -154,20 +208,49 @@ def _codex(src, s, e, ts):
                 s["previous"] = current
             return
         s["replay"] = False
+    # A pre-timing cursor, a bare turn_context, or a stale event cannot establish
+    # ownership of a request interval. Payloads without turn_id need an open turn.
+    active = bool(s.get("open") and s.get("turn") and s.get("timing_turn") == s["turn"]
+                  and (p.get("turn_id") is None or p.get("turn_id") == s["turn"]))
     if event in ("task_started", "turn_started"):
         turn = _label(p.get("turn_id"))
         if not turn or turn != s.get("turn") or not s.get("open"):
-            s.update(turn=turn, start=ts, model=None, turn_usage={}, open=True)
+            s.update(turn=turn, start=ts, model=None, turn_usage={}, open=True,
+                     timing_window={"start": _millis(ts)}, timing_turn=turn, last_usage_ms=None)
+    elif event == "user_message" or (kind == "response_item" and p.get("type") in (
+            "function_call_output", "custom_tool_call_output")):
+        if active:
+            w = s.get("timing_window", {})
+            if "item" in w:
+                w["blocked"] = True
+            else:
+                s["timing_window"] = {"start": _millis(ts)}
+    elif active and event == "item_completed":
+        w = s.setdefault("timing_window", {})
+        item = _obj(p.get("item"))
+        if item.get("type") in ("Reasoning", "AgentMessage"):
+            first, end = _number(p.get("started_at_ms")), _number(p.get("completed_at_ms"))
+            floor = max(s.get("last_usage_ms") or 0, w.get("start") or 0, _millis(s.get("start")) or 0)
+            key = _key(item.get("type"), _label(item.get("id")), first, end)
+            if (end is None or ts is None or not floor <= end <= _millis(ts)
+                    or (p.get("started_at_ms") is not None and (first is None or not floor <= first <= end))
+                    or ("item" in w and w["item"] != key)):
+                w["blocked"] = True
+            w.update(item=key, item_type=item["type"], first=first, end=end)
+        elif item.get("type") != "UserMessage":
+            w["blocked"] = True
     elif kind == "turn_context":
         turn = _label(p.get("turn_id"))
         if turn and turn != s.get("turn"):
-            s.update(turn=turn, start=None, turn_usage={})
+            s.update(turn=turn, start=None, turn_usage={}, timing_window={},
+                     timing_turn=None, open=False)
         s.update(model=_label(p.get("model")), project=_project(p.get("cwd")) or s.get("project"))
     elif event in ("task_complete", "turn_complete", "turn_aborted"):
         if p.get("turn_id") and p["turn_id"] != s.get("turn"):
             return
         result = _summary(src, s, ts, p.get("duration_ms"))
-        s.update(turn=None, start=None, model=None, turn_usage={}, open=False)
+        s.update(turn=None, start=None, model=None, turn_usage={}, open=False,
+                 timing_window={}, timing_turn=None)
         return result
     elif event == "token_usage_record" and p.get("turn_id") and p["turn_id"] == s.get("turn"):
         counts = _obj(p.get("turn_token_usage"))
@@ -187,10 +270,12 @@ def _codex(src, s, e, ts):
         if previous is None:
             # Only an explicit matching last-call vector proves a first positive delta.
             if s.get("gap") or _snapshot(info.get("last_token_usage")) != current:
+                s["timing_window"] = {}
                 return
             previous = {k: 0 for k in current}
         if any(current[k] < previous[k] for k in current if None not in (current[k], previous[k])):
             s["epoch"] = s.get("epoch", 0) + 1
+            s["timing_window"] = {}
             return
         delta = {k: current[k] - previous[k] if None not in (current[k], previous[k]) else None
                  for k in current}
@@ -200,8 +285,19 @@ def _codex(src, s, e, ts):
             total = delta["input_tokens"] + delta["output_tokens"]
         if not total:
             return
+        s["last_usage_ms"] = _millis(ts)
+        w = s.pop("timing_window", {})
+        timing = {}
+        reasoning = delta["reasoning_output_tokens"]
+        matched_output = ((w.get("item_type") == "AgentMessage" and reasoning == 0)
+                          or (w.get("item_type") == "Reasoning" and reasoning == delta["output_tokens"]))
+        if (active and last_matches and matched_output and not w.get("blocked") and w.get("end") is not None
+                and ts is not None and w["end"] <= _millis(ts)):
+            timing = _timing(w.get("start"), w.get("first"), w["end"], delta["output_tokens"])
         owner = s
-        if old_context and old_context != context and not last_matches:
+        if p.get("turn_id") is not None and p["turn_id"] != s.get("turn"):
+            owner = dict(s, turn=_label(p["turn_id"]), model=None, project=None)
+        elif old_context and old_context != context and not last_matches:
             owner = dict(s)
             for i, field in enumerate(("model", "turn", "project")):
                 if context[i] != old_context[i]:
@@ -211,7 +307,7 @@ def _codex(src, s, e, ts):
         uncached = inp - cached if None not in (inp, cached) and inp >= cached else None
         return _fact(src, owner, ts, "usage_delta", [s["sid"], s.get("epoch", 0), list(current.values())],
                      tokens_total=total, input_basis="includes_cache", input_uncached_tokens=uncached,
-                     cache_read_tokens=cached, **delta)
+                     cache_read_tokens=cached, **delta, **timing)
 
 
 class Provider:

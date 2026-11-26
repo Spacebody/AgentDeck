@@ -637,7 +637,9 @@ struct QuotaCardView: View {
     }
 
     @ViewBuilder private var quotaBody: some View {
-        if let node, node.ok {
+        if brand == .antigravity, let node, node.hidden != true, let state = node.samplingSetup, state != .ready {
+            AntigravitySamplingView(state: state)
+        } else if let node, node.ok {
             let windows = node.displayWindows
             if windows.count == 1, let window = windows.first {
                 singleWindowBody(window)

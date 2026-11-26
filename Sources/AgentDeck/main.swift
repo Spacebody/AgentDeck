@@ -705,6 +705,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var rotateTimer: Timer?
     var menubarAnimationTimer: Timer?
     var currentMenubarImage: NSImage?
+    var menubarTargetID: String?
     var menubarRequestID = 0
     var menubarAppliedRequestID = 0
     var menubarSlotWidth: CGFloat = 17
@@ -759,7 +760,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         store.onSettingsChanged = { [weak self] in self?.updateIconState() }
         store.onQuotaChanged = { [weak self] in self?.updateIconState() }
         store.onQuotaSelectionChanged = { [weak self] id in
-            self?.selectMenubarPage(id: id, animated: true)
+            self?.selectMenubarPage(id: id)
         }
         store.onQuotaRotationPauseChanged = { [weak self] paused in
             guard let self, self.quotaRotationPaused != paused else { return }
@@ -1081,31 +1082,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return out
     }
 
-    func drumMenubarImage(from outgoing: NSImage, to incoming: NSImage,
-                          progress: CGFloat) -> NSImage {
-        let size = NSSize(width: max(outgoing.size.width, incoming.size.width),
-                          height: max(outgoing.size.height, incoming.size.height))
-        let angle = progress * .pi / 2
-        let incomingAngle = (.pi / 2) - angle
-        let image = NSImage(size: size, flipped: false) { bounds in
-            NSGraphicsContext.current?.cgContext.clip(to: bounds)
-            func drawFace(_ source: NSImage, angle: CGFloat, direction: CGFloat) {
-                let scale = max(0.02, cos(angle))
-                let height = max(0.5, source.size.height * scale)
-                let center = bounds.midY + direction * sin(angle) * bounds.height / 2
-                let rect = NSRect(x: (bounds.width - source.size.width) / 2,
-                                  y: center - height / 2,
-                                  width: source.size.width, height: height)
-                source.draw(in: rect, from: .zero, operation: .sourceOver,
-                            fraction: 0.32 + 0.68 * scale)
-            }
-            drawFace(outgoing, angle: angle, direction: 1)
-            drawFace(incoming, angle: incomingAngle, direction: -1)
-            return true
-        }
-        image.isTemplate = false
-        return image
-    }
 
     func setMenubarImage(_ image: NSImage) {
         menubarAnimationTimer?.invalidate()
@@ -1115,15 +1091,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func animateMenubar(to next: NSImage) {
-        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
-              let previous = currentMenubarImage,
-              previous.size == next.size else {
+        guard let previous = statusItem.button?.image ?? currentMenubarImage else {
             setMenubarImage(next)
             return
         }
         menubarAnimationTimer?.invalidate()
-        let outgoing = resolvedAnimationImage(previous)
-        let incoming = resolvedAnimationImage(next)
+        let monochrome = previous.isTemplate && next.isTemplate
+        let outgoing = monochrome ? previous : resolvedAnimationImage(previous)
+        let incoming = monochrome ? next : resolvedAnimationImage(next)
         guard let button = statusItem.button else {
             setMenubarImage(next)
             return
@@ -1139,18 +1114,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 let elapsed = ProcessInfo.processInfo.systemUptime - started
                 let linear = min(1, max(0, elapsed / duration))
                 let progress = CGFloat(linear * linear * (3 - 2 * linear))
-                button.image = self.drumMenubarImage(
+                button.image = MenubarDrumRenderer.frame(
                     from: outgoing, to: incoming, progress: progress)
                 button.needsDisplay = true
                 button.displayIfNeeded()
-                if linear >= 1 {
+                if linear >= 1 || NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
                     timer.invalidate()
                     self.menubarAnimationTimer = nil
                     self.currentMenubarImage = next
                     // A quota refresh may have changed or removed the current item mid-roll.
                     let current = MenubarRotationPolicy.currentItem(
                         items: self.mbFull, currentIndex: self.rotateIdx).map { [$0] } ?? []
-                    self.drawMenubar(current, animated: false)
+                    self.drawMenubar(current)
                 }
             }
         }
@@ -1952,22 +1927,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if let interval, !quotaRotationPaused && !overviewSelectionOutsideMenubar {
             if rotateTimer == nil || rotateTimer?.timeInterval != interval {
                 rotateTimer?.invalidate()
-                rotateTimer = Timer.scheduledTimer(withTimeInterval: interval,
-                                                   repeats: true) { [weak self] _ in
-                    Task { @MainActor in self?.advanceRotation() }
+                let timer = Timer(timeInterval: interval, repeats: true) { [weak self] timer in
+                    Task { @MainActor in
+                        guard let self, self.rotateTimer === timer else { return }
+                        self.advanceRotation()
+                    }
                 }
+                rotateTimer = timer
+                RunLoop.main.add(timer, forMode: .common)
             }
         } else {
             rotateTimer?.invalidate()
             rotateTimer = nil
         }
         if rotateIdx >= mbFull.count { rotateIdx = 0 }
-        // A quota poll may land during the short rolling transition. Do not cancel that
-        // transition with a non-animated redraw; its final frame already owns the slot.
-        if !MenubarRotationPolicy.shouldDeferPassiveRefresh(
-                isAnimating: menubarAnimationTimer != nil) {
-            drawMenubar(mbFull.isEmpty ? [] : [mbFull[rotateIdx]], animated: false)
-        }
+        drawMenubar(mbFull.isEmpty ? [] : [mbFull[rotateIdx]])
         if !overviewSelectionOutsideMenubar { publishMenubarSelection() }
     }
 
@@ -1975,10 +1949,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard mbFull.count > 1 else { return }
         rotateIdx = MenubarRotationPolicy.nextIndex(current: rotateIdx, itemCount: mbFull.count)
         publishMenubarSelection()
-        drawMenubar([mbFull[rotateIdx]], animated: true)
+        drawMenubar([mbFull[rotateIdx]])
     }
 
-    func selectMenubarPage(id: String, animated: Bool) {
+    func selectMenubarPage(id: String) {
         guard let index = mbFull.firstIndex(where: { $0.id == id }) else {
             let tool = id.split(separator: ":", maxSplits: 1).first.map(String.init)
             let toolEnabled = tool.map { menubarAgentEnabled($0) } ?? false
@@ -1990,15 +1964,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return
         }
         overviewSelectionOutsideMenubar = false
-        let changed = index != rotateIdx
         rotateIdx = index
         if let timer = rotateTimer {
             timer.fireDate = Date().addingTimeInterval(timer.timeInterval)
         }
         publishMenubarSelection()
-        if changed || currentMenubarImage == nil {
-            drawMenubar([mbFull[index]], animated: animated)
-        }
+        drawMenubar([mbFull[index]])
     }
 
     func publishMenubarSelection() {
@@ -2010,12 +1981,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         AgentSettingsCatalog.ids.contains(tool) && store.menubarAgentEnabled(tool)
     }
 
-    func drawMenubar(_ items: [MBItem], animated: Bool) {
+    func drawMenubar(_ items: [MBItem]) {
         guard let button = statusItem.button else { return }
+        let nextID = items.first?.id
+        let action = MenubarRotationPolicy.presentation(
+            targetID: menubarTargetID, nextID: nextID, isAnimating: menubarAnimationTimer != nil,
+            reduceMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
+        guard action != .finishCurrentRoll else { return }
         button.contentTintColor = nil
         guard let raw = composedIcon(items: items) else { return }
         let image = paddedMenubarImage(raw)
-        if animated { animateMenubar(to: image) }
+        menubarTargetID = nextID
+        if action == .roll { animateMenubar(to: image) }
         else { setMenubarImage(image) }
     }
 }

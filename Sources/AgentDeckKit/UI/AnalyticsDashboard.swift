@@ -1,6 +1,17 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
+enum AnalyticsMode: String, CaseIterable {
+    case trend, composition, performance
+}
+
+private struct RankingDetail: Identifiable {
+    let id: String
+    let title: String
+    let query: AnalyticsQuery
+    let fixture: AnalyticsSnapshot?
+}
+
 struct AnalyticsDashboard: View {
     let agents: Set<String>
     var scope: AnalyticsScope = .all
@@ -8,12 +19,17 @@ struct AnalyticsDashboard: View {
     @Binding var days: Int
     @State private var dimension: String
     @State private var basis: String
+    @State private var mode: AnalyticsMode
+    @State private var detailMode = AnalyticsMode.trend
+    @State private var detail: RankingDetail?
+    @Environment(\.analyticsLive) private var live
 
     init(agents: Set<String>, scope: AnalyticsScope = .all, fixture: AnalyticsSnapshot? = nil,
-         days: Binding<Int>, initialBasis: String = "recorded") {
+         days: Binding<Int>, initialBasis: String = "recorded", initialMode: AnalyticsMode = .trend) {
         self.agents = agents; self.scope = scope; self.fixture = fixture; _days = days
         _dimension = State(initialValue: scope == .all ? "agent" : "model")
         _basis = State(initialValue: initialBasis)
+        _mode = State(initialValue: initialMode)
     }
 
     var body: some View {
@@ -22,8 +38,9 @@ struct AnalyticsDashboard: View {
             let period = AnalyticsSegments(title: L("analytics.period"), selected: $days, options: [
                 (1, L("analytics.today")), (7, L("analytics.days", ["n": "7"])), (30, L("analytics.days", ["n": "30"])),
             ])
-            let basisPicker = AnalyticsSegments(title: L("analytics.basis"), selected: $basis,
-                                                options: [("recorded", L("analytics.recorded")), ("sampled", L("analytics.sampled"))])
+            let basisPicker = PanelChoiceMenu(title: L("analytics." + basis), selected: basis,
+                                              choices: ["recorded", "sampled"].map { .init(id: $0, title: L("analytics." + $0)) }) { basis = $0 }
+                .help(L("analytics.basis"))
             ViewThatFits(in: .horizontal) {
                 HStack(spacing: 8) { period; Spacer(minLength: 2); basisPicker }
                 VStack(alignment: .leading, spacing: 6) { period; basisPicker }
@@ -31,10 +48,40 @@ struct AnalyticsDashboard: View {
             if agents.isEmpty {
                 Text(L("usage.noVisibleAgents")).foregroundStyle(Theme.ink3)
             } else {
-                AnalyticsResults(query: query, fixture: fixture, dimension: $dimension)
+                modePicker($mode)
+                AnalyticsResults(query: query, fixture: fixture, dimension: $dimension, mode: mode) { row, label in
+                    guard let key = row.key, let filter = AnalyticsGroupFilter(dimension: dimension, row: row) else { return }
+                    detailMode = .trend
+                    detail = RankingDetail(id: key, title: label, query: query.filtered(by: filter),
+                        fixture: fixture.map { AnalyticsSnapshot(generation: $0.generation, status: $0.status,
+                            summary: [row], series: [], rows: [], nextCursor: nil) })
+                }
                     .id(query)
+                    .environment(\.analyticsLive, live && detail == nil)
             }
         }.font(.system(size: 12)).foregroundStyle(Theme.ink)
+        .onChange(of: query) { _ in detail = nil }
+        .popover(item: $detail) { item in
+            VStack(alignment: .leading, spacing: 16) {
+                HStack {
+                    Button { detail = nil } label: { Label(L("common.back"), systemImage: "chevron.left") }
+                        .buttonStyle(.plain).keyboardShortcut(.cancelAction)
+                    Text(item.title).font(.headline).lineLimit(2)
+                    Spacer()
+                    Text(L("analytics." + item.query.basis)).font(.caption).foregroundStyle(Theme.ink3)
+                }
+                modePicker($detailMode)
+                ScrollView {
+                    AnalyticsResults(query: item.query, fixture: item.fixture, dimension: .constant(dimension),
+                                     mode: detailMode, openRow: nil)
+                }
+            }.padding(16).frame(width: 365, height: 430)
+        }
+    }
+
+    private func modePicker(_ binding: Binding<AnalyticsMode>) -> some View {
+        AnalyticsSegments(title: L("v3.viewUsage"), selected: binding,
+                          options: AnalyticsMode.allCases.map { ($0, L("analytics." + $0.rawValue)) })
     }
 }
 
@@ -64,28 +111,20 @@ struct AnalyticsDetailLink: View {
     let title: String
     let agents: Set<String>
     var iconOnly = false
-    @State private var open = false
-    @State private var days = 30
+    @Environment(\.openAnalytics) private var openAnalytics
     @Environment(\.analyticsFixture) private var fixture
+    private var actionTitle: String {
+        switch scope {
+        case .project: return L("analytics.openProject")
+        case .session: return L("analytics.openSession")
+        case .all: return L("v3.viewUsage")
+        }
+    }
     var body: some View {
-        Button { open = true } label: {
+        Button { openAnalytics(.init(scope: scope, title: title, agents: agents), fixture) } label: {
             if iconOnly { Image(systemName: "chart.bar") }
-            else { Label(L("v3.viewUsage"), systemImage: "chart.bar") }
-        }.buttonStyle(.plain).help(L("v3.viewUsage")).accessibilityLabel(L("v3.viewUsage") + ": " + title)
-            .popover(isPresented: $open) {
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack {
-                        Text(title).font(.headline).lineLimit(2)
-                        Spacer()
-                        Button { open = false } label: { Image(systemName: "xmark") }
-                            .buttonStyle(.plain).accessibilityLabel(L("common.close"))
-                            .keyboardShortcut(.cancelAction)
-                    }
-                    ScrollView {
-                        AnalyticsDashboard(agents: agents, scope: scope, fixture: fixture, days: $days)
-                    }
-                }.padding(14).frame(width: 365, height: 440)
-            }
+            else { Label(actionTitle, systemImage: "chart.bar") }
+        }.buttonStyle(.plain).help(actionTitle).accessibilityLabel(actionTitle + ": " + title)
     }
 }
 
@@ -115,6 +154,8 @@ private struct AnalyticsResults: View {
     let query: AnalyticsQuery
     let fixture: AnalyticsSnapshot?
     @Binding var dimension: String
+    let mode: AnalyticsMode
+    let openRow: ((AnalyticsSlice, String) -> Void)?
     @State private var snapshot: AnalyticsSnapshot?
     @State private var cursor: String?
     @State private var reload = 0
@@ -123,14 +164,13 @@ private struct AnalyticsResults: View {
     @State private var exporting = false
     @Environment(\.analyticsLive) private var live
     @Environment(\.analyticsRefresh) private var refreshSignal
-    @State private var opened: String?
     @ObservedObject private var palette = AgentColors.shared
     private var visible: AnalyticsSnapshot? { fixture ?? snapshot }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                DashboardHeading(text: L("v3.tokens"))
+                DashboardHeading(text: L(mode == .trend ? "v3.tokens" : "analytics." + mode.rawValue))
                 Spacer()
                 Button { reload += 1; cursor = nil } label: { Image(systemName: "arrow.clockwise") }
                     .help(L("header.refresh")).accessibilityLabel(L("header.refresh"))
@@ -145,48 +185,68 @@ private struct AnalyticsResults: View {
             if let visible {
                 if visible.status != "ready" { Text(L("analytics.indexing")).foregroundStyle(Theme.ink3) }
                 if let summary = visible.summary.first(where: { $0.basis == query.basis }) {
-                    AnalyticsMetrics(slice: summary, color: tint, primary: true)
-                    AnalyticsTrend(samples: visible.series.filter { $0.basis == query.basis }, query: query, color: tint)
+                    AnalyticsMetrics(slice: summary, color: tint, mode: mode)
+                    if mode == .trend && !query.isSingleCalendarDay {
+                        AnalyticsTrend(samples: visible.series.filter { $0.basis == query.basis }, query: query, color: tint)
+                            .padding(.vertical, 6)
+                    }
                 } else { Text(L("analytics.noSamples")).foregroundStyle(Theme.ink3) }
             } else if loading { ProgressView().controlSize(.small) }
-            Divider()
-            AnalyticsSegments(title: L("analytics.group"), selected: $dimension,
-                              options: ["agent", "model", "project"].map { ($0, L("analytics." + $0)) })
-            if let visible {
-                ForEach(visible.rows.filter { $0.basis == query.basis }, id: \.key) { row in
-                    let label = row.agent.flatMap(Brand.init(rawValue:))?.name ?? row.label ?? L("analytics.unknown")
-                    Button { opened = opened == row.key ? nil : row.key } label: {
-                        HStack(spacing: 8) {
-                            if let brand = row.agent.flatMap(Brand.init(rawValue:)) {
-                                BrandGlyph(brand: brand, glyph: 14)
-                            }
-                            Text(label).lineLimit(1).truncationMode(.middle)
-                            Spacer()
-                            Text(row.value("tokens_total").map(Fmt.tokens) ?? "—").monospacedDigit()
-                            Image(systemName: opened == row.key ? "chevron.down" : "chevron.right")
-                                .font(.caption2).foregroundStyle(Theme.ink3)
-                        }.padding(.vertical, 3).contentShape(Rectangle())
-                    }.buttonStyle(.plain)
-                    if opened == row.key {
-                        AnalyticsMetrics(slice: row, color: row.agent.flatMap(Brand.init(rawValue:))?.accent ?? tint)
+            if mode == .trend, let openRow {
+                Divider()
+                HStack {
+                    DashboardHeading(text: L("analytics.ranking"))
+                    Spacer()
+                    PanelChoiceMenu(title: L("analytics." + dimension), selected: dimension,
+                                    choices: ["agent", "model", "project"].map { .init(id: $0, title: L("analytics." + $0)) }) { dimension = $0 }
+                }
+                if let visible {
+                    ForEach(visible.rows.filter { $0.basis == query.basis }, id: \.key) { row in
+                        let label = row.agent.flatMap(Brand.init(rawValue:))?.name ?? row.label ?? L("analytics.unknown")
+                        Button { openRow(row, label) } label: {
+                            VStack(alignment: .leading, spacing: 5) {
+                                HStack(spacing: 8) {
+                                    if let brand = row.agent.flatMap(Brand.init(rawValue:)) {
+                                        BrandGlyph(brand: brand, glyph: 14)
+                                    }
+                                    Text(label).lineLimit(1).truncationMode(.middle)
+                                    Spacer()
+                                    Text(row.value("tokens_total").map(Fmt.tokens) ?? "—").monospacedDigit()
+                                    Image(systemName: "chevron.right")
+                                        .font(.caption2).foregroundStyle(Theme.ink3)
+                                }
+                                if let value = row.value("tokens_total"),
+                                   let sum = visible.summary.first(where: { $0.basis == query.basis })?.value("tokens_total"), sum > 0 {
+                                    GeometryReader { geo in
+                                        Capsule().fill(row.agent.flatMap(Brand.init(rawValue:))?.accent ?? tint)
+                                            .frame(width: geo.size.width * min(1, max(0, value / sum)))
+                                    }.frame(height: 3).background(Theme.edge).clipShape(Capsule()).accessibilityHidden(true)
+                                }
+                            }.font(.system(size: 14)).padding(.vertical, 4).contentShape(Rectangle())
+                        }.buttonStyle(.plain)
+                        Divider()
                     }
-                    Divider()
+                    if visible.rows.isEmpty { Text(L("analytics.noGroups")).font(.caption).foregroundStyle(Theme.ink3) }
+                    if let next = visible.nextCursor {
+                        Button(L("analytics.more")) { cursor = next; reload += 1 }.disabled(loading)
+                    }
+                    Text(L("analytics.sourceNote")).font(.system(size: 13)).foregroundStyle(Theme.ink2)
                 }
-                if visible.rows.isEmpty { Text(L("analytics.noGroups")).font(.caption).foregroundStyle(Theme.ink3) }
-                if let next = visible.nextCursor {
-                    Button(L("analytics.more")) { cursor = next; reload += 1 }.disabled(loading)
-                }
-                Text(L("analytics.sourceNote")).font(.caption).foregroundStyle(Theme.ink3)
             }
         }
         .onChange(of: refreshSignal) { _ in cursor = nil; reload += 1 }
-        .task(id: "\(reload)|\(live)") {
+        .onChange(of: mode) { newMode in
+            if newMode == .performance { cursor = nil }
+        }
+        .task(id: "\(reload)|\(live)|\(mode == .performance)") {
             guard live, fixture == nil else { return }
+            // A covered dashboard can become visible again after this page was appended.
+            if let cursor, let snapshot, cursor != snapshot.nextCursor { return }
             var delay: UInt64 = 3
             while !Task.isCancelled {
                 let retry = await load()
-                guard retry else { return }
-                do { try await Task.sleep(nanoseconds: delay * 1_000_000_000) } catch { return }
+                guard retry || (mode == .performance && cursor == nil) else { return }
+                do { try await Task.sleep(nanoseconds: (retry ? delay : 30) * 1_000_000_000) } catch { return }
                 delay = min(delay * 2, 30)
             }
         }

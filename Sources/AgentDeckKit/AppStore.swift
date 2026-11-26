@@ -130,9 +130,12 @@ public final class AppStore: ObservableObject {
     public var canRestartGateway: Bool { gatewayRestart != .restarting && !gatewayInstallInProgress }
     var canInstallUpdate: Bool { updateAvailable && canRestartGateway }
     // 仅初始化默认值，无需主线程隔离 → nonisolated，便于主壳在属性声明处直接构造。
-    public nonisolated init() { api = .shared }
+    public nonisolated init() { api = .shared; samplingCredential = { try AntigravitySetupCredential.read() } }
 
-    nonisolated init(api: APIClient) { self.api = api }
+    nonisolated init(api: APIClient, samplingCredential: @escaping @Sendable () throws -> String = { try AntigravitySetupCredential.read() }) {
+        self.api = api
+        self.samplingCredential = samplingCredential
+    }
 
     /// 设置变更后回调（主壳据此即时重绘菜单栏图标，等价 v1 的 "sync" 桥消息）。
     public var onSettingsChanged: (() -> Void)?
@@ -144,6 +147,10 @@ public final class AppStore: ObservableObject {
     public var onQuotaRotationPauseChanged: ((Bool) -> Void)?
 
     @Published var quota: QuotaResponse?
+    @Published private(set) var enablingAntigravity = false
+    @Published private(set) var antigravitySetupReply: AntigravitySamplingState?
+    @Published private(set) var antigravitySetupFailed = false
+    private var setupReplyBarrier = 0
     lazy var performance = SessionPerformanceStore(api: api)
     var performanceShowsSessions = false
     @Published private(set) var panelVisible = false
@@ -153,7 +160,7 @@ public final class AppStore: ObservableObject {
         performance.setVisible(owner, visible) { [weak self] in
             guard let self else { return [] }
             return (self.performanceShowsSessions && self.performance.isVisible("panel")
-                    ? self.sessionsShown.map(\.performanceRequest) : [])
+                    ? self.activeShown.filter { $0.status == "busy" }.compactMap { $0.indexedSession?.performanceRequest } : [])
                 + self.activeShown.map(\.performanceRequest).filter { !$0.id.isEmpty }
         }
     }
@@ -223,6 +230,7 @@ public final class AppStore: ObservableObject {
     var doneShown: [DoneEvent] { done.filter { agentOnWithQuotaFallback($0.tool) } }
 
     private let api: APIClient
+    private let samplingCredential: @Sendable () throws -> String
     private var pollTask: Task<Void, Never>?
     private var quotaWatchTask: Task<Void, Never>?
     private var settingsLoadTask: Task<Void, Never>?
@@ -296,6 +304,10 @@ public final class AppStore: ObservableObject {
 
     public func markBackendUnavailable() {
         backendGeneration += 1
+        enablingAntigravity = false
+        antigravitySetupReply = nil
+        antigravitySetupFailed = false
+        setupReplyBarrier = 0
         sessionRequestGeneration += 1
         quotaGate = QuotaSnapshotGate()
         quota = nil
@@ -317,6 +329,33 @@ public final class AppStore: ObservableObject {
     /// 开面板立即读取 daemon 快照；Codex 超过 30s 未经官方校准时只在后台发起校准，
     /// 返回路径不等待出站。Claude 仍走原缓存，避免开窗动作消耗其限流严格的 usage 接口。
     public func refreshOnOpen() async { await refresh(freshCodex: true) }
+
+    func enableAntigravitySampling() async {
+        guard !enablingAntigravity, antigravitySetupReply == nil,
+              quota?.flatPages(visibleAgents: ["antigravity"]).contains(where: {
+                  $0.account.hidden != true && $0.account.samplingSetup == .available
+              }) == true, agentOn("antigravity") else { return }
+        let generation = backendGeneration
+        enablingAntigravity = true
+        antigravitySetupFailed = false
+        defer { if generation == backendGeneration { enablingAntigravity = false } }
+        do {
+            let health = try await api.getJSON("/api/health")
+            guard generation == backendGeneration, !Task.isCancelled else { return }
+            guard let id = health["instance_id"] as? String, !id.isEmpty else { throw APIError.noData }
+            let proof = AntigravitySetupCredential.proof(token: try samplingCredential(), instance: id)
+            let reply = try await api.postJSON("/api/antigravity/enable", body: ["proof": proof])
+            guard generation == backendGeneration else { return }
+            guard let raw = reply["setup_state"] as? String, let state = AntigravitySamplingState(rawValue: raw),
+                  let ok = reply["ok"] as? Bool,
+                  ok ? (state == .waiting || state == .ready) : (state == .conflict || state == .cliMissing)
+            else { throw APIError.noData }
+            setupReplyBarrier = quotaGate.beginRequest()
+            antigravitySetupReply = state
+        } catch {
+            if generation == backendGeneration && !Task.isCancelled { antigravitySetupFailed = true }
+        }
+    }
 
     /// force=true 时给 /api/quota 带 ?force=1 绕过后端额度缓存、强制重采（对应 v1 手动刷新 refreshAll(true)）；
     /// 周期轮询用 false 走缓存，避免每轮都出站打 Anthropic。
@@ -425,6 +464,10 @@ public final class AppStore: ObservableObject {
             bootId: bootId ?? response.quotaBootId,
             revision: revision ?? response.quotaRevision,
             request: request) else { return false }
+        if antigravitySetupReply != nil,
+           (request.map { $0 > setupReplyBarrier } == true || response.antigravity?.samplingSetup == .ready) {
+            antigravitySetupReply = nil
+        }
         quota = response
         online = true
         onQuotaChanged?()

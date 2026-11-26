@@ -157,6 +157,7 @@ struct QuotaNode: Decodable, Identifiable {
     let account: String?        // 账号显示名（label）
     let isDefault: Bool?        // is_default
     let kind: String?           // claude="oauth"
+    var setupState: String? = nil
     var remainingAmounts: [QuotaAmount]? = nil
     let windows: [QuotaWindow]?
     let error: String?
@@ -168,6 +169,12 @@ struct QuotaNode: Decodable, Identifiable {
 
     var id: String { accountId ?? account ?? kind ?? "primary" }
     var displayWindows: [QuotaWindow] { windows ?? [] }
+    var samplingSetup: AntigravitySamplingState? { setupState.flatMap(AntigravitySamplingState.init(rawValue:)) }
+}
+
+enum AntigravitySamplingState: String {
+    case available, waiting, conflict, cliMissing = "cli_missing", ready
+    var messageKey: String { "quota.ag." + rawValue }
 }
 
 /// 上游（Codex credits / Claude extra_usage）的金额字段偶尔以字符串形式下发（如 balance "0"）。

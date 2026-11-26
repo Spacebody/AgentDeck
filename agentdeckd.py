@@ -348,6 +348,7 @@ def api_settings_save(body):
             cur = {}
         if not isinstance(cur, dict):
             cur = {}
+        scan_antigravity = clean.get("show_antigravity") is True and cur.get("show_antigravity") is not True
         cur.update(clean)
         # 即使旧文件被手工写入越界值，也先恢复各自范围，再保持严格有序；
         # 否则 warn=100/crit=100 这类损坏状态无法靠 min/max 分支自愈。
@@ -371,6 +372,8 @@ def api_settings_save(body):
                            json.dumps(cur, ensure_ascii=False, indent=1))
         _settings_cache = None   # 失效设置缓存，下次 get_settings 重读
     with _cache_lock:
+        if scan_antigravity:
+            _ttl_cache.pop("usage", None)
         if any(key.endswith("_dirs") for key in clean):
             for provider in ("claude", "codex", "qoder", "qoder_cn"):
                 _ttl_cache.pop(f"sources_{provider}", None)
@@ -390,7 +393,11 @@ def api_settings_save(body):
                     _ttl_cache[key] = (now + interval, val)
     if "keep_awake" in clean:   # 立即生效，不阻塞响应
         threading.Thread(target=_update_keepawake, daemon=True).start()
-    if ("claude_dirs" in clean or "codex_dirs" in clean
+    if scan_antigravity:
+        store = _analytics_store
+        if store is not None:
+            store.request_scan()
+    if (scan_antigravity or "claude_dirs" in clean or "codex_dirs" in clean
             or "qoder_dirs" in clean or "qoder_cn_dirs" in clean):
         _request_session_index_scan()
     if "codex_dirs" in clean or "qoder_dirs" in clean or "qoder_cn_dirs" in clean:
@@ -3041,6 +3048,133 @@ def _antigravity_snapshot():
         return {}
 
 
+_ag_setup_lock = threading.Lock()
+_ag_enable_key = None
+
+
+def _ag_provision_enable_key(directory):
+    """Publish only after binding our port. A failure disables only opt-in."""
+    global _ag_enable_key
+    _ag_enable_key = None
+    try:
+        info = directory.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o022:
+            return
+        key = os.urandom(32).hex().encode("ascii")
+        fd, name = tempfile.mkstemp(dir=directory)
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(key)
+            os.replace(name, directory / "antigravity-enable.token")
+            _ag_enable_key = key
+        finally:
+            Path(name).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _ag_enable_authorized(proof):
+    key = _ag_enable_key
+    if not key or not isinstance(proof, str) or not re.fullmatch(r"[0-9a-f]{64}", proof):
+        return False
+    expected = hmac.new(key, ("antigravity-enable:" + _DAEMON_INSTANCE_ID).encode(), hashlib.sha256)
+    return hmac.compare_digest(expected.hexdigest(), proof)
+
+
+def _ag_setup(home, enable=False):
+    """Inspect, or explicitly install, our status line. Never run CLI commands."""
+    parent = home / ".gemini"
+    directory = parent / "antigravity-cli"
+    path = directory / "settings.json"
+    script = Path(__file__).resolve().with_name("antigravity_usage.py")
+    command = "/usr/bin/python3 " + shlex.quote(str(script))
+
+    def unique(pairs):
+        obj = {}
+        for key, value in pairs:
+            if key in obj:
+                raise ValueError("duplicate key")
+            obj[key] = value
+        return obj
+
+    def invalid_constant(_):
+        raise ValueError("invalid JSON number")
+
+    try:
+        for folder in (parent, directory):
+            info = folder.lstat()
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o022:
+                return "conflict"
+    except FileNotFoundError:
+        return "cli_missing"
+    except OSError:
+        return "conflict"
+
+    def signature(s):
+        return s.st_dev, s.st_ino, s.st_mtime_ns, s.st_ctime_ns, s.st_size
+
+    with _ag_setup_lock:
+        try:
+            try:
+                fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            except FileNotFoundError:
+                info, settings, raw = None, {}, b"{}\n"
+            else:
+                with os.fdopen(fd, "rb") as f:
+                    info = os.fstat(f.fileno())
+                    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                            or info.st_nlink != 1 or info.st_mode & 0o022 or not info.st_mode & 0o200):
+                        return "conflict"
+                    raw = f.read(1024 * 1024 + 1)
+                    if len(raw) > 1024 * 1024:
+                        return "conflict"
+                    settings = json.loads(raw.decode("utf-8"), object_pairs_hook=unique,
+                                          parse_constant=invalid_constant)
+            if not isinstance(settings, dict) or not script.is_file():
+                return "conflict"
+            if "statusLine" in settings:
+                line = settings["statusLine"]
+                # Accept the previously documented manually quoted path, without
+                # treating arbitrary shell commands as ours or changing user flags.
+                legacy = "/usr/bin/python3 '" + str(script) + "'"
+                owned = (isinstance(line, dict) and line.get("command") in (command, legacy)
+                         and line.get("type", "command") == "command" and line.get("enabled", True) is True)
+                return "waiting" if owned else "conflict"
+            if not enable:
+                return "available"
+            line = {"type": "command", "command": command, "stack_with_default": True}
+            # Insert one member in the validated object, preserving all existing
+            # values verbatim (including numbers outside Python float precision).
+            index = raw.index(b"{") + 1
+            new = raw[:index] + b'\n  "statusLine": ' + json.dumps(line).encode() + (
+                b"," if settings else b"\n") + raw[index:]
+            fd, name = tempfile.mkstemp(dir=directory)
+            try:
+                with os.fdopen(fd, "wb") as out:
+                    out.write(new)
+                    out.flush()
+                    os.fsync(out.fileno())
+                if info is None:
+                    os.link(name, path)
+                elif signature(info) == signature(path.lstat()):
+                    os.replace(name, path)
+                else:
+                    return "conflict"
+            finally:
+                Path(name).unlink(missing_ok=True)
+            return "waiting"
+        except (OSError, ValueError, RecursionError):
+            return "conflict"
+
+
+def api_antigravity_enable(_body):
+    state = _ag_setup(HOME, enable=True)
+    if state == "waiting":
+        state = _antigravity_quota()["setup_state"]
+        _bump_quota_revision()
+    return {"ok": state in ("waiting", "ready"), "setup_state": state}
+
+
 def _antigravity_quota():
     windows, amounts = [], []
     latest = None
@@ -3056,8 +3190,9 @@ def _antigravity_quota():
             amounts.append({**window, "remaining": bucket["remaining_amount"]})
         latest = observed if latest is None else max(latest, observed)
     if not windows and not amounts:
-        return {"ok": False, "no_quota": True, "error": "No Antigravity CLI quota observation"}
-    return {"ok": True, "source": "antigravity_cli", "windows": windows,
+        return {"ok": False, "no_quota": True, "setup_state": _ag_setup(HOME),
+                "error": "No Antigravity CLI quota observation"}
+    return {"ok": True, "source": "antigravity_cli", "setup_state": "ready", "windows": windows,
             "remaining_amounts": amounts, "sampled_at": _iso_at(latest)}
 
 
@@ -3144,7 +3279,7 @@ def api_quota(force=False, cache_only=False, fresh_codex=False):
         return {"account_id": "default", "account": "默认", "is_default": True,
                 **primary}
     ag = (_antigravity_quota() if _quota_surface_enabled(s, "antigravity")
-          else {"ok": False, "hidden": True})
+          else {"ok": False, "hidden": True, "setup_state": _ag_setup(HOME)})
     ag_accounts = [status_account(ag)]
     with _quota_change:
         revision = _quota_revision
@@ -8452,6 +8587,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(403, {"error": "forbidden"})
         path = self.path.split("?")[0]
         handlers = {"/api/resume": api_resume, "/api/path-mapping": api_path_mapping,
+                    "/api/antigravity/enable": api_antigravity_enable,
                     "/api/pin": api_pin,
                     "/api/settings": api_settings_save, "/api/event": api_event,
                     "/api/focus": api_focus, "/api/data": api_data,
@@ -8476,6 +8612,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(400, {"error": "invalid JSON"})
             if not isinstance(body, dict):
                 return self._send(400, {"error": "JSON object required"})
+            if path == "/api/antigravity/enable" and not _ag_enable_authorized(body.get("proof")):
+                return self._send(403, {"error": "forbidden"})
             if path == "/api/shutdown":
                 supplied = str(body.get("instance_id") or "") \
                     if isinstance(body, dict) else ""
@@ -8550,6 +8688,7 @@ def main():
     _events_load()
     _alert_state_load()
     server = LoopbackHTTPServer(("127.0.0.1", PORT), Handler)
+    _ag_provision_enable_key(DATA_DIR)
     # 长轮询连接不能阻塞进程收尾；额度 manager 及其 app-server 子进程仍由
     # finally 同步关闭。
     server.daemon_threads = True

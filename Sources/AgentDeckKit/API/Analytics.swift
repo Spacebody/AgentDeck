@@ -24,6 +24,21 @@ enum AnalyticsScope: Hashable {
     }
 }
 
+struct AnalyticsGroupFilter: Hashable {
+    let dimension: String
+    let value: String?
+
+    init?(dimension: String, row: AnalyticsSlice) {
+        self.dimension = dimension
+        switch dimension {
+        case "agent": value = row.agent
+        case "model": value = row.model
+        case "project": value = row.project
+        default: return nil
+        }
+    }
+}
+
 struct AnalyticsQuery: Hashable {
     let start: Int
     let end: Int
@@ -32,9 +47,10 @@ struct AnalyticsQuery: Hashable {
     let dimension: String
     let basis: String
     let scope: AnalyticsScope
+    private var groupFilters: [AnalyticsGroupFilter]
 
     init(days: Int, agents: Set<String>, dimension: String, basis: String, scope: AnalyticsScope,
-         now: Date = Date(), timezone: TimeZone = .current) {
+         now: Date = Date(), timezone: TimeZone = .current, groupFilter: AnalyticsGroupFilter? = nil) {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = timezone
         let today = calendar.startOfDay(for: now)
@@ -45,6 +61,13 @@ struct AnalyticsQuery: Hashable {
         self.dimension = dimension
         self.basis = basis
         self.scope = scope
+        self.groupFilters = groupFilter.map { [$0] } ?? []
+    }
+
+    func filtered(by filter: AnalyticsGroupFilter) -> AnalyticsQuery {
+        var query = self
+        if !query.groupFilters.contains(filter) { query.groupFilters.append(filter) }
+        return query
     }
 
     func parameters(generation: String? = nil, cursor: String? = nil) -> [String: String] {
@@ -56,10 +79,15 @@ struct AnalyticsQuery: Hashable {
         case .all: break
         case let .project(key): result["project"] = key
         case let .session(agent, account, source, id):
-            result["agents"] = agent
+            result["agents"] = agents.contains(agent) ? agent : ""
             result["account_id"] = account
             result["source_kind"] = source
             result["session_id"] = id
+        }
+        if !groupFilters.isEmpty {
+            // String/null pairs keep provider identifiers distinct from both display labels and SQL NULL.
+            let pairs: [[String?]] = groupFilters.map { [$0.dimension, $0.value] }
+            result["group_filters"] = String(decoding: try! JSONEncoder().encode(pairs), as: UTF8.self)
         }
         return result
     }
@@ -74,6 +102,8 @@ struct AnalyticsSlice: Decodable {
     var key: String?
     var label: String?
     var agent: String?
+    var model: String?
+    var project: String?
 
     func value(_ metric: String) -> Double? {
         guard quality[metric] == "complete" else { return nil }
