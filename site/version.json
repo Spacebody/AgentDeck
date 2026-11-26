@@ -1,7 +1,7 @@
 {
-  "version": "4.0.1",
+  "version": "4.0.2",
   "url": "https://github.com/Spacebody/AgentDeck/releases/latest",
-  "dmg": "https://github.com/Spacebody/AgentDeck/releases/download/v4.0.1/AgentDeck-4.0.1.dmg",
-  "sha256": "c242af4c909bd2b7d868d47f857962f0fb0cb84c3ff7d0c0267c7125689d9e01",
+  "dmg": "https://github.com/Spacebody/AgentDeck/releases/download/v4.0.2/AgentDeck-4.0.2.dmg",
+  "sha256": "430d036a9a41d8c7bf37b6e1e6d44189dcc66f171c192b1d6c4d5b5c753e1c81",
   "notes_url": "https://github.com/Spacebody/AgentDeck/blob/main/CHANGELOG.md"
 }
