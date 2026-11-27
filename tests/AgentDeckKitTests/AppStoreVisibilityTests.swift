@@ -217,7 +217,6 @@ final class AppStoreVisibilityTests: XCTestCase {
             bootId: "boot-a", revision: 2, request: slowRequest))
         XCTAssertFalse(gate.accept(
             bootId: "boot-a", revision: 1, request: slowRequest))
-        XCTAssertFalse(gate.canReportFailure(for: slowRequest))
     }
 
     func testQuotaGateRejectsOutOfOrderOrdinaryResponses() {

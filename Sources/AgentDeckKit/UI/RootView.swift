@@ -215,6 +215,8 @@ public struct AgentDeckRootView: View {
     @State private var toastSeq = 0
 
     private var minimal: Bool { store.settings["minimal_mode"]?.boolVal ?? false }
+    private var gatewayOnline: Bool { store.gatewayOnline || previewMode }
+    private var gatewayIndicatorKey: String { gatewayOnline ? "header.gatewayOnline" : "header.gatewayOffline" }
     private var dim: Double { Double(store.settings["glass_dim"]?.intVal ?? 68) / 100 }
     private var showUpdate: Bool { store.updateAvailable && store.update?.latest != dismissedUpdateVersion }
     private var fontScale: CGFloat {
@@ -303,8 +305,10 @@ public struct AgentDeckRootView: View {
             Text("AgentDeck").font(.system(size: 18, weight: .semibold)).foregroundStyle(Theme.ink)
                 .lineLimit(1).minimumScaleFactor(0.5)
             Circle()
-                .fill(store.online ? Theme.ok : Theme.danger)
+                .fill(gatewayOnline ? Theme.ok : Theme.danger)
                 .frame(width: 7, height: 7)
+                .help(L(gatewayIndicatorKey))
+                .accessibilityLabel(L(gatewayIndicatorKey))
             Spacer()
             IconButton(system: "gearshape", fontSize: 16) {
                 settingsPage = .main
@@ -332,7 +336,9 @@ public struct AgentDeckRootView: View {
         analyticsRefresh += 1
         spinning = true
         Task {
-            await store.refresh(force: true)   // 手动刷新强制重采额度（绕过缓存，对应 v1 force=1）
+            if await store.refreshManually() == false {
+                showToast(L("header.quotaRefreshFailed"))
+            }
             try? await Task.sleep(nanoseconds: 500_000_000)
             spinning = false
         }

@@ -59,7 +59,7 @@ func shouldRetryForcedRefresh(forcePending: Bool, requestSucceeded: Bool) -> Boo
 }
 
 /// Serializes quota snapshots arriving from ordinary requests and the daemon's push channel.
-/// Push snapshots cover failures from requests already in flight, but a matching-revision
+/// Push snapshots can supersede requests already in flight, but a matching-revision
 /// ordinary response may still be more complete (for example, freshly fetched Claude quota).
 struct QuotaSnapshotGate {
     private(set) var bootId = ""
@@ -72,12 +72,6 @@ struct QuotaSnapshotGate {
     mutating func beginRequest() -> Int {
         nextRequest += 1
         return nextRequest
-    }
-
-    func canReportFailure(for request: Int) -> Bool {
-        request > pushCoveredThroughRequest
-            && request >= lastAppliedRequest
-            && request == nextRequest
     }
 
     mutating func accept(
@@ -180,7 +174,7 @@ public final class AppStore: ObservableObject {
     @Published var sessionsLoading = false
     @Published var sessionsIndexing = false
     @Published var sessionsLoadFailed = false
-    @Published var online = true                   // 后端健康（驱动顶栏 live 点）
+    @Published private(set) var gatewayOnline = false
     @Published public private(set) var quotaSelectionID: String?
     @Published public private(set) var menubarRotationActive = false
 
@@ -323,7 +317,20 @@ public final class AppStore: ObservableObject {
         sessionsLoadFailed = false
         active = []
         done = []
-        online = false
+        setGatewayOnline(false)
+    }
+
+    /// Only the app's local gateway health/ownership checks can confirm this status.
+    public func setGatewayOnline(_ online: Bool) {
+        if gatewayOnline != online { gatewayOnline = online }
+    }
+
+    /// A failed manual quota refresh is actionable only for the current, healthy gateway.
+    func refreshManually() async -> Bool? {
+        let generation = backendGeneration
+        let succeeded = await refresh(force: true)
+        guard generation == backendGeneration, !Task.isCancelled, gatewayOnline else { return nil }
+        return succeeded
     }
 
     /// 开面板立即读取 daemon 快照；Codex 超过 30s 未经官方校准时只在后台发起校准，
@@ -416,8 +423,6 @@ public final class AppStore: ObservableObject {
         guard generation == backendGeneration, !Task.isCancelled else { return false }
         if let q {
             applyQuota(q, request: quotaRequest)
-        } else if quotaGate.canReportFailure(for: quotaRequest) {
-            online = false
         }
         if let up, updateRequest == updateRequestSequence { update = up }
         return q != nil
@@ -438,7 +443,6 @@ public final class AppStore: ObservableObject {
                         "timeout": "25",
                     ])
                 guard !Task.isCancelled, generation == backendGeneration else { return }
-                online = true
                 _ = applyQuota(
                     response.quota,
                     bootId: response.bootId,
@@ -469,7 +473,6 @@ public final class AppStore: ObservableObject {
             antigravitySetupReply = nil
         }
         quota = response
-        online = true
         onQuotaChanged?()
         return true
     }

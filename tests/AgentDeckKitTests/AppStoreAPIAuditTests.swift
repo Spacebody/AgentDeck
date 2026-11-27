@@ -64,6 +64,60 @@ private final class AuditHeldRequest {
 }
 
 final class AppStoreAPIAuditTests: XCTestCase {
+    @MainActor func testManualQuotaFailureDoesNotMarkHealthyGatewayOffline() async {
+        let client = api { stub in
+            switch (stub.request.url?.path, stub.request.url?.query) {
+            case ("/api/quota", "force=1"):
+                stub.respond(#"{"error":"Quota refresh timed out"}"#, status: 500)
+            case ("/api/quota", _):
+                stub.respond(#"{"codex":{"ok":true}}"#)
+            default:
+                stub.respond("{}")
+            }
+        }
+        let store = AppStore(api: client)
+        store.setGatewayOnline(true)
+        let started = await store.refresh()
+        XCTAssertTrue(started)
+        let result = await store.refreshManually()
+        XCTAssertEqual(result, false)
+        XCTAssertTrue(store.gatewayOnline)
+        XCTAssertEqual(store.quota?.codex?.ok, true)
+    }
+
+    @MainActor func testQuotaSnapshotsCannotMarkUnconfirmedGatewayOnline() async {
+        let store = AppStore(api: api { stub in stub.respond("{}") })
+        store.setGatewayOnline(true)
+        store.markBackendUnavailable()
+        let result = await store.refreshManually()
+        XCTAssertNil(result)
+        XCTAssertFalse(store.gatewayOnline)
+        store.setGatewayOnline(true)
+        XCTAssertTrue(store.gatewayOnline)
+    }
+
+    @MainActor func testRestartSuppressesOldManualQuotaFailureNotice() async {
+        let held = AuditHeldRequest()
+        let started = expectation(description: "old manual quota request held")
+        let client = api { stub in
+            if stub.request.url?.path == "/api/quota" && held.holdFirst(stub) {
+                started.fulfill()
+            } else {
+                stub.respond("{}")
+            }
+        }
+        let store = AppStore(api: client)
+        store.setGatewayOnline(true)
+        let old = Task { await store.refreshManually() }
+        await fulfillment(of: [started], timeout: 2)
+        store.markBackendUnavailable()
+        store.setGatewayOnline(true)
+        held.respond("not JSON")
+        let result = await old.value
+        XCTAssertNil(result)
+        XCTAssertTrue(store.gatewayOnline)
+    }
+
     @MainActor func testAntigravityEnableAndFirstSampleOnOrdinaryQuotaPoll() async throws {
         let enable = expectation(description: "single boot-bound enable")
         enable.assertForOverFulfill = true

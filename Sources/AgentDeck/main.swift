@@ -1465,6 +1465,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func failRestart(_ status: GatewayRestartStatus) {
         retryAutomaticHandoff = transition.phase == .checking || transition.phase == .handoff
         transition.end()
+        store.setGatewayOnline(false)
         store.gatewayRestart = status
     }
 
@@ -1658,6 +1659,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func finishBackendTransition() {
         if store.gatewayRestart == .restarting { store.gatewayRestart = .recovered }
         transition.end()
+        store.setGatewayOnline(true)
         retryAutomaticHandoff = false
         if restartStoreAfterBackendTransition {
             restartStoreAfterBackendTransition = false
