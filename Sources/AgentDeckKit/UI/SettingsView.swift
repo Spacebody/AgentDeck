@@ -6,6 +6,7 @@ struct SettingsView: View {
     var values: [String: SettingValue] = [:]
     var scrollable: Bool = true
     var page: SettingsPage = .main
+    var quota: QuotaResponse?
     /// 已安装终端（mode, name）；用于「恢复方式」动态选项（对应 v1 /api/terminals）。
     var terminals: [(String, String)] = []
     var onSet: (String, SettingValue) -> Void = { _, _ in }
@@ -41,7 +42,7 @@ struct SettingsView: View {
 
     @ViewBuilder private var pageContent: some View {
         if page == .agents {
-            AgentManagerView(values: values, onSet: onSet, onResetColors: onResetColors)
+            AgentManagerView(values: values, quota: quota, onSet: onSet, onResetColors: onResetColors)
         } else {
             mainContent
         }

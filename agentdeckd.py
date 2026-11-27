@@ -212,6 +212,7 @@ DEFAULT_SETTINGS = {
     "menubar_antigravity": False,
     "menubar_alert_color": True,   # 菜单栏图标按额度变色（≥80% 橙 / ≥95% 红，分段独立）
     "menubar_value_dim": "shortest",  # 菜单栏显示哪个窗口的百分比：shortest/weekly/max
+    **{f"menubar_window_{agent}": "" for agent in AGENT_IDS},
     "menubar_color_dim": "shortest",  # 菜单栏颜色由哪个窗口驱动：shortest/weekly/max
     "menubar_rotate_secs": 6,  # 状态栏单槽轮播间隔（秒）；0=固定当前 Agent/账号
     "claude_dirs": [],         # 手动添加的额外 Claude 配置目录（多账号并行）
@@ -331,6 +332,10 @@ def _clean_settings(body):
             # 仅接受 #rrggbb 或空串（清除）——防 CSS 注入
             if v != "" and not re.fullmatch(r"#[0-9a-fA-F]{6}", v):
                 continue
+        elif k.startswith("menubar_window_"):
+            if v and (not v.startswith(("pct:", "amount:")) or not v.partition(":")[2]
+                      or len(v) > 512 or not v.isprintable()):
+                continue
         elif k in ("menubar_value_dim", "menubar_color_dim"):
             if v not in ("shortest", "weekly", "max"):
                 continue
@@ -412,7 +417,7 @@ def api_settings_save(body):
         "menubar_alert_color", "menubar_value_dim", "menubar_color_dim",
         "menubar_rotate_secs",
     }
-    if quota_keys.intersection(clean):
+    if quota_keys.intersection(clean) or any(k.startswith("menubar_window_") for k in clean):
         _bump_quota_revision()
     if {"show_codex", "menubar_codex", "codex_dirs"}.intersection(clean):
         _codex_quota_manager.request_reconcile()
@@ -3314,6 +3319,7 @@ def api_quota(force=False, cache_only=False, fresh_codex=False):
                         "antigravity": s.get("menubar_antigravity", False),
                         "alert_color": s.get("menubar_alert_color", True),
                         "value_dim": s.get("menubar_value_dim", "shortest"),
+                        "window_by_agent": {a: s.get(f"menubar_window_{a}", "") for a in AGENT_IDS},
                         "color_dim": s.get("menubar_color_dim", "shortest"),
                         "rotate_secs": s.get("menubar_rotate_secs", 0)},
             "quota_revision": revision,

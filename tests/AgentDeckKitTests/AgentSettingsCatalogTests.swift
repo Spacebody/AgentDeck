@@ -2,6 +2,20 @@ import XCTest
 @testable import AgentDeckKit
 
 final class AgentSettingsCatalogTests: XCTestCase {
+    func testMenuWindowsAreSelectableWithoutSamples() {
+        for agent in AgentSettingsCatalog.ids {
+            let choices = AgentSettingsCatalog.windowChoices(agent: agent, quota: nil, selected: "")
+            XCTAssertEqual(choices.first?.id, "")
+            XCTAssertGreaterThan(choices.count, 1, agent)
+            XCTAssertEqual(Set(choices.map(\.id)).count, choices.count)
+            XCTAssertFalse(choices.contains { $0.title.hasPrefix("win.") })
+        }
+        let saved = "amount:future-bucket"
+        let ids = AgentSettingsCatalog.windowChoices(agent: "antigravity", quota: nil, selected: saved).map(\.id)
+        XCTAssertTrue(ids.contains("pct:gemini-weekly"))
+        XCTAssertTrue(ids.contains(saved))
+        XCTAssertFalse(ids.contains("pct:seven_day_sonnet"))
+    }
     func testAgentCatalogOwnsUniqueIDsAndSettingKeys() {
         let agents = AgentSettingsCatalog.all
         XCTAssertEqual(Set(agents.map(\.id)).count, agents.count)

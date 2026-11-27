@@ -10,6 +10,7 @@ class SettingsRoundTripTests(unittest.TestCase):
     def test_panel_preferences_survive_save_and_cold_reload(self):
         choices = {"language": "ja", "terminal": "copy",
                    "menubar_color_dim": "weekly", "menubar_value_dim": "max"}
+        choices.update({f"menubar_window_{agent}": f"pct:{agent}_weekly" for agent in daemon.AGENT_IDS})
         patch = {}
         for key, default in daemon.DEFAULT_SETTINGS.items():
             if isinstance(default, bool):
@@ -29,3 +30,10 @@ class SettingsRoundTripTests(unittest.TestCase):
             daemon._settings_cache = None
             saved = daemon.get_settings()
             self.assertEqual({key: saved[key] for key in patch}, patch)
+
+    def test_menubar_window_reset_amount_and_invalid_ids(self):
+        key = "menubar_window_antigravity"
+        for valid in ("", "amount:credits", "pct:seven_day"):
+            self.assertEqual(daemon._clean_settings({key: valid}), {key: valid})
+        for bad in ("amount:", "seven_day", "pct:bad\n", "pct:" + "a" * 512):
+            self.assertNotIn(key, daemon._clean_settings({key: bad}))

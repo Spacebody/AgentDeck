@@ -595,7 +595,7 @@ public struct AgentDeckRootView: View {
                 }
                 SettingsView(
                     values: store.settings, scrollable: !previewMode,
-                    page: settingsPage,
+                    page: settingsPage, quota: store.quota,
                     terminals: store.terminals.map { ($0.mode, $0.name) },
                     onSet: { store.setSetting($0, $1) },
                     onAction: settingsAction,

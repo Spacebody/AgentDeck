@@ -55,6 +55,38 @@ public enum AgentSettingsCatalog {
     static let menubarKeys = Set(all.map(\.menubarKey))
     static let colorKeys = Set(all.map(\.colorKey))
 
+    static func windowChoices(agent: String, quota: QuotaResponse?, selected: String) -> [PanelChoiceMenu.Choice] {
+        var ids = [""], labels = ["": L("set.windowInherit")]
+        func add(_ id: String, _ label: String) {
+            if labels[id] == nil { ids.append(id) }
+            labels[id] = label
+        }
+        let presets: [String]
+        switch agent {
+        case "claude": presets = ["five_hour", "seven_day", "seven_day_sonnet", "seven_day_opus", "seven_day_oauth_apps"]
+        case "codex": presets = ["five_hour", "seven_day", "five_hour_codex-bengalfox", "seven_day_codex-bengalfox", "primary"]
+        case "qoder", "qoder_cn": presets = ["total", "plan", "add_on", "organization"]
+        case "antigravity": presets = ["gemini-weekly"]
+        default: presets = []
+        }
+        for id in presets {
+            let title = id.hasSuffix("_codex-bengalfox")
+                ? "GPT-5.3-Codex-Spark · " + L(id.hasPrefix("five_hour") ? "win.five_hour" : "win.seven_day")
+                : L("win." + id)
+            add("pct:" + id, title)
+        }
+        for page in quota?.flatPages(visibleAgents: [agent]) ?? [] {
+            for w in page.account.displayWindows { add("pct:" + w.id, w.displayLabel) }
+            for a in page.account.remainingAmounts ?? [] {
+                add("amount:" + a.id, L("set.windowRemaining", ["name": a.label ?? a.id]))
+            }
+        }
+        if labels[selected] == nil {
+            add(selected, String(selected.split(separator: ":", maxSplits: 1).last ?? ""))
+        }
+        return ids.map { .init(id: $0, title: labels[$0]!) }
+    }
+
     static func enabledCount(in values: [String: SettingValue]) -> Int {
         all.reduce(0) {
             $0 + ((values[$1.showKey]?.boolVal ?? $1.defaultShow) ? 1 : 0)
@@ -104,6 +136,7 @@ struct AgentManagerSummary: View {
 
 struct AgentManagerView: View {
     let values: [String: SettingValue]
+    var quota: QuotaResponse?
     let onSet: (String, SettingValue) -> Void
     let onResetColors: () -> Void
     @State private var editingColor: String?
@@ -118,6 +151,7 @@ struct AgentManagerView: View {
             VStack(spacing: 0) {
                 ForEach(Array(AgentSettingsCatalog.all.enumerated()), id: \.element.id) { index, agent in
                     agentRow(agent)
+                    windowPicker(agent)
                     if editingColor == agent.id {
                         AgentPalette(initial: colorBinding(agent).wrappedValue.hexString,
                                      apply: { onSet(agent.colorKey, .string($0)); editingColor = nil },
@@ -148,6 +182,19 @@ struct AgentManagerView: View {
             .frame(maxWidth: .infinity, alignment: .trailing)
         }
         .padding(.top, 4)
+    }
+
+    private func windowPicker(_ agent: AgentSettingDescriptor) -> some View {
+        let key = "menubar_window_" + agent.id
+        let selected = values[key]?.stringVal ?? ""
+        let choices = AgentSettingsCatalog.windowChoices(agent: agent.id, quota: quota, selected: selected)
+        return HStack {
+            Text(L("set.agentWindow")).font(.system(size: 12)).foregroundStyle(Theme.ink2)
+            Spacer()
+            PanelChoiceMenu(title: choices.first { $0.id == selected }!.title, selected: selected, choices: choices) {
+                onSet(key, .string($0))
+            }
+        }.padding(.bottom, 6)
     }
 
     private func agentRow(_ agent: AgentSettingDescriptor) -> some View {

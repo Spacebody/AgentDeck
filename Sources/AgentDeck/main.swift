@@ -1846,6 +1846,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let accounts = json["accounts"] as? [String: Any]
             // 单段（pct）/ 标注账号段（label pct）按需着色
             let valueDim = mb?["value_dim"] as? String ?? "shortest"
+            let pinned = mb?["window_by_agent"] as? [String: String] ?? [:]
             let colorDim = mb?["color_dim"] as? String ?? "shortest"
             func alertFor(_ pct: Double) -> NSColor? {
                 !alertEnabled ? nil : pct >= 95 ? .systemRed
@@ -1871,7 +1872,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     let windows = node["windows"] as? [[String: Any]] ?? []
                     let alert: NSColor?
                     let value: String
-                    if let pct = dimPct(windows, valueDim) {
+                    if let choice = pinned[tool], !choice.isEmpty {
+                        if let window = windows.first(where: { "pct:" + ($0["id"] as? String ?? "") == choice }),
+                           let pct = window["used_percent"] as? Double {
+                            value = String(format: "%.0f%%", pct)
+                            alert = alertFor(dimPct(windows, colorDim) ?? pct)
+                        } else if let amounts = node["remaining_amounts"] as? [[String: Any]],
+                                  let amount = amounts.first(where: { "amount:" + ($0["id"] as? String ?? "") == choice }),
+                                  let remaining = amount["remaining"] as? Double {
+                            value = "\((amount["label"] as? String ?? String(choice.dropFirst(7))).prefix(10)) \(remaining.formatted())"
+                            alert = nil
+                        } else {
+                            value = "—"
+                            alert = nil
+                        }
+                    } else if let pct = dimPct(windows, valueDim) {
                         value = String(format: "%.0f%%", pct)
                         alert = alertFor(dimPct(windows, colorDim) ?? pct)
                     } else if tool == "antigravity", let amount = (node["remaining_amounts"] as? [[String: Any]])?.first,
